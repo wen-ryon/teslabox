@@ -12,5 +12,5 @@ Support TeslaCam, OTA, AP Router, Wireless CarPlay, NAS Backup and more.
 
 🌏 Language
 
-- 🇨🇳 简体中文 → docs/zh-CN/README.md
-- 🇺🇸 English → docs/en/README.md
+- 🇨🇳 [简体中文](docs/zh-CN/README.md)
+- 🇺🇸 [English](docs/en/README.md)
