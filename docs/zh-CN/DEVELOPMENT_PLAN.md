@@ -67,29 +67,40 @@ TeslaBox 不仅仅是一个 TeslaCam 查看工具，而是一个基于 Linux 的
 
 ---
 
-# V0.1 基础框架
+# V0.1 TeslaUSB 核心闭环
 
 预计目标：
 
-完成 Tesla USB 自动识别。
+ROCK 3A 使用外接 128GB U 盘作为 backing store，通过 OTG 向 Tesla 模拟 USB Mass Storage，并在车辆持续录像时从快照读取已完成片段。
+
+硬件、存储和一致性边界见 [TeslaUSB 模拟模式需求](TESLAUSB_REQUIREMENTS.md)。
 
 ## 功能
 
-- [ ] Go 项目初始化
-- [ ] 配置管理
-- [ ] 日志模块
-- [ ] HTTP Server
-- [ ] REST API
-- [ ] USB 自动识别（udev）
-- [ ] 自动挂载
-- [ ] 自动卸载
-- [ ] TeslaCam 检测
-- [ ] 视频扫描
-- [ ] 视频列表 API
+- [x] Go 项目初始化
+- [x] 配置管理
+- [x] 日志模块
+- [x] HTTP Server
+- [x] REST API
+- [x] TeslaCam 文件解析和视频列表 API 原型
+- [x] 通过 UUID 或卷标稳定发现外接数据盘
+- [x] backing store、configfs 和 UDC 只读预检
+- [x] 启动、等待数据盘、准备 backing store、就绪、降级和故障状态模型
+- [x] 数据盘、backing store 和 Gadget 环境状态 API
+- [x] 独立、显式且防误操作的数据盘初始化工具
+- [x] 支持 reflink 的 backing store
+- [ ] 创建并格式化 TeslaCam 虚拟磁盘镜像
+- [ ] configfs USB Mass Storage Gadget
+- [ ] Gadget 绑定、解绑和重启恢复
+- [ ] 写时复制快照、快照文件系统检查和只读挂载
+- [ ] 基于快照的媒体索引原子切换
+- [ ] HTTP Range、单路 MP4 播放和下载
+- [ ] Gadget 运行、快照和索引状态 API
+- [ ] 数据盘掉线、空间不足和快照失败的降级处理
 
 完成后：
 
-用户可以通过 API 查看 TeslaCam 文件列表。
+Tesla 持续录像且 Gadget 不断开时，用户可以通过 API 播放快照中已经写完的 TeslaCam 片段。
 
 ---
 
@@ -116,16 +127,14 @@ TeslaBox 不仅仅是一个 TeslaCam 查看工具，而是一个基于 Linux 的
 
 ---
 
-# V0.3 在线播放
+# V0.3 高级播放
 
 预计目标：
 
-支持视频在线播放。
+完善多摄像头同步播放体验。
 
 ## 功能
 
-- [ ] HTTP Range
-- [ ] MP4 播放
 - [ ] 四路视频同步播放
 - [ ] 时间轴同步
 - [ ] 快进
@@ -311,10 +320,11 @@ Tesla 浏览器运行 CarPlay。
 
 ⭐⭐⭐⭐⭐
 
-- USB 自动识别
-- 自动挂载
-- TeslaCam 扫描
-- 视频 API
+- 外接数据盘安全初始化
+- TeslaCam backing image
+- USB Mass Storage Gadget
+- 一致性快照
+- 车辆持续录像时播放已完成片段
 
 ⭐⭐⭐⭐
 
@@ -341,9 +351,7 @@ Tesla 浏览器运行 CarPlay。
 
 # 开发理念
 
-TeslaBox 的目标不是复刻 TeslaUSB。
-
-TeslaUSB 专注于 **USB 存储模拟**。
+TeslaBox 不会逐行复刻 TeslaUSB 的脚本，但会把可靠的 **USB 存储模拟、快照和异常恢复** 作为第一项核心能力，并使用 Go 重构业务状态机和管理接口。
 
 TeslaBox 更希望成为：
 

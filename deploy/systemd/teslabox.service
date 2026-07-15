@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaBox edge service
+After=local-fs.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/teslabox/teslabox.env
+ExecStart=/usr/local/bin/teslabox
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

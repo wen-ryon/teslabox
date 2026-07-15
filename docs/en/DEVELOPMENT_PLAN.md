@@ -67,29 +67,40 @@ They should be loosely coupled with each other.
 
 ---
 
-# V0.1 Basic Framework
+# V0.1 TeslaUSB Core Loop
 
 Estimated goal:
 
-Implement automatic Tesla USB detection.
+Use the external 128 GB USB drive as the backing store, emulate USB Mass Storage to Tesla through OTG, and read completed clips from snapshots while vehicle recording continues.
+
+See [TeslaUSB Emulation Requirements](TESLAUSB_REQUIREMENTS.md) for the hardware, storage, and consistency boundaries.
 
 ## Features
 
-- [ ] Go project initialization
-- [ ] Configuration management
-- [ ] Logging module
-- [ ] HTTP Server
-- [ ] REST API
-- [ ] Automatic USB detection (udev)
-- [ ] Auto mount
-- [ ] Auto unmount
-- [ ] TeslaCam detection
-- [ ] Video scanning
-- [ ] Video list API
+- [x] Go project initialization
+- [x] Configuration management
+- [x] Logging module
+- [x] HTTP Server
+- [x] REST API
+- [x] TeslaCam parser and video-list API prototype
+- [x] Discover the external data drive by UUID or label
+- [x] Read-only backing store, configfs, and UDC preflight
+- [x] Starting, waiting, preparing, ready, degraded, and fault state model
+- [x] Data-drive, backing-store, and Gadget-environment status API
+- [x] Separate, explicit, and guarded data-drive initializer
+- [x] Reflink-capable backing store
+- [ ] Create and format the TeslaCam virtual disk image
+- [ ] configfs USB Mass Storage Gadget
+- [ ] Idempotent Gadget bind, unbind, and restart recovery
+- [ ] Copy-on-write snapshot, filesystem check, and read-only mount
+- [ ] Atomic media-index switch between snapshots
+- [ ] HTTP Range, single-camera MP4 playback, and download
+- [ ] Active Gadget, snapshot, and index status APIs
+- [ ] Degraded handling for drive disconnect, low space, and snapshot failure
 
 After completion:
 
-Users can view TeslaCam file lists via API.
+Users can play completed TeslaCam clips from a snapshot while Tesla keeps recording and Gadget stays connected.
 
 ---
 
@@ -116,16 +127,14 @@ Users can view TeslaCam through a browser.
 
 ---
 
-# V0.3 Online Playback
+# V0.3 Advanced Playback
 
 Estimated goal:
 
-Support online video playback.
+Complete the synchronized multi-camera playback experience.
 
 ## Features
 
-- [ ] HTTP Range
-- [ ] MP4 playback
 - [ ] Four-channel synchronized playback
 - [ ] Timeline synchronization
 - [ ] Fast forward
@@ -311,10 +320,11 @@ May include:
 
 ⭐⭐⭐⭐⭐
 
-- USB auto detection
-- Auto mount
-- TeslaCam scanning
-- Video API
+- Safe external data-drive initialization
+- TeslaCam backing image
+- USB Mass Storage Gadget
+- Consistent snapshots
+- Play completed clips while vehicle recording continues
 
 ⭐⭐⭐⭐
 
@@ -341,9 +351,7 @@ May include:
 
 # Development Philosophy
 
-TeslaBox is not meant to replicate TeslaUSB.
-
-TeslaUSB focuses on **USB storage emulation**.
+TeslaBox does not copy TeslaUSB scripts line by line. It adopts reliable **USB storage emulation, snapshots, and failure recovery** as its first core capability, while rebuilding the business state machine and management APIs in Go.
 
 TeslaBox aspires to be:
 

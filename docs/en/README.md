@@ -2,6 +2,11 @@
 
 ## Tesla USB
 
+TeslaBox emulates USB Mass Storage to Tesla through the ROCK 3A OTG port. The microSD card runs Debian only; an external 128 GB USB drive stores the TeslaCam virtual disk, snapshots, and media index.
+
+- Browse completed clips from consistent snapshots while Tesla keeps recording
+- MP4 files still being written are not guaranteed to play; live camera streaming is out of scope
+
 - Remote TeslaCam browser
 - Online TeslaCam playback
 - Download TeslaCam videos
@@ -9,6 +14,8 @@
 - Video thumbnails
 - Search by date/event
 - RecentClips / SavedClips management
+
+See [TeslaUSB Emulation Requirements](TESLAUSB_REQUIREMENTS.md) for the authoritative scope.
 
 Future USB Features:
 
@@ -87,8 +94,9 @@ Automatic backup to:
 - Radxa ROCK 3A
 - RK3568
 - 2GB RAM
-- microSD / NVMe
-- Original Tesla USB Drive (128GB)
+- microSD card: Debian and TeslaBox
+- External Tesla USB drive (128 GB): virtual disk, snapshots, and media index
+- NVMe: optional future Debian system disk
 
 ## Expansion
 
@@ -136,10 +144,13 @@ Dnsmasq
 
 ## Phase 1
 
-- [ ] Tesla USB Detection
-- [ ] Auto Mount
-- [ ] TeslaCam Scanner
-- [ ] Video API
+- [x] Go service, stable data-drive discovery, read-only preflight, and status API
+- [x] TeslaCam scanner and video API prototypes
+- [ ] Explicit external data-drive initialization
+- [ ] TeslaCam backing image
+- [ ] USB Mass Storage Gadget
+- [ ] Consistent snapshot and read-only mount
+- [ ] Play completed clips while vehicle recording continues
 
 ## Phase 2
 
@@ -166,23 +177,22 @@ Dnsmasq
 # Hardware Diagram
 
 ```text
-            Tesla
-              │
-              │
-       Tesla USB Drive
-              │
-              ▼
-        Radxa ROCK 3A
-              │
-   ┌──────────┴──────────┐
-   │                     │
-MT7922              4G/5G Module
-   │                     │
-AP WiFi           Mobile Internet
-   │                     │
-   └──────────┬──────────┘
-              │
-           TeslaBox
+Tesla dashcam USB port
+          │
+          │ USB Mass Storage
+          ▼
+ROCK 3A USB OTG device port
+          │
+          │ USB Gadget
+          ▼
+TeslaCam virtual disk image
+          │
+          ▼
+ROCK 3A USB host port ── external 128 GB USB drive
+
+ROCK 3A microSD ── Debian and TeslaBox
+ROCK 3A M.2 E-Key ── MT7922 ── Wi-Fi AP
+ROCK 3A USB ── 4G/5G modem ── mobile network
 ```
 
 ---

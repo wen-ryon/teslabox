@@ -2,6 +2,11 @@
 
 ## Tesla USB
 
+TeslaBox 通过 ROCK 3A 的 USB OTG 口向 Tesla 模拟 USB Mass Storage。TF 卡只运行 Debian，外接 128GB U 盘保存 TeslaCam 虚拟磁盘、快照和媒体索引。
+
+- Tesla 持续写入虚拟磁盘时，从一致性快照在线查看已完成片段
+- 当前仍在写入的 MP4 不保证可播放，不提供摄像头实时直播
+
 - 远程 TeslaCam 浏览器
 - 在线 TeslaCam 回放
 - 下载 TeslaCam 视频
@@ -9,6 +14,8 @@
 - 视频缩略图
 - 按日期/事件搜索
 - 最近片段 / 已保存片段管理
+
+详细需求见 [TeslaUSB 模拟模式需求](TESLAUSB_REQUIREMENTS.md)。
 
 未来 USB 功能：
 
@@ -87,8 +94,9 @@ Tesla 浏览器自动启动 CarPlay 网页界面。
 - Radxa ROCK 3A
 - RK3568
 - 2GB 内存
-- microSD / NVMe
-- 原装 Tesla USB 硬盘（128GB）
+- microSD/TF 卡：运行 Debian 和 TeslaBox
+- 外接 Tesla U 盘（128GB）：保存虚拟磁盘、快照和媒体索引
+- NVMe：后续可选的 Debian 系统盘
 
 ## 扩展
 
@@ -136,10 +144,13 @@ Dnsmasq
 
 ## 第一阶段
 
-- [ ] Tesla USB 检测
-- [ ] 自动挂载
-- [ ] TeslaCam 扫描器
-- [ ] 视频 API
+- [x] Go 服务、稳定数据盘发现、只读环境预检和状态 API
+- [x] TeslaCam 扫描器和视频 API 原型
+- [ ] 外接数据盘显式初始化
+- [ ] TeslaCam backing image
+- [ ] USB Mass Storage Gadget
+- [ ] 一致性快照和只读挂载
+- [ ] 车辆持续录像时播放已完成片段
 
 ## 第二阶段
 
@@ -166,23 +177,22 @@ Dnsmasq
 # 硬件架构图
 
 ```text
-            Tesla
-              │
-              │
-       Tesla USB Drive
-              │
-              ▼
-        Radxa ROCK 3A
-              │
-   ┌──────────┴──────────┐
-   │                     │
-MT7922              4G/5G Module
-   │                     │
-AP WiFi           Mobile Internet
-   │                     │
-   └──────────┬──────────┘
-              │
-           TeslaBox
+Tesla 行车记录仪 USB 口
+          │
+          │ USB Mass Storage
+          ▼
+ROCK 3A USB OTG Device 口
+          │
+          │ USB Gadget
+          ▼
+TeslaCam 虚拟磁盘镜像
+          │
+          ▼
+ROCK 3A USB Host 口 ── 外接 128GB U 盘
+
+ROCK 3A TF 卡 ── Debian 和 TeslaBox
+ROCK 3A M.2 E-Key ── MT7922 ── Wi-Fi AP
+ROCK 3A USB ── 4G/5G 模块 ── 移动网络
 ```
 
 ---

@@ -1,0 +1,163 @@
+# TeslaUSB Emulation Requirements
+
+This document is the requirements baseline for the first core TeslaBox feature. If another README, architecture document, or development plan conflicts with it, this document takes precedence.
+
+## Goal
+
+TeslaBox replaces a USB drive directly attached to the vehicle. ROCK 3A emulates USB Mass Storage through USB Gadget, while the vehicle records continuously. Users can browse and play completed TeslaCam clips through the TeslaBox web interface without interrupting recording.
+
+"Record while playing" means:
+
+- Vehicle recording remains uninterrupted.
+- The web interface plays MP4 files that have been closed and are fully readable.
+- An MP4 file that is still being written is not guaranteed to play.
+- This is not a live camera stream.
+
+## Confirmed Hardware Architecture
+
+```text
+Tesla dashcam USB port
+          │
+          │ USB Mass Storage
+          ▼
+ROCK 3A USB OTG device port
+          │
+          │ Linux USB Gadget
+          ▼
+TeslaCam virtual disk image
+          │
+          │ images, snapshots, and index
+          ▼
+ROCK 3A USB host port ── external 128 GB USB drive
+
+ROCK 3A microSD card ── Debian and the TeslaBox application
+```
+
+Constraints:
+
+- The microSD card runs Debian and the application only. It must not store the TeslaCam image, recording snapshots, or media index.
+- The external 128 GB USB drive is the current recording data medium.
+- Debian may later move to NVMe without changing the TeslaUSB data model or upper-level APIs.
+- The external data drive is a fixed component while recording. Removing it is a fault, not a normal workflow.
+
+## Storage Model
+
+The existing TeslaCam partition is not passed through directly. Linux manages the external drive as a backing store:
+
+```text
+external 128 GB USB drive
+└── reflink-capable Linux filesystem
+    ├── images/
+    │   └── teslacam.img
+    ├── snapshots/
+    ├── index/
+    └── state/
+```
+
+`teslacam.img` contains a Tesla-compatible filesystem and directory layout. USB Gadget exposes this image to the vehicle, so the physical data still resides on the external USB drive.
+
+Rules:
+
+- Data-drive initialization may repartition or format the drive and therefore requires an explicit user action. Service startup must never do this automatically.
+- Existing recordings must be backed up before initialization.
+- The virtual disk must leave capacity for copy-on-write snapshots and runtime state.
+- Linux must never mount the writable image while it is exposed to the vehicle.
+- Media indexes, snapshots, and high-write runtime state belong on the external data drive to reduce microSD writes.
+- Stable identifiers must locate the data drive, images, snapshots, and mount points; `/dev/sdX` names are not stable identifiers.
+
+Virtual disk size, filesystem type, label, snapshot interval, and retention are deployment parameters whose defaults require board and vehicle testing.
+
+## USB Gadget
+
+TeslaBox manages USB Mass Storage Gadget through configfs:
+
+- Validate UDC, configfs, and the mass-storage function before startup.
+- Point the LUN at `teslacam.img`, never at a filesystem mounted by Linux.
+- Bind and unbind operations must be idempotent and recover after service restart.
+- Do not expose a LUN when the backing image is unavailable or the data drive has failed.
+- Stop providing the LUN after a data-drive disconnect to limit further corruption.
+
+## Consistent Snapshots and Online Viewing
+
+Online viewing reads a consistent snapshot:
+
+```text
+vehicle writes teslacam.img
+             │
+             ├── create copy-on-write snapshot
+             ▼
+       snapshot.img
+             │
+             ├── check or repair the snapshot filesystem
+             ├── mount read-only
+             ├── scan TeslaCam and TeslaTrackMode
+             └── serve list, playback, and download APIs
+```
+
+Rules:
+
+- Snapshot creation and reading must not unbind the active Gadget.
+- A snapshot must be independent of the image still being written.
+- Mount snapshots read-only; filesystem repair may only modify the snapshot copy.
+- APIs return only media files that are complete and readable in a snapshot.
+- Switch the media index atomically after a new snapshot becomes available. Do not delete an old snapshot while it is still serving a playback request.
+- Snapshot failure must not interrupt vehicle recording. Keep the last usable snapshot and expose a degraded state.
+- Enforce snapshot space and retention limits.
+
+## First-Stage TeslaCam Scope
+
+- `RecentClips`
+- `SavedClips`
+- `SentryClips`
+- `TeslaTrackMode`
+- Queries by date, event, and camera
+- Single-camera MP4 playback and download
+- Storage, Gadget, snapshot, and index status
+
+Later stages add synchronized multi-camera playback, thumbnails, timelines, NAS backup, and Tesla USB resource management.
+
+## State Machine
+
+```text
+STARTING
+  ↓
+WAITING_FOR_DATA_DRIVE
+  ↓
+PREPARING_BACKING_STORE
+  ↓
+GADGET_ACTIVE
+  ├── SNAPSHOT_CREATING
+  ├── SNAPSHOT_READY
+  └── DEGRADED
+
+any state ── severe storage fault ──> FAULT
+```
+
+State changes must be visible in logs and APIs. Service exits, restarts, repeated udev events, and unexpected power loss must converge without reformatting, duplicate Gadgets, or writable mounts left behind.
+
+## Safety Boundaries
+
+- Never let Tesla and Linux mount the same writable filesystem concurrently.
+- Never format, repartition, or delete recordings implicitly at service startup.
+- A destructive initializer must show the stable drive identifier, size, and model and run as a separate explicit operation.
+- Do not expose delete, format, or forced Gadget disconnect APIs in the first stage.
+- Report low space, read-only media, I/O errors, and disconnects explicitly.
+
+## First-Stage Acceptance Criteria
+
+1. ROCK 3A boots Debian from microSD without writing TeslaCam data to it.
+2. The explicitly initialized external 128 GB USB drive stores the virtual disk image.
+3. ROCK 3A exposes stable USB Mass Storage to a test host or Tesla through OTG.
+4. TeslaBox creates and read-only mounts a snapshot while the host writes the virtual disk.
+5. The API or web interface plays a completed MP4 from a snapshot while Gadget remains connected and writable.
+6. Service restart restores Gadget, snapshot, and index state.
+7. Drive disconnect, low space, or snapshot failure never triggers automatic formatting or silent data loss.
+
+## Out of Scope for the First Stage
+
+- Playing an MP4 that is still being written.
+- Low-latency live camera streaming.
+- Automatically migrating existing recordings before formatting the original drive.
+- Remotely formatting the data drive through the web interface.
+- Low-bitrate transcoding for NAS, cloud, or relay access.
+

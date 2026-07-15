@@ -22,6 +22,28 @@
      Storage
 ```
 
+See [TeslaUSB Emulation Requirements](TESLAUSB_REQUIREMENTS.md) for the authoritative scope of the first core feature.
+
+---
+
+# Confirmed Hardware Architecture
+
+```text
+Tesla dashcam USB port
+          │
+          │ USB Mass Storage
+          ▼
+ROCK 3A USB OTG device port
+          │
+          │ configfs USB Gadget
+          ▼
+TeslaCam virtual disk image on external 128 GB USB drive
+
+ROCK 3A microSD ── Debian and TeslaBox
+```
+
+The microSD card does not store the TeslaCam image, recording snapshots, or media index. The external drive connects through a USB host port and remains a fixed data drive. Moving Debian to NVMe later does not change this data model.
+
 ---
 
 # Network Architecture
@@ -76,9 +98,9 @@ No inbound ports required.
 ├──────────────────────────────┤
 │ USB │ OTA │ CarPlay │ NAS    │
 ├──────────────────────────────┤
-│ Mount │ TeslaCam │ Network   │
+│ Gadget │ Snapshot │ TeslaCam │
 ├──────────────────────────────┤
-│ udev │ systemd │ Linux BSP   │
+│ configfs │ udev │ Linux BSP  │
 └──────────────────────────────┘
 ```
 
@@ -96,7 +118,9 @@ teslabox/
 ├── internal/
 │   ├── api/
 │   ├── usb/
+│   ├── gadget/
 │   ├── mount/
+│   ├── snapshot/
 │   ├── teslacam/
 │   ├── network/
 │   ├── transport/
@@ -119,69 +143,41 @@ teslabox/
 
 # Tesla USB Flow
 
-Tesla USB Inserted
+```text
+discover and validate external data drive
+          ↓
+prepare TeslaCam virtual disk image
+          ↓
+create Mass Storage Gadget through configfs
+          ↓
+bind UDC; Tesla writes the virtual disk
+          ↓
+create a copy-on-write snapshot of the active image
+          ↓
+check the snapshot filesystem and mount read-only
+          ↓
+scan completed TeslaCam clips and atomically switch the index
+          ↓
+REST API / Web UI
+```
 
-↓
-
-udev Event
-
-↓
-
-USB Manager
-
-↓
-
-Filesystem Check
-
-↓
-
-Auto Mount
-
-↓
-
-TeslaCam Detection
-
-↓
-
-Media Scan
-
-↓
-
-Thumbnail
-
-↓
-
-Metadata
-
-↓
-
-REST API
-
-↓
-
-Web UI
+First-time data-drive initialization is a separate explicit operation. Normal service startup must never repartition or format the drive.
 
 ---
 
 # Video Playback
 
-Tesla USB
+```text
+Tesla writes the active image
+          │
+          └── consistent snapshot ──> completed MP4 ──> HTTP Range ──> browser
+```
 
-↓
-
-Original MP4
-
-↓
-
-HTTP Range
-
-↓
-
-Browser
+The web application never reads or mounts the writable image exposed to Tesla. An MP4 still being written is not guaranteed to play. "Record while playing" means recording continues while completed clips are served from a snapshot.
 
 Remote mode:
 
-Tesla USB
+Read-only snapshot
 
 ↓
 
