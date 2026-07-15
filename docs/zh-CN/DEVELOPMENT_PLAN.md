@@ -89,14 +89,17 @@ ROCK 3A 使用外接 128GB U 盘作为 backing store，通过 OTG 向 Tesla 模�
 - [x] 数据盘、backing store 和 Gadget 环境状态 API
 - [x] 独立、显式且防误操作的数据盘初始化工具
 - [x] 支持 reflink 的 backing store
-- [ ] 创建并格式化 TeslaCam 虚拟磁盘镜像
-- [ ] configfs USB Mass Storage Gadget
-- [ ] Gadget 绑定、解绑和重启恢复
+- [x] 创建并格式化 TeslaCam 虚拟磁盘镜像
+- [x] configfs USB Mass Storage Gadget
+- [x] Gadget 绑定、解绑和重启恢复
+- [x] Windows 主机枚举、exFAT 读写和冷启动恢复验收
+- [ ] 缺盘启动、数据盘热插入自动挂载和 Gadget 自动恢复
+- [ ] Gadget 活动期间数据盘掉线检测、LUN 停止和故障告警
 - [ ] 写时复制快照、快照文件系统检查和只读挂载
 - [ ] 基于快照的媒体索引原子切换
 - [ ] HTTP Range、单路 MP4 播放和下载
 - [ ] Gadget 运行、快照和索引状态 API
-- [ ] 数据盘掉线、空间不足和快照失败的降级处理
+- [ ] 空间不足和快照失败的降级处理
 
 完成后：
 

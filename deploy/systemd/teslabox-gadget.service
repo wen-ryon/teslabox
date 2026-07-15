@@ -1,0 +1,17 @@
+[Unit]
+Description=TeslaBox USB Mass Storage Gadget
+After=local-fs.target
+Before=teslabox.service
+RequiresMountsFor=/var/lib/teslabox
+ConditionPathExists=/var/lib/teslabox/images/teslacam.img
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/teslabox-gadget --action start --release-gadget radxa-otgutils --execute
+ExecStop=/usr/local/bin/teslabox-gadget --action stop --execute
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

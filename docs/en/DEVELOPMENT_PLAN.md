@@ -89,14 +89,17 @@ See [TeslaUSB Emulation Requirements](TESLAUSB_REQUIREMENTS.md) for the hardware
 - [x] Data-drive, backing-store, and Gadget-environment status API
 - [x] Separate, explicit, and guarded data-drive initializer
 - [x] Reflink-capable backing store
-- [ ] Create and format the TeslaCam virtual disk image
-- [ ] configfs USB Mass Storage Gadget
-- [ ] Idempotent Gadget bind, unbind, and restart recovery
+- [x] Create and format the TeslaCam virtual disk image
+- [x] configfs USB Mass Storage Gadget
+- [x] Idempotent Gadget bind, unbind, and restart recovery
+- [x] Windows host enumeration, exFAT read/write, and cold-boot recovery acceptance
+- [ ] Diskless boot, automatic late data-drive mount, and Gadget recovery
+- [ ] Active data-drive disconnect detection, LUN shutdown, and fault alerting
 - [ ] Copy-on-write snapshot, filesystem check, and read-only mount
 - [ ] Atomic media-index switch between snapshots
 - [ ] HTTP Range, single-camera MP4 playback, and download
 - [ ] Active Gadget, snapshot, and index status APIs
-- [ ] Degraded handling for drive disconnect, low space, and snapshot failure
+- [ ] Degraded handling for low space and snapshot failure
 
 After completion:
 

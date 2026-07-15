@@ -100,7 +100,7 @@ func (i *OSInspector) Inspect(ctx context.Context, options Options) (Environment
 	}
 	environment.FileSystem = fields[1]
 
-	xfsOutput, err := i.runner.Run(ctx, "/usr/sbin/xfs_info", resolvedRoot)
+	xfsOutput, err := i.runner.Run(ctx, "/usr/sbin/xfs_spaceman", "-c", "info", resolvedRoot)
 	if err != nil {
 		return Environment{}, fmt.Errorf("读取 XFS 特性: %w", err)
 	}
@@ -210,7 +210,7 @@ func (i *Initializer) Run(ctx context.Context, options Options) (result Result, 
 			}
 		}
 	}()
-	if _, err = i.runner.Run(ctx, "mount", partition, mountPath); err != nil {
+	if _, err = i.runner.Run(ctx, "/sbin/mount.exfat-fuse", partition, mountPath); err != nil {
 		return result, fmt.Errorf("挂载 TeslaCam 分区: %w", err)
 	}
 	mounted = true
@@ -276,7 +276,7 @@ func buildPlan(imagePath string, options Options) []Command {
 		{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "1MiB", "100%"}},
 		{Name: "losetup", Args: []string{"--find", "--show", "--partscan", imagePath}},
 		{Name: "mkfs.exfat", Args: []string{"-L", options.Label, "<loop-device>p1"}},
-		{Name: "mount", Args: []string{"<loop-device>p1", "<temporary-mount>"}},
+		{Name: "/sbin/mount.exfat-fuse", Args: []string{"<loop-device>p1", "<temporary-mount>"}},
 		{Name: "mkdir", Args: []string{"<temporary-mount>/TeslaCam"}},
 		{Name: "sync"},
 		{Name: "umount", Args: []string{"<temporary-mount>"}},

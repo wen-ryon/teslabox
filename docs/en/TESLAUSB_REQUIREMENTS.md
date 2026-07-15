@@ -74,8 +74,10 @@ TeslaBox manages USB Mass Storage Gadget through configfs:
 - Validate UDC, configfs, and the mass-storage function before startup.
 - Point the LUN at `teslacam.img`, never at a filesystem mounted by Linux.
 - Bind and unbind operations must be idempotent and recover after service restart.
+- Debian must still boot without the data drive, enter `WAITING_FOR_DATA_DRIVE`, and expose no empty LUN without blocking startup indefinitely.
+- When an initialized data drive with the configured stable identity is inserted after boot, the system must mount it, revalidate the backing image, and start Gadget automatically without a reboot or manual systemctl command. This path must never format an unknown or uninitialized drive.
 - Do not expose a LUN when the backing image is unavailable or the data drive has failed.
-- Stop providing the LUN after a data-drive disconnect to limit further corruption.
+- If the active data drive disconnects while Gadget is running, enter a fault state, make a best effort to unbind the UDC, stop providing the LUN, and emit an explicit alert. After the drive returns, repeat identity, mount, and image validation instead of reusing stale state.
 
 ## Consistent Snapshots and Online Viewing
 
@@ -135,6 +137,8 @@ any state ── severe storage fault ──> FAULT
 
 State changes must be visible in logs and APIs. Service exits, restarts, repeated udev events, and unexpected power loss must converge without reformatting, duplicate Gadgets, or writable mounts left behind.
 
+Data-drive hotplug must drive state convergence: remain in `WAITING_FOR_DATA_DRIVE` after a diskless boot, enter `GADGET_ACTIVE` after a matching drive is inserted and validated, and enter `FAULT` while stopping LUN exposure if the active drive disconnects.
+
 ## Safety Boundaries
 
 - Never let Tesla and Linux mount the same writable filesystem concurrently.
@@ -152,6 +156,8 @@ State changes must be visible in logs and APIs. Service exits, restarts, repeate
 5. The API or web interface plays a completed MP4 from a snapshot while Gadget remains connected and writable.
 6. Service restart restores Gadget, snapshot, and index state.
 7. Drive disconnect, low space, or snapshot failure never triggers automatic formatting or silent data loss.
+8. A diskless boot does not block Debian; inserting the initialized data drive after boot automatically mounts it and restores Gadget without a reboot or manual service start.
+9. Removing the active data drive is detected, stops LUN exposure, and reports the fault through logs and APIs.
 
 ## Out of Scope for the First Stage
 
@@ -160,4 +166,3 @@ State changes must be visible in logs and APIs. Service exits, restarts, repeate
 - Automatically migrating existing recordings before formatting the original drive.
 - Remotely formatting the data drive through the web interface.
 - Low-bitrate transcoding for NAS, cloud, or relay access.
-
