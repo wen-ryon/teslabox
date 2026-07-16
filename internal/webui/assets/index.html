@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260716-7">
-  <script src="/app.js?v=20260716-7" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260716-8">
+  <script src="/app.js?v=20260716-8" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -31,7 +31,8 @@
       </a>
       <div class="top-actions">
         <span id="live-indicator" class="live-indicator"><i></i><span>正在连接</span></span>
-        <label class="theme-control"><span>强调色</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
+        <span id="internet-indicator" class="internet-indicator"><i></i><span>检测互联网</span></span>
+        <label class="theme-control"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
         <button id="logout-button" class="ghost compact" type="button">退出</button>
       </div>
     </header>
@@ -47,15 +48,33 @@
       </section>
 
       <section class="status-grid" aria-label="设备状态">
+        <article class="status-card">
+          <span>设备温度</span>
+          <strong id="temperature-value">—</strong>
+          <p id="temperature-detail" class="muted">读取中</p>
+        </article>
+        <article class="status-card">
+          <span>CPU 占用</span>
+          <strong id="cpu-value">—</strong>
+          <div class="progress" aria-hidden="true"><i id="cpu-progress"></i></div>
+          <p id="cpu-detail" class="muted">读取中</p>
+        </article>
         <article class="status-card status-card-wide">
           <div class="status-card-head"><span>USB 连接</span><span id="usb-badge" class="badge">检查中</span></div>
           <strong id="usb-title">正在读取 Gadget 状态</strong>
           <p id="usb-detail" class="muted">—</p>
         </article>
         <article class="status-card">
-          <span>可用录像</span>
-          <strong id="video-count">—</strong>
-          <p class="muted">个单路视频文件</p>
+          <span>内存占用</span>
+          <strong id="memory-value">—</strong>
+          <div class="progress" aria-hidden="true"><i id="memory-progress"></i></div>
+          <p id="memory-detail" class="muted">读取中</p>
+        </article>
+        <article class="status-card">
+          <span>系统盘占用</span>
+          <strong id="system-disk-value">—</strong>
+          <div class="progress" aria-hidden="true"><i id="system-disk-progress"></i></div>
+          <p id="system-disk-detail" class="muted">读取中</p>
         </article>
         <article class="status-card">
           <span>数据盘空间</span>
@@ -64,8 +83,8 @@
           <p id="space-detail" class="muted">—</p>
         </article>
         <article class="status-card">
-          <span>媒体快照</span>
-          <strong id="snapshot-state">—</strong>
+          <div class="status-card-head"><span>媒体快照</span><span id="snapshot-state" class="badge">检查中</span></div>
+          <strong id="video-count">—</strong>
           <p id="snapshot-detail" class="muted">—</p>
         </article>
       </section>

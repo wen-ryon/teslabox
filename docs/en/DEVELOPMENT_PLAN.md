@@ -126,12 +126,14 @@ Implement basic Web UI.
 - [ ] Video thumbnails
 - [x] Filter by clip type, date, and event
 - [x] System status page
+- [x] Show internet connectivity, temperature, CPU, memory, system-disk, and data-disk status on the dashboard
 - [x] Pure-black background with blue, green, and red accent switching
 - [x] Group six cameras by recording moment with a two-second tolerance
 - [x] Merge continuous minute files into complete recording sessions
 - [x] Organize recordings as a vertical timeline by month, rolling seven-day period, or day
 - [x] Composite six cameras in one viewport with one timeline and optional single-camera playback
 - [x] Parse `event.json` and display event time, location, reason, and timeline markers
+- [x] Warn only when a recording is missing camera views, and place event location beside its duration
 
 After completion:
 

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/wen-ryon/teslabox/internal/systeminfo"
 	"github.com/wen-ryon/teslabox/internal/webauth"
 )
 
@@ -34,6 +35,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	if err != nil {
 		panic("嵌入 Web 资源目录无效")
 	}
+	systemCollector := systeminfo.NewCollector()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", serveEmbedded(assetFS, "index.html", "text/html; charset=utf-8", "no-store"))
 	mux.HandleFunc("GET /app.css", serveEmbedded(assetFS, "app.css", "text/css; charset=utf-8", "no-cache"))
@@ -79,6 +81,9 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 	})
 	protectedAPI := requireAuth(apiHandler, authenticator)
+	mux.Handle("GET /api/v1/system", requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, systemCollector.Collect(r.Context()))
+	}), authenticator))
 	mux.Handle("GET /api/v1/", protectedAPI)
 	mux.Handle("POST /api/v1/", protectedAPI)
 	mux.Handle("GET /healthz", apiHandler)

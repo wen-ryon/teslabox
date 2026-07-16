@@ -126,10 +126,16 @@ async function refreshAll() {
 
 async function loadStatus() {
   try {
-    const storage = await request("/api/v1/storage");
+    const [storageResult, systemResult] = await Promise.allSettled([
+      request("/api/v1/storage"), request("/api/v1/system"),
+    ]);
+    if (storageResult.status === "rejected") throw storageResult.reason;
+    const storage = storageResult.value;
     renderStatus(storage);
     $("live-indicator").classList.add("online");
-    $("live-indicator").querySelector("span").textContent = "服务在线";
+    $("live-indicator").querySelector("span").textContent = "已连接";
+    if (systemResult.status === "fulfilled") renderSystemStatus(systemResult.value);
+    else renderSystemUnavailable();
   } catch (error) {
     $("live-indicator").classList.remove("online");
     $("live-indicator").querySelector("span").textContent = "连接异常";
@@ -154,7 +160,7 @@ function renderStatus(storage) {
     $("usb-title").textContent = "USB Gadget 未绑定";
   }
   $("usb-detail").textContent = `${gadget.udc_state || "状态未知"} · ${storage.phase || "UNKNOWN"}`;
-  $("video-count").textContent = formatNumber(storage.video_count || 0);
+  $("video-count").textContent = `${formatNumber(storage.video_count || 0)} 个`;
 
   const space = storage.snapshot_space || {};
   const freePercent = Number(space.free_percent || 0);
@@ -164,8 +170,76 @@ function renderStatus(storage) {
   $("space-detail").textContent = `可用 ${freePercent.toFixed(1)}% · 总计 ${formatBytes(space.total_bytes || 0)}`;
 
   const snapshot = storage.media_snapshot;
+  $("snapshot-state").className = "badge";
   $("snapshot-state").textContent = snapshot ? "可播放" : "尚未建立";
-  $("snapshot-detail").textContent = storage.snapshot_error || (snapshot ? formatDate(snapshot.created_at) : "等待首次快照");
+  $("snapshot-state").classList.add(snapshot ? "ok" : "error");
+  $("snapshot-detail").textContent = storage.snapshot_error || (snapshot ? `单路视频 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照");
+}
+
+function renderSystemStatus(system) {
+  const indicator = $("internet-indicator");
+  indicator.className = `internet-indicator ${system.internet_available ? "online" : "offline"}`;
+  indicator.querySelector("span").textContent = system.internet_available ? "互联网" : "无互联网";
+
+  const temperature = Number(system.temperature_c);
+  const temperatureValue = $("temperature-value");
+  temperatureValue.className = "";
+  if (Number.isFinite(temperature)) {
+    temperatureValue.textContent = `${temperature.toFixed(1)}°C`;
+    const level = temperature >= 85 ? "danger" : temperature >= 70 ? "warning" : "normal";
+    temperatureValue.classList.toggle("metric-warning", level === "warning");
+    temperatureValue.classList.toggle("metric-danger", level === "danger");
+    $("temperature-detail").textContent = ({normal:"温度正常", warning:"温度偏高", danger:"温度过高"})[level];
+  } else {
+    temperatureValue.textContent = "—";
+    $("temperature-detail").textContent = "传感器不可用";
+  }
+  renderUsage("cpu", system.cpu_used_percent, system.uptime_seconds);
+  renderCapacityUsage("memory", system.memory);
+  renderCapacityUsage("system-disk", system.system_disk);
+}
+
+function renderSystemUnavailable() {
+  const indicator = $("internet-indicator");
+  indicator.className = "internet-indicator unknown";
+  indicator.querySelector("span").textContent = "网络状态未知";
+  for (const prefix of ["cpu", "memory", "system-disk"]) {
+    $(`${prefix}-value`).textContent = "—";
+    $(`${prefix}-progress`).style.width = "0";
+    $(`${prefix}-detail`).textContent = "状态接口不可用";
+  }
+  $("temperature-value").textContent = "—";
+  $("temperature-detail").textContent = "状态接口不可用";
+}
+
+function renderUsage(prefix, percentValue, uptimeSeconds) {
+  const percent = Number(percentValue);
+  if (!Number.isFinite(percent)) {
+    $(`${prefix}-value`).textContent = "—";
+    $(`${prefix}-progress`).style.width = "0";
+    $(`${prefix}-detail`).textContent = "等待下一次采样";
+    return;
+  }
+  renderPercent(prefix, percent);
+  $(`${prefix}-detail`).textContent = `已运行 ${formatUptime(uptimeSeconds)}`;
+}
+
+function renderCapacityUsage(prefix, usage) {
+  if (!usage || !Number(usage.total_bytes)) {
+    $(`${prefix}-value`).textContent = "—";
+    $(`${prefix}-progress`).style.width = "0";
+    $(`${prefix}-detail`).textContent = "状态不可用";
+    return;
+  }
+  renderPercent(prefix, Number(usage.used_percent || 0));
+  $(`${prefix}-detail`).textContent = `${formatBytes(usage.used_bytes)} / ${formatBytes(usage.total_bytes)}`;
+}
+
+function renderPercent(prefix, value) {
+  const percent = Math.max(0, Math.min(100, value));
+  $(`${prefix}-value`).textContent = `${percent.toFixed(1)}%`;
+  $(`${prefix}-progress`).style.width = `${percent}%`;
+  $(`${prefix}-progress`).style.background = percent >= 90 ? "var(--danger)" : percent >= 75 ? "var(--warning)" : "var(--ok)";
 }
 
 async function loadSessions() {
@@ -224,14 +298,24 @@ function createSessionTimeline(session) {
   const clipBadge = document.createElement("span");
   clipBadge.className = `clip-badge clip-${clipTypeClass(session.clip_type)}`;
   clipBadge.textContent = clipLabel(session.clip_type);
-  meta.append(clipBadge, document.createTextNode(`${session.segment_count} 个分钟片段 · ${session.cameras.length} 路视角${session.event && !session.event_metadata ? ` · ${session.event}` : ""}`));
+  meta.append(clipBadge, document.createTextNode(`${session.segment_count} 个分钟片段${session.event && !session.event_metadata ? ` · ${session.event}` : ""}`));
   const duration = document.createElement("span");
   duration.className = "duration-pill";
   duration.textContent = formatDuration(session.duration_seconds);
+  const aside = document.createElement("div");
+  aside.className = "session-head-aside";
+  const location = eventPlace(session.event_metadata) || eventCoordinates(session.event_metadata);
+  if (location) {
+    const locationLabel = document.createElement("span");
+    locationLabel.className = "session-location";
+    locationLabel.textContent = location;
+    aside.append(locationLabel);
+  }
+  aside.append(duration);
   heading.append(title, meta);
   const eventSummary = createEventSummary(session.event_metadata);
   if (eventSummary) heading.append(eventSummary);
-  head.append(heading, duration);
+  head.append(heading, aside);
 
   const body = document.createElement("div");
   body.className = "session-timeline-body";
@@ -244,9 +328,6 @@ function createSessionTimeline(session) {
 
   const footer = document.createElement("div");
   footer.className = "session-footer";
-  const status = document.createElement("span");
-  status.className = "muted";
-  status.textContent = session.complete ? "所有分钟均包含完整六路" : "部分分钟存在视角缺失";
   const open = document.createElement("button");
   open.className = "primary session-open";
   open.type = "button";
@@ -255,7 +336,15 @@ function createSessionTimeline(session) {
     const display = state.view === "multi" ? "composite" : "single";
     openSessionPlayer(session, preferredCamera(session), 0, display);
   });
-  footer.append(status, open);
+  if (!session.complete) {
+    const status = document.createElement("span");
+    status.className = "session-warning";
+    status.textContent = "部分分钟存在视角缺失";
+    footer.append(status);
+  } else {
+    footer.classList.add("only-action");
+  }
+  footer.append(open);
   body.append(footer);
   card.append(head, body);
   return card;
@@ -857,7 +946,7 @@ function createEventSummary(metadata) {
   summary.className = "session-event";
   const dot = document.createElement("i");
   dot.className = "event-dot";
-  summary.append(dot, document.createTextNode(eventMetadataText(metadata)));
+  summary.append(dot, document.createTextNode(eventMetadataText(metadata, false)));
   return summary;
 }
 
@@ -868,23 +957,35 @@ function sessionEventPosition(session) {
   return position;
 }
 
-function eventMetadataText(metadata) {
+function eventMetadataText(metadata, includeLocation = true) {
   const parts = [];
   if (metadata.occurred_at) parts.push(`触发于 ${formatTime(metadata.occurred_at)}`);
-  const location = eventLocation(metadata);
-  if (location) parts.push(location);
+  if (includeLocation) {
+    const location = eventLocation(metadata);
+    if (location) parts.push(location);
+  }
   if (metadata.reason) parts.push(eventReasonLabel(metadata.reason));
   if (cameraOrder.includes(metadata.camera)) parts.push(cameraLabel(metadata.camera));
   return parts.join(" · ") || "事件详情不可用";
 }
 
 function eventLocation(metadata) {
-  const place = [metadata.city, metadata.street].filter(Boolean).join(" ");
+  const place = eventPlace(metadata);
+  const coordinates = eventCoordinates(metadata);
+  return [place, coordinates].filter(Boolean).join(" · ");
+}
+
+function eventCoordinates(metadata) {
+  if (!metadata) return "";
   const latitude = Number(metadata.latitude);
   const longitude = Number(metadata.longitude);
-  const coordinates = Number.isFinite(latitude) && Number.isFinite(longitude)
+  return Number.isFinite(latitude) && Number.isFinite(longitude)
     ? `${latitude.toFixed(4)}, ${longitude.toFixed(4)}` : "";
-  return [place, coordinates].filter(Boolean).join(" · ");
+}
+
+function eventPlace(metadata) {
+  if (!metadata) return "";
+  return [metadata.city, metadata.street].filter(Boolean).join(" ");
 }
 
 function eventReasonLabel(reason) {
@@ -931,6 +1032,16 @@ function formatBytes(value) {
 }
 
 function formatNumber(value) { return new Intl.NumberFormat("zh-CN").format(value); }
+
+function formatUptime(value) {
+  const seconds = Math.max(0, Number(value || 0));
+  const days = Math.floor(seconds/86400);
+  const hours = Math.floor((seconds%86400)/3600);
+  const minutes = Math.floor((seconds%3600)/60);
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  return `${minutes} 分钟`;
+}
 
 window.setInterval(() => { if (!appView.hidden) loadStatus(); }, 10000);
 initialize();
