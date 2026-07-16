@@ -4,7 +4,10 @@ After=local-fs.target
 
 [Service]
 Type=simple
+User=root
 EnvironmentFile=-/etc/teslabox/teslabox.env
+RuntimeDirectory=teslabox/snapshots
+RuntimeDirectoryMode=0750
 ExecStart=/usr/local/bin/teslabox
 Restart=on-failure
 RestartSec=3

@@ -1,4 +1,4 @@
-.PHONY: build build-init build-image-init build-gadget test vet fmt
+.PHONY: build build-init build-image-init build-gadget build-acceptance test vet fmt
 
 build:
 	go build -o bin/teslabox ./cmd/teslabox
@@ -11,6 +11,9 @@ build-image-init:
 
 build-gadget:
 	go build -o bin/teslabox-gadget ./cmd/teslabox-gadget
+
+build-acceptance:
+	go build -o bin/teslabox-acceptance ./cmd/teslabox-acceptance
 
 test:
 	go test ./...

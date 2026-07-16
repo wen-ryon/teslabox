@@ -144,13 +144,16 @@ Dnsmasq
 
 ## 第一阶段
 
-- [x] Go 服务、稳定数据盘发现、只读环境预检和状态 API
+- [x] Go 服务、稳定数据盘发现、自动挂载和状态 API
 - [x] TeslaCam 扫描器和视频 API 原型
-- [ ] 外接数据盘显式初始化
-- [ ] TeslaCam backing image
-- [ ] USB Mass Storage Gadget
-- [ ] 一致性快照和只读挂载
-- [ ] 车辆持续录像时播放已完成片段
+- [x] 外接数据盘显式初始化
+- [x] TeslaCam backing image
+- [x] USB Mass Storage Gadget、启动恢复和掉盘保护
+- [x] 一致性快照、只读挂载和媒体索引原子切换（板端实际镜像已验收）
+- [x] HTTP Range 六路同窗合成、单视角播放和下载（板端实际 MP4 已验收）
+- [x] 空间不足降级、快照失败退避和异常断电遗留资源回收
+- [x] 边录边放只读自动验收工具
+- [ ] Tesla 持续写入时的并行播放验收
 
 ## 第二阶段
 

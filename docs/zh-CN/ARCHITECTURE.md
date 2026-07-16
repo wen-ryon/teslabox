@@ -17,7 +17,7 @@
                     │
         ┌───────────┼───────────┐
         │           │           │
-    TeslaCam      CarPlay      OTA
+    TeslaCam    Future Modules  OTA
         │
      Storage
 ```
@@ -96,7 +96,7 @@ Browser
 ├──────────────────────────────┤
 │     TeslaBox Services        │
 ├──────────────────────────────┤
-│ USB │ OTA │ CarPlay │ NAS    │
+│ USB │ OTA │ Future  │ NAS    │
 ├──────────────────────────────┤
 │ Gadget │ Snapshot │ TeslaCam │
 ├──────────────────────────────┤

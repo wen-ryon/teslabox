@@ -7,17 +7,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/api"
 	"github.com/wen-ryon/teslabox/internal/backing"
 	"github.com/wen-ryon/teslabox/internal/config"
+	"github.com/wen-ryon/teslabox/internal/datamount"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
+	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/storage"
 	"github.com/wen-ryon/teslabox/internal/system"
+	"github.com/wen-ryon/teslabox/internal/teslacam"
+	"github.com/wen-ryon/teslabox/internal/webauth"
+	"github.com/wen-ryon/teslabox/internal/webui"
 )
 
 func main() {
@@ -38,8 +44,39 @@ func main() {
 		StatePath:    cfg.StatePath,
 	})
 	prober := gadget.NewFSProber(cfg.ConfigFSPath, cfg.UDCPath)
-	manager := service.NewManager(cfg, detector, inspector, prober, logger)
-	handler := api.NewHandler(manager, logger)
+	mounter := datamount.New(runner, cfg.DataMountPath, cfg.DataUUID, cfg.DataLabel)
+	gadgetManager := gadget.NewManager(gadget.Config{
+		ConfigFSPath:  cfg.ConfigFSPath,
+		UDCPath:       cfg.UDCPath,
+		GadgetName:    cfg.GadgetName,
+		UDCName:       cfg.UDCName,
+		ImagePath:     filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		SerialNumber:  cfg.GadgetSerial,
+		ReleaseGadget: cfg.ReleaseGadget,
+	})
+	if err := os.MkdirAll(cfg.SnapshotMountPath, 0o750); err != nil {
+		logger.Error("创建快照运行目录失败", "error", err)
+		os.Exit(1)
+	}
+	snapshotManager := mediasnapshot.New(runner, mediasnapshot.Config{
+		ImagePath:      filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		SnapshotPath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.SnapshotPath)),
+		MountRoot:      cfg.SnapshotMountPath,
+		MinFreeBytes:   cfg.MinFreeBytes,
+		MinFreePercent: cfg.MinFreePercent,
+	})
+	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(), logger)
+	authManager, err := webauth.New(webauth.Config{
+		PasswordSHA256: cfg.WebPasswordSHA256,
+		SessionSecret:  cfg.WebSessionSecret,
+		SessionTTL:     cfg.WebSessionTTL,
+	})
+	if err != nil {
+		logger.Error("初始化 Web 管理认证失败", "error", err)
+		os.Exit(1)
+	}
+	apiHandler := api.NewHandler(manager, logger)
+	handler := webui.NewHandler(apiHandler, authManager, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -52,8 +89,9 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// 视频 Range 和下载响应可能持续较久，连接生命周期由客户端和服务关闭信号控制。
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

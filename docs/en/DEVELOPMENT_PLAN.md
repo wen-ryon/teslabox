@@ -16,7 +16,7 @@ The ultimate goals include:
 - Online TeslaCam Viewing
 - AP Router
 - 4G / 5G Network
-- Wireless CarPlay
+- Wireless CarPlay (deferred and outside the current development scope)
 - OTA Updates
 - NAS Auto Backup
 - Online Resource Center
@@ -93,13 +93,16 @@ See [TeslaUSB Emulation Requirements](TESLAUSB_REQUIREMENTS.md) for the hardware
 - [x] configfs USB Mass Storage Gadget
 - [x] Idempotent Gadget bind, unbind, and restart recovery
 - [x] Windows host enumeration, exFAT read/write, and cold-boot recovery acceptance
-- [ ] Diskless boot, automatic late data-drive mount, and Gadget recovery
-- [ ] Active data-drive disconnect detection, LUN shutdown, and fault alerting
-- [ ] Copy-on-write snapshot, filesystem check, and read-only mount
-- [ ] Atomic media-index switch between snapshots
-- [ ] HTTP Range, single-camera MP4 playback, and download
-- [ ] Active Gadget, snapshot, and index status APIs
-- [ ] Degraded handling for low space and snapshot failure
+- [x] Diskless boot, automatic late data-drive mount, and Gadget recovery
+- [x] Active data-drive disconnect detection, LUN shutdown, and fault alerting
+- [x] Copy-on-write snapshot, filesystem check, and read-only mount (validated on the board with the real image; concurrent Tesla-write acceptance pending)
+- [x] Atomic media-index switch between snapshots
+- [x] HTTP Range, single-camera MP4 playback, and download
+- [x] Active Gadget status API
+- [x] Snapshot and index status APIs
+- [x] Preserve Tesla recording and the last usable snapshot under low space, with exponential retry backoff
+- [x] Safe startup recovery of stale mounts, loop devices, snapshot images, and partial files
+- [x] Read-only concurrent-write acceptance tool for status, host connection, snapshot rotation, video growth, and HTTP Range
 
 After completion:
 
@@ -115,14 +118,20 @@ Implement basic Web UI.
 
 ## Features
 
-- [ ] Login page
-- [ ] Dashboard
-- [ ] TeslaCam browsing
-- [ ] Video details
-- [ ] Video download
+- [x] Login page
+- [x] Dashboard
+- [x] TeslaCam browsing
+- [x] Video details and single-camera playback
+- [x] Video download
 - [ ] Video thumbnails
-- [ ] Video search
-- [ ] System status page
+- [x] Filter by clip type, date, and event
+- [x] System status page
+- [x] Pure-black background with blue, green, and red accent switching
+- [x] Group six cameras by recording moment with a two-second tolerance
+- [x] Merge continuous minute files into complete recording sessions
+- [x] Organize recordings as a vertical timeline by month, rolling seven-day period, or day
+- [x] Composite six cameras in one viewport with one timeline and optional single-camera playback
+- [x] Parse `event.json` and display event time, location, reason, and timeline markers
 
 After completion:
 
@@ -138,11 +147,11 @@ Complete the synchronized multi-camera playback experience.
 
 ## Features
 
-- [ ] Four-channel synchronized playback
-- [ ] Timeline synchronization
+- [x] Single-viewport six-camera composition and cross-minute continuation
+- [x] Timeline synchronization
 - [ ] Fast forward
-- [ ] Seek playback
-- [ ] Full screen
+- [x] Seek playback
+- [x] Full screen
 
 Future:
 
@@ -255,9 +264,11 @@ Supports:
 
 ---
 
-# V0.9 Wireless CarPlay
+# V0.9 Wireless CarPlay (Deferred)
 
-Estimated goal:
+MFi licensing, authentication hardware, and a closed receiver SDK would substantially expand the current project boundary. This phase will not be implemented unless a legal, production-ready MFi solution becomes available.
+
+Original estimated goal:
 
 Run CarPlay in Tesla browser.
 

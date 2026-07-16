@@ -49,11 +49,9 @@ No public IP required.
 
 ---
 
-## Wireless CarPlay
+## Wireless CarPlay (Deferred)
 
-Wireless CarPlay Receiver running on Linux.
-
-Tesla Browser launches CarPlay Web UI automatically.
+Wireless CarPlay is outside the current development scope because it requires a licensed MFi authentication and receiver solution.
 
 ---
 
@@ -144,13 +142,16 @@ Dnsmasq
 
 ## Phase 1
 
-- [x] Go service, stable data-drive discovery, read-only preflight, and status API
+- [x] Go service, stable data-drive discovery, automatic mount, and status API
 - [x] TeslaCam scanner and video API prototypes
-- [ ] Explicit external data-drive initialization
-- [ ] TeslaCam backing image
-- [ ] USB Mass Storage Gadget
-- [ ] Consistent snapshot and read-only mount
-- [ ] Play completed clips while vehicle recording continues
+- [x] Explicit external data-drive initialization
+- [x] TeslaCam backing image
+- [x] USB Mass Storage Gadget, restart recovery, and disconnect protection
+- [x] Consistent snapshot, read-only mount, and atomic media-index switch (validated with the real image on the board)
+- [x] HTTP Range six-camera composition, single-camera playback, and download (validated with a real MP4 on the board)
+- [x] Low-space degradation, snapshot failure backoff, and stale-resource recovery after abnormal power loss
+- [x] Read-only automated acceptance tool for concurrent recording and playback
+- [ ] Concurrent playback while Tesla is writing
 
 ## Phase 2
 
@@ -168,7 +169,6 @@ Dnsmasq
 
 ## Phase 4
 
-- [ ] Wireless CarPlay
 - [ ] NAS Backup
 - [ ] Resource Center
 

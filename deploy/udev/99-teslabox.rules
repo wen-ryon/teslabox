@@ -1,2 +1,2 @@
-# udev 只负责通知，设备识别和挂载策略由 TeslaBox 统一处理。
-ACTION=="add|remove|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", RUN+="/bin/systemctl kill --signal=SIGUSR1 teslabox.service"
+# loop 设备由快照流程管理，忽略其事件可避免通知信号打断 losetup、fsck 和 lsblk 子进程。
+ACTION=="add|remove|change", SUBSYSTEM=="block", KERNEL!="loop*", RUN+="/bin/systemctl kill --kill-who=main --signal=SIGUSR1 teslabox.service"

@@ -18,6 +18,12 @@ func testManager(t *testing.T) (*Manager, string) {
 	if err := os.MkdirAll(filepath.Join(udcPath, "fcc00000.dwc3"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(udcPath, "fcc00000.dwc3", "state"), []byte("configured\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(udcPath, "fcc00000.dwc3", "current_speed"), []byte("high-speed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +48,9 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	}
 	if !status.Exists || !status.Bound || status.UDC != "fcc00000.dwc3" {
 		t.Fatalf("status = %#v", status)
+	}
+	if status.UDCState != "configured" || status.CurrentSpeed != "high-speed" || !status.HostConnected {
+		t.Fatalf("UDC status = %#v", status)
 	}
 	if !samePath(status.ImagePath, imagePath) {
 		t.Fatalf("image path = %q, want %q", status.ImagePath, imagePath)
@@ -87,6 +96,30 @@ func TestManagerStopOnlyRemovesTeslaBoxGadget(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("other gadget was removed: %v", err)
+	}
+}
+
+func TestManagerStopDoesNotDependOnReadableBackingAttribute(t *testing.T) {
+	manager, _ := testManager(t)
+	if _, err := manager.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	filePath := manager.lunPath("file")
+	if err := os.Remove(filePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Inspect(); err == nil {
+		t.Fatal("Inspect() error = nil, want unreadable backing attribute")
+	}
+	status, err := manager.Stop()
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if status.Exists || status.Bound {
+		t.Fatalf("status = %#v", status)
 	}
 }
 

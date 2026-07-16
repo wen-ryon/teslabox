@@ -34,6 +34,9 @@ type Status struct {
 	Exists        bool      `json:"exists"`
 	Bound         bool      `json:"bound"`
 	UDC           string    `json:"udc,omitempty"`
+	UDCState      string    `json:"udc_state,omitempty"`
+	CurrentSpeed  string    `json:"current_speed,omitempty"`
+	HostConnected bool      `json:"host_connected"`
 	ImagePath     string    `json:"image_path,omitempty"`
 	SelectedUDC   string    `json:"selected_udc,omitempty"`
 	OtherBindings []Binding `json:"other_bindings"`
@@ -60,6 +63,15 @@ func (m *Manager) Inspect() (Status, error) {
 		return Status{}, err
 	}
 	status := Status{SelectedUDC: selectedUDC, OtherBindings: []Binding{}}
+	status.UDCState, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "state"))
+	if err != nil {
+		return Status{}, fmt.Errorf("读取 UDC 状态: %w", err)
+	}
+	status.CurrentSpeed, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "current_speed"))
+	if err != nil {
+		return Status{}, fmt.Errorf("读取 UDC 速率: %w", err)
+	}
+	status.HostConnected = status.UDCState != "" && status.UDCState != "not attached"
 	entries, err := os.ReadDir(m.config.ConfigFSPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("读取 USB Gadget configfs: %w", err)
@@ -239,15 +251,19 @@ func (m *Manager) releaseAllowedBindings(status Status) ([]Binding, error) {
 
 // Stop 只解绑 TeslaBox Gadget，其他厂商或系统 Gadget 不受影响。
 func (m *Manager) Stop() (Status, error) {
-	status, err := m.Inspect()
-	if err != nil {
+	if err := validateConfig(m.config); err != nil {
 		return Status{}, err
 	}
-	if !status.Exists {
-		return status, nil
+	if _, err := m.selectUDC(); err != nil {
+		return Status{}, err
+	}
+	if _, err := os.Lstat(m.gadgetPath()); errors.Is(err, os.ErrNotExist) {
+		return m.Inspect()
+	} else if err != nil {
+		return Status{}, fmt.Errorf("检查 TeslaBox Gadget: %w", err)
 	}
 	if err := m.removeOwned(); err != nil {
-		return status, err
+		return Status{}, err
 	}
 	return m.Inspect()
 }
@@ -387,6 +403,14 @@ func readTrimmed(name string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(value)), nil
+}
+
+func readOptional(name string) (string, error) {
+	value, err := readTrimmed(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return value, err
 }
 
 func writeValue(name, value string) error {

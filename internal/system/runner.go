@@ -12,6 +12,27 @@ type Runner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
+// CommandError 保留外部命令退出码，让调用方可以处理 fsck 等有语义的非零结果。
+type CommandError struct {
+	Name     string
+	Code     int
+	Output   string
+	Internal error
+}
+
+// Error 返回适合日志记录的命令失败上下文。
+func (e *CommandError) Error() string {
+	if e.Output == "" {
+		return fmt.Sprintf("执行 %s: %v", e.Name, e.Internal)
+	}
+	return fmt.Sprintf("执行 %s: %v: %s", e.Name, e.Internal, e.Output)
+}
+
+// Unwrap 保留 os/exec 原始错误链。
+func (e *CommandError) Unwrap() error {
+	return e.Internal
+}
+
 // OSRunner 在真实系统中执行受上下文约束的命令。
 type OSRunner struct{}
 
@@ -25,10 +46,11 @@ func (r *OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte
 	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
-		if message == "" {
-			return nil, fmt.Errorf("执行 %s: %w", name, err)
+		code := -1
+		if exitError, ok := err.(*exec.ExitError); ok {
+			code = exitError.ExitCode()
 		}
-		return nil, fmt.Errorf("执行 %s: %w: %s", name, err, message)
+		return output, &CommandError{Name: name, Code: code, Output: message, Internal: err}
 	}
 	return output, nil
 }
