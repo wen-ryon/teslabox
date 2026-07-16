@@ -17,6 +17,8 @@ TeslaBox 通过 ROCK 3A 的 USB OTG 口向 Tesla 模拟 USB Mass Storage。TF �
 
 详细需求见 [TeslaUSB 模拟模式需求](TESLAUSB_REQUIREMENTS.md)。
 
+设置中心第一版的需求、接口、安全限制和后续交接见 [设置中心第一版需求与交接说明](SETTINGS_CENTER_HANDOFF.md)。
+
 未来 USB 功能：
 
 - 锁车提示音管理器

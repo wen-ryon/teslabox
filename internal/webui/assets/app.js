@@ -7,6 +7,8 @@ const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
+  page: window.location.pathname === "/settings" ? "settings" : "dashboard",
+  wifi: null, ap: null,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -30,9 +32,12 @@ let activeDisplay = "composite";
 let allSessions = [];
 let compositeTracks = new Map();
 let lastCompositeSync = 0;
+let pendingWiFi = null;
+let confirmResolver = null;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyViewState();
+showPage(state.page, false);
 
 async function request(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
@@ -71,6 +76,7 @@ async function initialize() {
     }
     showApp();
     await refreshAll();
+    if (state.page === "settings") await loadSettings();
   } catch (error) {
     showApp();
     setNotice(`无法连接 TeslaBox：${error.message}`, true);
@@ -105,7 +111,24 @@ $("logout-button").addEventListener("click", async () => {
   showLogin();
 });
 $("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
+$("nav-toggle").addEventListener("click", openNavigation);
+$("nav-close").addEventListener("click", closeNavigation);
+$("nav-backdrop").addEventListener("click", closeNavigation);
+document.querySelectorAll("[data-page-link]").forEach((element) => element.addEventListener("click", (event) => {
+  event.preventDefault();
+  showPage(element.dataset.pageLink, true);
+}));
 $("refresh-button").addEventListener("click", refreshAll);
+$("settings-refresh").addEventListener("click", loadSettings);
+$("wifi-scan").addEventListener("click", scanWiFi);
+$("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
+$("ap-form").addEventListener("submit", saveAPSettings);
+$("wifi-connect-form").addEventListener("submit", connectNewWiFi);
+document.querySelectorAll("[data-close-wifi]").forEach((element) => element.addEventListener("click", closeWiFiModal));
+document.querySelectorAll("[data-close-confirm]").forEach((element) => element.addEventListener("click", () => resolveConfirmation(false)));
+$("confirm-submit").addEventListener("click", () => resolveConfirmation(true));
+$("reboot-button").addEventListener("click", () => requestPower("reboot"));
+$("shutdown-button").addEventListener("click", () => requestPower("shutdown"));
 $("filter-form").addEventListener("submit", (event) => { event.preventDefault(); loadSessions(false); });
 $("play-toggle").addEventListener("click", togglePlayback);
 $("session-timeline").addEventListener("input", previewTimelinePosition);
@@ -114,7 +137,13 @@ $("fullscreen-button").addEventListener("click", enterFullscreen);
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-period]").forEach((button) => button.addEventListener("click", () => setPeriod(button.dataset.period)));
 document.querySelectorAll("[data-close-player]").forEach((element) => element.addEventListener("click", closePlayer));
-document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !playerModal.hidden) closePlayer(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!$("confirm-modal").hidden) resolveConfirmation(false);
+  else if (!$("wifi-modal").hidden) closeWiFiModal();
+  else if (!$("nav-drawer").hidden) closeNavigation();
+  else if (!playerModal.hidden) closePlayer();
+});
 sessionVideo.addEventListener("timeupdate", updateUnifiedTimeline);
 sessionVideo.addEventListener("ended", advanceToNextSegment);
 sessionVideo.addEventListener("play", updatePlayButton);
@@ -122,6 +151,346 @@ sessionVideo.addEventListener("pause", updatePlayButton);
 
 async function refreshAll() {
   await Promise.allSettled([loadStatus(), loadSessions(false)]);
+}
+
+function openNavigation() {
+  $("nav-drawer").hidden = false;
+  $("nav-backdrop").hidden = false;
+  $("nav-toggle").setAttribute("aria-expanded", "true");
+}
+
+function closeNavigation() {
+  $("nav-drawer").hidden = true;
+  $("nav-backdrop").hidden = true;
+  $("nav-toggle").setAttribute("aria-expanded", "false");
+}
+
+function showPage(page, updateHistory) {
+  state.page = page === "settings" ? "settings" : "dashboard";
+  $("dashboard-page").hidden = state.page !== "dashboard";
+  $("settings-page").hidden = state.page !== "settings";
+  document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
+  closeNavigation();
+  if (updateHistory) window.history.pushState({page:state.page}, "", state.page === "settings" ? "/settings" : "/");
+  if (state.page === "settings" && !appView.hidden) loadSettings();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+window.addEventListener("popstate", () => showPage(window.location.pathname === "/settings" ? "settings" : "dashboard", false));
+
+async function postJSON(path, body) {
+  return request(path, {
+    method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body),
+  });
+}
+
+async function loadSettings() {
+  setSettingsNotice("正在读取网络设置…", false);
+  const [wifiResult, apResult] = await Promise.allSettled([
+    request("/api/v1/network/wifi"), request("/api/v1/network/ap"),
+  ]);
+  if (wifiResult.status === "fulfilled") {
+    state.wifi = wifiResult.value;
+    renderWiFiSettings(state.wifi);
+  } else {
+    renderWiFiUnavailable(wifiResult.reason.message);
+  }
+  if (apResult.status === "fulfilled") {
+    state.ap = apResult.value;
+    renderAPSettings(state.ap);
+  } else {
+    renderAPUnavailable(apResult.reason.message);
+  }
+  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
+  else setSettingsNotice("部分设置暂不可用，请检查 NetworkManager 状态", true);
+}
+
+function renderWiFiSettings(wifi) {
+  $("wifi-interface").textContent = wifi.available ? wifi.interface : "不可用";
+  $("wifi-interface").className = `badge${wifi.available ? " ok" : " error"}`;
+  $("wifi-warning").hidden = !wifi.single_radio_notice;
+  $("wifi-warning").textContent = wifi.single_radio_notice || "";
+  renderSavedNetworks(wifi.saved_networks || []);
+  renderAvailableNetworks(wifi.available_networks || []);
+  $("wifi-scan").disabled = Boolean(wifi.ap_active);
+  $("wifi-scan").title = wifi.ap_active ? "单网卡正在提供热点，第一版不会自动关闭热点扫描" : "手动扫描附近 WiFi";
+}
+
+function renderWiFiUnavailable(message) {
+  $("wifi-interface").textContent = "不可用";
+  $("wifi-interface").className = "badge error";
+  $("wifi-warning").hidden = false;
+  $("wifi-warning").textContent = message;
+  renderSavedNetworks([]);
+  renderAvailableNetworks([]);
+  $("wifi-scan").disabled = true;
+}
+
+function renderSavedNetworks(networks) {
+  const list = $("saved-network-list");
+  list.replaceChildren();
+  if (!networks.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "暂无已保存的客户端 WiFi";
+    list.append(empty);
+    return;
+  }
+  networks.forEach((network) => {
+    const row = document.createElement("div");
+    row.className = "network-row";
+    const identity = document.createElement("div");
+    identity.className = "network-identity";
+    const title = document.createElement("strong");
+    title.textContent = network.ssid || network.name;
+    const detail = document.createElement("small");
+    detail.textContent = `${network.active ? "当前已连接" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"}`;
+    identity.append(title, detail);
+    const actions = document.createElement("div");
+    actions.className = "network-actions";
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.className = "secondary";
+    connect.textContent = network.active ? "已连接" : "连接";
+    connect.disabled = network.active;
+    connect.addEventListener("click", () => connectSavedWiFi(network));
+    const forget = document.createElement("button");
+    forget.type = "button";
+    forget.className = "ghost";
+    forget.textContent = "忘记";
+    forget.disabled = network.active;
+    forget.addEventListener("click", () => forgetWiFi(network));
+    actions.append(connect, forget);
+    row.append(identity, actions);
+    list.append(row);
+  });
+}
+
+function renderAvailableNetworks(networks) {
+  const list = $("available-network-list");
+  list.replaceChildren();
+  if (!networks.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "empty-state";
+    cell.textContent = state.wifi?.ap_active ? "热点运行中，显示不了新的扫描结果" : "暂无扫描结果，请点击扫描网络";
+    row.append(cell);
+    list.append(row);
+    return;
+  }
+  networks.forEach((network) => {
+    const row = document.createElement("tr");
+    const ssid = document.createElement("td");
+    ssid.textContent = network.ssid;
+    const signal = document.createElement("td");
+    const meter = document.createElement("span");
+    meter.className = "signal-meter";
+    meter.style.setProperty("--signal", `${Math.max(0,Math.min(100,Number(network.signal || 0)))}%`);
+    const bar = document.createElement("i");
+    const signalText = document.createElement("span");
+    signalText.textContent = `${network.signal}%`;
+    meter.append(bar, signalText);
+    signal.append(meter);
+    const band = document.createElement("td");
+    band.textContent = network.band;
+    const security = document.createElement("td");
+    security.textContent = network.security;
+    const action = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = network.saved ? "secondary" : "primary";
+    button.textContent = network.saved ? "连接已保存" : "连接";
+    button.disabled = !supportedWiFiSecurity(network.security);
+    button.title = button.disabled ? "第一版暂不支持该加密类型" : "";
+    button.addEventListener("click", () => openAvailableWiFi(network));
+    action.append(button);
+    row.append(ssid, signal, band, security, action);
+    list.append(row);
+  });
+}
+
+async function scanWiFi() {
+  const button = $("wifi-scan");
+  button.disabled = true;
+  button.textContent = "扫描中…";
+  try {
+    const response = await postJSON("/api/v1/network/wifi/scan", {});
+    state.wifi.available_networks = response.items || [];
+    renderAvailableNetworks(state.wifi.available_networks);
+    setSettingsNotice(`扫描完成，发现 ${state.wifi.available_networks.length} 个网络`, false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = Boolean(state.wifi?.ap_active);
+    button.textContent = "扫描网络";
+  }
+}
+
+async function connectSavedWiFi(network) {
+  const proceed = !state.wifi?.ap_active || await askConfirmation(
+    "切换无线模式", "当前 MT7922 正在提供 TeslaBox 热点。继续会关闭热点，并可能让此页面立即断开。请确认你有有线网络或其他方式重新访问设备。", "继续连接", true,
+  );
+  if (!proceed) return;
+  await runWiFiConnect({uuid:network.uuid, confirm_ap_disconnect:Boolean(state.wifi?.ap_active)});
+}
+
+function openAvailableWiFi(network) {
+  const saved = (state.wifi?.saved_networks || []).find((item) => item.ssid === network.ssid);
+  if (saved) {
+    connectSavedWiFi(saved);
+    return;
+  }
+  pendingWiFi = network;
+  $("wifi-modal-title").textContent = `连接 ${network.ssid}`;
+  $("wifi-modal-detail").textContent = `${network.band} · 信号 ${network.signal}% · ${network.security}`;
+  const needsPassword = network.security !== "OPEN";
+  $("wifi-password-label").hidden = !needsPassword;
+  $("wifi-password").required = needsPassword;
+  $("wifi-password").value = "";
+  $("wifi-modal").hidden = false;
+  if (needsPassword) window.setTimeout(() => $("wifi-password").focus(), 0);
+}
+
+function closeWiFiModal() {
+  pendingWiFi = null;
+  $("wifi-modal").hidden = true;
+  $("wifi-password").value = "";
+}
+
+async function connectNewWiFi(event) {
+  event.preventDefault();
+  if (!pendingWiFi) return;
+  const network = pendingWiFi;
+  const password = $("wifi-password").value;
+  closeWiFiModal();
+  const proceed = !state.wifi?.ap_active || await askConfirmation(
+    "切换无线模式", "连接上游 WiFi 会停止当前 TeslaBox 热点。页面断开后，请通过新网络分配的地址重新访问设备。", "继续连接", true,
+  );
+  if (!proceed) return;
+  await runWiFiConnect({
+    ssid:network.ssid, security:network.security, password,
+    confirm_ap_disconnect:Boolean(state.wifi?.ap_active),
+  });
+}
+
+async function runWiFiConnect(payload) {
+  setSettingsNotice("正在切换 WiFi，当前页面可能断开…", false);
+  try {
+    await postJSON("/api/v1/network/wifi/connect", payload);
+    setSettingsNotice("WiFi 已连接", false);
+    await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function forgetWiFi(network) {
+  const confirmed = await askConfirmation("忘记网络", `确定删除“${network.ssid || network.name}”的已保存配置吗？页面不会再自动连接该网络。`, "忘记网络", true);
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/network/wifi/forget", {uuid:network.uuid});
+    setSettingsNotice("已忘记网络", false);
+    await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+function renderAPSettings(ap) {
+  const available = Boolean(ap.available);
+  $("ap-status").textContent = !available ? "未配置" : ap.enabled ? "运行中" : "已停用";
+  $("ap-status").className = `badge${ap.enabled ? " ok" : " error"}`;
+  $("ap-ssid").value = ap.ssid || "";
+  $("ap-band").value = ap.band || "a";
+  populateAPChannels($("ap-band").value, Number(ap.channel || 0));
+  $("ap-enabled").checked = Boolean(ap.enabled);
+  $("ap-autoconnect").checked = Boolean(ap.auto_connect);
+  $("ap-address").textContent = ap.address || "—";
+  $("ap-sharing").textContent = ap.sharing ? "已开启" : "未开启";
+  $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = !available; });
+}
+
+function renderAPUnavailable(message) {
+  $("ap-status").textContent = "不可用";
+  $("ap-status").className = "badge error";
+  $("ap-address").textContent = message;
+  $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = true; });
+}
+
+function populateAPChannels(band, selected) {
+  const select = $("ap-channel");
+  const channels = band === "bg" ? [0,1,6,11] : [0,149,153,157,161];
+  select.replaceChildren();
+  channels.forEach((channel) => {
+    const option = document.createElement("option");
+    option.value = String(channel);
+    option.textContent = channel === 0 ? "自动" : String(channel);
+    option.selected = channel === selected;
+    select.append(option);
+  });
+}
+
+async function saveAPSettings(event) {
+  event.preventDefault();
+  const confirmed = await askConfirmation("应用热点设置", "保存后热点会重新启动，当前连接可能断开。请确认已经记住新的热点名称和密码。", "保存并应用", false);
+  if (!confirmed) return;
+  const payload = {
+    enabled:$("ap-enabled").checked, ssid:$("ap-ssid").value, password:$("ap-password").value,
+    band:$("ap-band").value, channel:Number($("ap-channel").value), auto_connect:$("ap-autoconnect").checked,
+  };
+  setSettingsNotice("正在应用热点设置，页面可能断开…", false);
+  try {
+    await postJSON("/api/v1/network/ap", payload);
+    $("ap-password").value = "";
+    setSettingsNotice("热点设置已应用", false);
+    await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function requestPower(action) {
+  const shutdown = action === "shutdown";
+  const confirmed = await askConfirmation(
+    shutdown ? "关闭 TeslaBox" : "重启 TeslaBox",
+    shutdown ? "设备将停止服务并断开车机 USB。关机后必须重新断电上电才能启动。" : "设备将停止服务并断开车机 USB，预计稍后恢复。",
+    shutdown ? "确认关机" : "确认重启", true,
+  );
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/system/power", {action});
+    setSettingsNotice(shutdown ? "关机命令已提交" : "重启命令已提交，请稍后重新连接", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+function askConfirmation(title, message, label, dangerous) {
+  if (confirmResolver) confirmResolver(false);
+  $("confirm-title").textContent = title;
+  $("confirm-message").textContent = message;
+  $("confirm-submit").textContent = label;
+  $("confirm-submit").className = dangerous ? "danger-button" : "primary";
+  $("confirm-modal").hidden = false;
+  return new Promise((resolve) => { confirmResolver = resolve; });
+}
+
+function resolveConfirmation(value) {
+  $("confirm-modal").hidden = true;
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (resolve) resolve(value);
+}
+
+function supportedWiFiSecurity(security) {
+  const value = String(security || "").toUpperCase();
+  return value === "OPEN" || (value.includes("WPA") && !value.includes("EAP") && !value.includes("802.1X"));
+}
+
+function setSettingsNotice(message, error) {
+  $("settings-notice").textContent = message;
+  $("settings-notice").classList.toggle("error", Boolean(error));
 }
 
 async function loadStatus() {

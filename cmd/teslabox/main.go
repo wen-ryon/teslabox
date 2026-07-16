@@ -15,6 +15,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/backing"
 	"github.com/wen-ryon/teslabox/internal/config"
 	"github.com/wen-ryon/teslabox/internal/datamount"
+	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
@@ -75,7 +76,8 @@ func main() {
 		logger.Error("初始化 Web 管理认证失败", "error", err)
 		os.Exit(1)
 	}
-	apiHandler := api.NewHandler(manager, logger)
+	deviceAdmin := deviceadmin.New(runner, logger)
+	apiHandler := api.NewHandler(manager, logger, api.WithDeviceAdmin(deviceAdmin))
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

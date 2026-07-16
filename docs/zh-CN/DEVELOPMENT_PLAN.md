@@ -169,14 +169,18 @@ TeslaBox 成为一台路由器。
 
 ## 功能
 
-- [ ] MT7922
-- [ ] AP 模式
-- [ ] hostapd
-- [ ] dnsmasq
-- [ ] DHCP
-- [ ] NAT
-- [ ] Web 配置页面
+- [x] MT7922 和 backports 驱动
+- [x] NetworkManager AP 模式
+- [x] NetworkManager DHCP/NAT（`ipv4.method=shared`）
+- [x] Web 设置中心第一版
+- [x] 已保存网络和缓存扫描结果
+- [x] 手动扫描、连接和忘记网络
+- [x] AP 的 SSID、密码、频段、信道和自动启动配置
+- [x] 带二次确认的重启和关机
+- [ ] 第二无线网卡或经过稳定性验证的 AP+STA 并发
 - [ ] 客户端管理
+
+第一版实现、接口、安全限制和后续交接见 [设置中心第一版需求与交接说明](SETTINGS_CENTER_HANDOFF.md)。当前实际部署使用 NetworkManager，不再把独立 hostapd/dnsmasq 作为既定实现。
 
 完成后：
 

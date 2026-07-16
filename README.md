@@ -29,3 +29,4 @@ This project was developed with the assistance of ChatGPT Codex and the GPT-5.6 
 
 - [V0.1 实现与运行说明](docs/zh-CN/V0.1_IMPLEMENTATION.md)
 - [TeslaUSB 模拟模式需求](docs/zh-CN/TESLAUSB_REQUIREMENTS.md)
+- [设置中心第一版需求与交接说明](docs/zh-CN/SETTINGS_CENTER_HANDOFF.md)

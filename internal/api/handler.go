@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 )
@@ -26,8 +27,35 @@ type Controller interface {
 	Scan(ctx context.Context) error
 }
 
+// DeviceAdmin 定义设置中心需要的无线和电源管理能力。
+type DeviceAdmin interface {
+	WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error)
+	Scan(context.Context) ([]deviceadmin.AccessPoint, error)
+	Connect(context.Context, deviceadmin.ConnectRequest) error
+	Forget(context.Context, string) error
+	APSettings(context.Context) (deviceadmin.APSettings, error)
+	UpdateAP(context.Context, deviceadmin.APUpdate) error
+	SchedulePower(string) error
+}
+
+type handlerOptions struct {
+	deviceAdmin DeviceAdmin
+}
+
+// Option 配置可选的 API 能力。
+type Option func(*handlerOptions)
+
+// WithDeviceAdmin 启用设置中心的设备管理接口。
+func WithDeviceAdmin(admin DeviceAdmin) Option {
+	return func(options *handlerOptions) { options.deviceAdmin = admin }
+}
+
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
-func NewHandler(controller Controller, logger *slog.Logger) http.Handler {
+func NewHandler(controller Controller, logger *slog.Logger, options ...Option) http.Handler {
+	settings := handlerOptions{}
+	for _, option := range options {
+		option(&settings)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -76,7 +104,113 @@ func NewHandler(controller Controller, logger *slog.Logger) http.Handler {
 		state.Videos = nil
 		writeJSON(w, http.StatusOK, state)
 	})
+	if settings.deviceAdmin != nil {
+		registerDeviceAdminRoutes(mux, settings.deviceAdmin, logger)
+	}
 	return requestLogger(mux, logger)
+}
+
+func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/network/wifi", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.WiFiStatus(r.Context())
+		if err != nil {
+			writeDeviceAdminError(w, logger, "读取 WiFi 状态失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/network/wifi/scan", func(w http.ResponseWriter, r *http.Request) {
+		items, err := admin.Scan(r.Context())
+		if err != nil {
+			writeDeviceAdminError(w, logger, "扫描 WiFi 失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	})
+	mux.HandleFunc("POST /api/v1/network/wifi/connect", func(w http.ResponseWriter, r *http.Request) {
+		var input deviceadmin.ConnectRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.Connect(r.Context(), input); err != nil {
+			writeDeviceAdminError(w, logger, "连接 WiFi 失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+	})
+	mux.HandleFunc("POST /api/v1/network/wifi/forget", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			UUID string `json:"uuid"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.Forget(r.Context(), input.UUID); err != nil {
+			writeDeviceAdminError(w, logger, "忘记 WiFi 失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"forgotten": true})
+	})
+	mux.HandleFunc("GET /api/v1/network/ap", func(w http.ResponseWriter, r *http.Request) {
+		settings, err := admin.APSettings(r.Context())
+		if err != nil {
+			writeDeviceAdminError(w, logger, "读取 AP 配置失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
+	mux.HandleFunc("POST /api/v1/network/ap", func(w http.ResponseWriter, r *http.Request) {
+		var input deviceadmin.APUpdate
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.UpdateAP(r.Context(), input); err != nil {
+			writeDeviceAdminError(w, logger, "更新 AP 配置失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+	})
+	mux.HandleFunc("POST /api/v1/system/power", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Action string `json:"action"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.SchedulePower(input.Action); err != nil {
+			writeDeviceAdminError(w, logger, "提交电源操作失败", err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+	})
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求参数无效"})
+		return false
+	}
+	return true
+}
+
+func writeDeviceAdminError(w http.ResponseWriter, logger *slog.Logger, message string, err error) {
+	logger.Warn(message, "error", err)
+	if errors.Is(err, deviceadmin.ErrAPActive) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前无线网卡正在提供 TeslaBox 热点。第一版不会自动关闭热点，请先准备有线网络或第二块无线网卡。"})
+		return
+	}
+	if errors.Is(err, deviceadmin.ErrUnsupportedSecurity) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "第一版仅支持开放网络和 WPA/WPA2 个人网络"})
+		return
+	}
+	var inputError *deviceadmin.InputError
+	if errors.As(err, &inputError) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "设备网络管理暂不可用"})
 }
 
 func serveVideo(w http.ResponseWriter, r *http.Request, state service.Snapshot, download bool) {

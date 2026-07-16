@@ -169,14 +169,17 @@ TeslaBox becomes a router.
 
 ## Features
 
-- [ ] MT7922
-- [ ] AP mode
-- [ ] hostapd
-- [ ] dnsmasq
-- [ ] DHCP
-- [ ] NAT
-- [ ] Web configuration page
+- [x] MT7922 with backported driver
+- [x] NetworkManager AP mode
+- [x] NetworkManager DHCP/NAT via `ipv4.method=shared`
+- [x] First settings-center implementation
+- [x] Saved networks, cached scan results, manual scan, connect, and forget
+- [x] AP SSID, password, band, channel, and autostart settings
+- [x] Confirmed reboot and shutdown controls
+- [ ] Second WiFi radio or proven AP+STA concurrency
 - [ ] Client management
+
+The current implementation uses NetworkManager rather than separate hostapd/dnsmasq services. The detailed handoff is maintained in Chinese at [Settings Center V1 handoff](../zh-CN/SETTINGS_CENTER_HANDOFF.md).
 
 After completion:
 
