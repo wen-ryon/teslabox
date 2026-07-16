@@ -17,11 +17,12 @@ import (
 
 const (
 	defaultWiFiInterface = "wlan0"
+	apInterfaceName      = "ap0"
 	commandTimeout       = 20 * time.Second
 )
 
 var (
-	// ErrAPActive 表示单无线接口正在提供热点，客户端连接会使管理网络断开。
+	// ErrAPActive 在 AP+STA 并发不可用时返回；当前硬件已支持并发，此错误保留用于回退场景。
 	ErrAPActive = errors.New("无线热点正在使用当前网卡")
 	// ErrUnsupportedSecurity 表示第一版尚不能安全配置该无线加密类型。
 	ErrUnsupportedSecurity = errors.New("暂不支持该无线网络的加密类型")
@@ -61,6 +62,7 @@ type WiFiStatus struct {
 	Interface         string         `json:"interface"`
 	CurrentConnection string         `json:"current_connection,omitempty"`
 	APActive          bool           `json:"ap_active"`
+	ConcurrentMode    bool           `json:"concurrent_mode"`
 	SingleRadioNotice string         `json:"single_radio_notice,omitempty"`
 	SavedNetworks     []SavedNetwork `json:"saved_networks"`
 	AvailableNetworks []AccessPoint  `json:"available_networks"`
@@ -140,7 +142,8 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		})
 	}
 	if status.APActive {
-		status.SingleRadioNotice = "当前 MT7922 正在提供 AP 热点；扫描或连接上游 WiFi 可能导致热点和当前页面断开。"
+		status.ConcurrentMode = true
+		status.SingleRadioNotice = "AP+STA 并发模式已启用：热点在上游 WiFi 连接期间保持运行，手机不会断开。"
 	}
 	saved := make(map[string]bool, len(status.SavedNetworks))
 	for _, profile := range status.SavedNetworks {
@@ -156,15 +159,13 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 }
 
 // Scan 手动请求 NetworkManager 扫描，并返回按 SSID 去重后的结果。
+// AP+STA 并发模式下扫描在 wlan0 上执行，不影响 ap0 上的热点。
 func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if status.APActive {
-		return nil, ErrAPActive
 	}
 	if _, err := m.run(ctx, "nmcli", "--wait", "12", "device", "wifi", "rescan", "ifname", m.interfaceName); err != nil {
 		return nil, fmt.Errorf("扫描无线网络: %w", err)
@@ -177,15 +178,13 @@ func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 }
 
 // Connect 连接已保存网络或创建 WPA/WPA2、开放网络配置。
+// AP+STA 并发模式下连接在 wlan0 上执行，ap0 上的热点不受影响。
 func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
 		return err
-	}
-	if status.APActive && !request.ConfirmAPDisconnect {
-		return ErrAPActive
 	}
 	if request.UUID != "" {
 		if !validUUID(request.UUID) {

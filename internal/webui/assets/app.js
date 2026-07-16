@@ -212,8 +212,8 @@ function renderWiFiSettings(wifi) {
   $("wifi-warning").textContent = wifi.single_radio_notice || "";
   renderSavedNetworks(wifi.saved_networks || []);
   renderAvailableNetworks(wifi.available_networks || []);
-  $("wifi-scan").disabled = Boolean(wifi.ap_active);
-  $("wifi-scan").title = wifi.ap_active ? "单网卡正在提供热点，第一版不会自动关闭热点扫描" : "手动扫描附近 WiFi";
+  $("wifi-scan").disabled = false;
+  $("wifi-scan").title = "手动扫描附近 WiFi";
 }
 
 function renderWiFiUnavailable(message) {
@@ -274,7 +274,7 @@ function renderAvailableNetworks(networks) {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty-state";
-    cell.textContent = state.wifi?.ap_active ? "热点运行中，显示不了新的扫描结果" : "暂无扫描结果，请点击扫描网络";
+    cell.textContent = "暂无扫描结果，请点击扫描网络";
     row.append(cell);
     list.append(row);
     return;
@@ -322,17 +322,13 @@ async function scanWiFi() {
   } catch (error) {
     setSettingsNotice(error.message, true);
   } finally {
-    button.disabled = Boolean(state.wifi?.ap_active);
+    button.disabled = false;
     button.textContent = "扫描网络";
   }
 }
 
 async function connectSavedWiFi(network) {
-  const proceed = !state.wifi?.ap_active || await askConfirmation(
-    "切换无线模式", "当前 MT7922 正在提供 TeslaBox 热点。继续会关闭热点，并可能让此页面立即断开。请确认你有有线网络或其他方式重新访问设备。", "继续连接", true,
-  );
-  if (!proceed) return;
-  await runWiFiConnect({uuid:network.uuid, confirm_ap_disconnect:Boolean(state.wifi?.ap_active)});
+  await runWiFiConnect({uuid:network.uuid});
 }
 
 function openAvailableWiFi(network) {
@@ -364,13 +360,8 @@ async function connectNewWiFi(event) {
   const network = pendingWiFi;
   const password = $("wifi-password").value;
   closeWiFiModal();
-  const proceed = !state.wifi?.ap_active || await askConfirmation(
-    "切换无线模式", "连接上游 WiFi 会停止当前 TeslaBox 热点。页面断开后，请通过新网络分配的地址重新访问设备。", "继续连接", true,
-  );
-  if (!proceed) return;
   await runWiFiConnect({
     ssid:network.ssid, security:network.security, password,
-    confirm_ap_disconnect:Boolean(state.wifi?.ap_active),
   });
 }
 
