@@ -273,7 +273,8 @@ func buildPlan(imagePath string, options Options) []Command {
 	return []Command{
 		{Name: "truncate", Args: []string{"--size", strconv.FormatInt(options.SizeBytes, 10), imagePath}},
 		{Name: "parted", Args: []string{"--script", imagePath, "mklabel", "msdos"}},
-		{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "1MiB", "100%"}},
+		// exFAT 与 NTFS 在 MBR 中共用 0x07 类型码；parted 不接受 exfat，因此用 ntfs 写入正确类型码后再由 mkfs.exfat 格式化。
+		{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "ntfs", "1MiB", "100%"}},
 		{Name: "losetup", Args: []string{"--find", "--show", "--partscan", imagePath}},
 		{Name: "mkfs.exfat", Args: []string{"-L", options.Label, "<loop-device>p1"}},
 		{Name: "/sbin/mount.exfat-fuse", Args: []string{"<loop-device>p1", "<temporary-mount>"}},

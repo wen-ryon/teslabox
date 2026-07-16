@@ -66,6 +66,13 @@ func TestRunDryRunDoesNotExecute(t *testing.T) {
 	if !reflect.DeepEqual(result.Commands[0], want) {
 		t.Fatalf("first command = %#v, want %#v", result.Commands[0], want)
 	}
+	partition := Command{
+		Name: "parted",
+		Args: []string{"--script", "--align", "optimal", "/var/lib/teslabox/images/teslacam.img", "mkpart", "primary", "ntfs", "1MiB", "100%"},
+	}
+	if !reflect.DeepEqual(result.Commands[2], partition) {
+		t.Fatalf("partition command = %#v, want %#v", result.Commands[2], partition)
+	}
 }
 
 func TestRunRejectsUnsafeEnvironment(t *testing.T) {
