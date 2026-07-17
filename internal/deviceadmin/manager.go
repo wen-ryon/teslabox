@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,8 @@ type AccessPoint struct {
 type WiFiStatus struct {
 	Available         bool           `json:"available"`
 	Interface         string         `json:"interface"`
+	MACAddress        string         `json:"mac_address,omitempty"`
+	IPAddress         string         `json:"ip_address,omitempty"`
 	CurrentConnection string         `json:"current_connection,omitempty"`
 	APActive          bool           `json:"ap_active"`
 	ConcurrentMode    bool           `json:"concurrent_mode"`
@@ -89,6 +92,8 @@ type RecoveryStatus struct {
 type APSettings struct {
 	Available      bool   `json:"available"`
 	Enabled        bool   `json:"enabled"`
+	Interface      string `json:"interface,omitempty"`
+	MACAddress     string `json:"mac_address,omitempty"`
 	ConnectionName string `json:"connection_name,omitempty"`
 	UUID           string `json:"uuid,omitempty"`
 	SSID           string `json:"ssid,omitempty"`
@@ -185,6 +190,7 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		return WiFiStatus{}, err
 	}
 	status := WiFiStatus{Available: true, Interface: m.interfaceName, SavedNetworks: []SavedNetwork{}}
+	status.MACAddress, status.IPAddress = m.interfaceDetails(ctx, m.interfaceName)
 	status.Recovery = m.recoveryStatus()
 	apSSIDs := make(map[string]bool)
 	for _, profile := range profiles {
@@ -556,12 +562,46 @@ func (m *Manager) APSettings(ctx context.Context) (APSettings, error) {
 		}
 		return APSettings{
 			Available: true, Enabled: profile.Active, ConnectionName: profile.Name, UUID: profile.UUID,
-			SSID: profile.SSID, Band: profile.Band, Channel: profile.Channel,
+			Interface: apInterfaceName,
+			SSID:      profile.SSID, Band: profile.Band, Channel: profile.Channel,
 			Security: profile.Security, Address: profile.Address, AutoConnect: profile.AutoConnect,
 			Sharing: profile.IPv4Method == "shared",
-		}, nil
+		}.withInterfaceDetails(m.interfaceDetails(ctx, apInterfaceName)), nil
 	}
 	return APSettings{Available: false}, nil
+}
+
+func (s APSettings) withInterfaceDetails(macAddress, ipAddress string) APSettings {
+	s.MACAddress = macAddress
+	if ipAddress != "" {
+		s.Address = ipAddress
+	}
+	return s
+}
+
+func (m *Manager) interfaceDetails(ctx context.Context, interfaceName string) (string, string) {
+	output, err := m.run(ctx, "nmcli", "--escape", "no", "-g", "GENERAL.HWADDR,IP4.ADDRESS", "device", "show", interfaceName)
+	if err != nil {
+		return "", ""
+	}
+	return parseInterfaceDetails(string(output))
+}
+
+func parseInterfaceDetails(output string) (string, string) {
+	var macAddress string
+	var ipAddress string
+	for _, value := range strings.Split(strings.TrimSpace(output), "\n") {
+		value = strings.TrimSpace(value)
+		if macAddress == "" && validBSSID(value) {
+			macAddress = strings.ToUpper(value)
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil && prefix.Addr().Is4() {
+			ipAddress = value
+			break
+		}
+	}
+	return macAddress, ipAddress
 }
 
 // UpdateAP 校验并更新现有热点；空密码表示保留原密码。

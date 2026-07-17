@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-ui-font="medium">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260717-10">
-  <script src="/app.js?v=20260717-10" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260717-14">
+  <script src="/app.js?v=20260717-14" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -32,8 +32,15 @@
       <div class="top-actions">
         <span id="live-indicator" class="live-indicator"><i></i><span>正在连接</span></span>
         <span id="internet-indicator" class="internet-indicator"><i></i><span>检测互联网</span></span>
-        <label class="theme-control"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
-        <button id="logout-button" class="ghost compact" type="button">退出</button>
+        <div class="appearance-control">
+          <button id="appearance-toggle" class="ghost appearance-toggle" type="button" aria-label="打开页面设置" aria-haspopup="true" aria-expanded="false" aria-controls="appearance-menu"><span aria-hidden="true">⚙</span></button>
+          <div id="appearance-menu" class="appearance-menu" role="group" aria-label="页面设置" hidden>
+            <div class="appearance-menu-head"><strong>页面设置</strong><small>外观设置会保存在当前浏览器</small></div>
+            <label for="theme-select"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
+            <label for="settings-font-size"><span>页面字体</span><select id="settings-font-size" aria-label="调整全部页面字体大小"><option value="compact">紧凑 · 12px</option><option value="small">较小 · 13px</option><option value="medium" selected>标准 · 14px</option><option value="large">较大 · 15px</option><option value="xlarge">最大 · 16px</option></select></label>
+            <div class="appearance-menu-footer"><button id="logout-button" class="ghost" type="button">退出管理页面</button></div>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -125,13 +132,19 @@
 
     <div id="settings-page" class="page settings-page app-page" hidden>
       <section class="settings-hero">
-        <div><p class="eyebrow">SETTINGS</p><h1>设置中心</h1><p class="hero-copy">管理上游 WiFi、TeslaBox 热点和设备电源。网络变更可能使当前页面断开。</p></div>
+        <div><p class="eyebrow">SETTINGS</p><h1>设置中心</h1><p class="hero-copy">管理 WiFi 无线局域网、TeslaBox 热点和设备电源。网络变更可能使当前页面断开。</p></div>
         <button id="settings-refresh" class="secondary" type="button">刷新设置</button>
       </section>
       <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
 
       <section class="settings-section" aria-labelledby="wifi-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">UPSTREAM</p><h2 id="wifi-settings-title">上游 WiFi</h2></div><span id="wifi-interface" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">WIRELESS LAN</p><h2 id="wifi-settings-title">WiFi 无线局域网</h2></div></div>
+        <div class="hardware-overview" aria-label="WiFi 硬件信息">
+          <div><span>连接状态</span><strong id="wifi-status">读取中</strong></div>
+          <div><span>网络接口</span><strong id="wifi-interface">—</strong></div>
+          <div><span>MAC 地址</span><strong id="wifi-mac-address">—</strong></div>
+          <div><span>IP 地址</span><strong id="wifi-ip-address">—</strong></div>
+        </div>
         <div id="wifi-warning" class="settings-warning" hidden></div>
         <article class="settings-card">
           <div class="settings-card-head"><div><h3>已保存的网络</h3><p>密码由 NetworkManager 保存，页面不会读取或显示密码。</p></div></div>
@@ -146,7 +159,14 @@
       </section>
 
       <section class="settings-section" aria-labelledby="ap-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">ACCESS POINT</p><h2 id="ap-settings-title">AP 热点</h2></div><span id="ap-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">ACCESS POINT</p><h2 id="ap-settings-title">AP 热点</h2></div></div>
+        <div class="hardware-overview" aria-label="AP 热点硬件信息">
+          <div><span>开启状态</span><strong id="ap-status">读取中</strong></div>
+          <div><span>网络接口</span><strong id="ap-interface">—</strong></div>
+          <div><span>MAC 地址</span><strong id="ap-mac-address">—</strong></div>
+          <div><span>热点地址</span><strong id="ap-address">—</strong></div>
+          <div><span>互联网共享</span><strong id="ap-sharing">—</strong></div>
+        </div>
         <form id="ap-form" class="settings-card settings-form">
           <div class="form-grid">
             <label>热点名称（SSID）<input id="ap-ssid" maxlength="32" required></label>
@@ -155,7 +175,6 @@
             <label>信道<select id="ap-channel"></select></label>
           </div>
           <div class="toggle-row"><label><input id="ap-enabled" type="checkbox"> 启用热点</label><label><input id="ap-autoconnect" type="checkbox"> 开机自动启动</label></div>
-          <div class="setting-summary"><span>热点地址</span><strong id="ap-address">—</strong><span>互联网共享</span><strong id="ap-sharing">—</strong></div>
           <div class="form-actions"><p class="muted">应用后手机可能需要使用新的名称或密码重新连接。</p><button class="primary" type="submit">保存并应用</button></div>
         </form>
       </section>

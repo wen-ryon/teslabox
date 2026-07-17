@@ -46,10 +46,28 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"session-player-view", "composite-grid", "camera-switcher", "session-timeline",
 		"event-marker-layer", "internet-indicator", "temperature-value", "cpu-value",
 		"memory-value", "system-disk-value", "nav-toggle", "settings-page", "wifi-scan",
-		"ap-form", "storage-device-list", "shutdown-button", "app.js?v=20260717-10",
+		"ap-form", "storage-device-list", "shutdown-button", "appearance-toggle", "appearance-menu",
+		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
+		"logout-button", "app.js?v=20260717-14",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerServesPersistentAppearancePreferences(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	for _, marker := range []string{"localStorage", "teslabox-theme", "teslabox-settings-font"} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("外观设置脚本缺少持久化标记 %q", marker)
 		}
 	}
 }

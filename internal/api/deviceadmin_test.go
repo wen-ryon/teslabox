@@ -31,7 +31,7 @@ func (a *fakeDeviceAdmin) SetAutoConnect(_ context.Context, update deviceadmin.A
 }
 func (a *fakeDeviceAdmin) Forget(context.Context, string) error { return nil }
 func (a *fakeDeviceAdmin) APSettings(context.Context) (deviceadmin.APSettings, error) {
-	return deviceadmin.APSettings{Available: true, SSID: "TeslaBox-5G"}, nil
+	return deviceadmin.APSettings{Available: true, Interface: "ap0", MACAddress: "AA:BB:CC:DD:EE:20", SSID: "TeslaBox-5G", Address: "192.168.88.1/24"}, nil
 }
 func (a *fakeDeviceAdmin) UpdateAP(context.Context, deviceadmin.APUpdate) error { return nil }
 func (a *fakeDeviceAdmin) SchedulePower(action string) error {
@@ -41,13 +41,19 @@ func (a *fakeDeviceAdmin) SchedulePower(action string) error {
 
 func TestDeviceAdminRoutes(t *testing.T) {
 	t.Parallel()
-	admin := &fakeDeviceAdmin{status: deviceadmin.WiFiStatus{Available: true, Interface: "wlan0"}}
+	admin := &fakeDeviceAdmin{status: deviceadmin.WiFiStatus{Available: true, Interface: "wlan0", MACAddress: "AA:BB:CC:DD:EE:10", IPAddress: "192.0.2.28/24"}}
 	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithDeviceAdmin(admin))
 
 	wifi := httptest.NewRecorder()
 	handler.ServeHTTP(wifi, httptest.NewRequest(http.MethodGet, "/api/v1/network/wifi", nil))
-	if wifi.Code != http.StatusOK || !strings.Contains(wifi.Body.String(), `"interface":"wlan0"`) {
+	if wifi.Code != http.StatusOK || !strings.Contains(wifi.Body.String(), `"mac_address":"AA:BB:CC:DD:EE:10"`) || !strings.Contains(wifi.Body.String(), `"ip_address":"192.0.2.28/24"`) {
 		t.Fatalf("wifi status = %d, body = %s", wifi.Code, wifi.Body.String())
+	}
+
+	ap := httptest.NewRecorder()
+	handler.ServeHTTP(ap, httptest.NewRequest(http.MethodGet, "/api/v1/network/ap", nil))
+	if ap.Code != http.StatusOK || !strings.Contains(ap.Body.String(), `"interface":"ap0"`) || !strings.Contains(ap.Body.String(), `"mac_address":"AA:BB:CC:DD:EE:20"`) {
+		t.Fatalf("ap status = %d, body = %s", ap.Code, ap.Body.String())
 	}
 
 	autoConnect := httptest.NewRecorder()

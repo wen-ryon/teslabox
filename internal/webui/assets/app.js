@@ -3,12 +3,13 @@
 const cameraOrder = ["left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"];
 const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
+const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
 const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
   page: window.location.pathname === "/settings" ? "settings" : "dashboard",
-  wifi: null, ap: null, storage: null,
+  wifi: null, ap: null, storage: null, uiFont: savedUIFont,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -37,6 +38,7 @@ let pendingStorage = null;
 let confirmResolver = null;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
+applyUIFont(state.uiFont);
 applyViewState();
 showPage(state.page, false);
 
@@ -108,10 +110,17 @@ loginForm.addEventListener("submit", async (event) => {
 
 $("logout-button").addEventListener("click", async () => {
   await fetch("/api/v1/auth/logout", { method: "POST", credentials: "same-origin" });
+  closeAppearanceMenu();
   closePlayer();
   showLogin();
 });
 $("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
+$("appearance-toggle").addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleAppearanceMenu();
+});
+$("appearance-menu").addEventListener("click", (event) => event.stopPropagation());
+document.addEventListener("click", closeAppearanceMenu);
 $("nav-toggle").addEventListener("click", openNavigation);
 $("nav-close").addEventListener("click", closeNavigation);
 $("nav-backdrop").addEventListener("click", closeNavigation);
@@ -121,6 +130,7 @@ document.querySelectorAll("[data-page-link]").forEach((element) => element.addEv
 }));
 $("refresh-button").addEventListener("click", refreshAll);
 $("settings-refresh").addEventListener("click", loadSettings);
+$("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
 $("wifi-scan").addEventListener("click", scanWiFi);
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
 $("ap-form").addEventListener("submit", saveAPSettings);
@@ -145,6 +155,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("confirm-modal").hidden) resolveConfirmation(false);
   else if (!$("wifi-modal").hidden) closeWiFiModal();
+  else if (!$("appearance-menu").hidden) closeAppearanceMenu();
   else if (!$("nav-drawer").hidden) closeNavigation();
   else if (!playerModal.hidden) closePlayer();
 });
@@ -158,6 +169,7 @@ async function refreshAll() {
 }
 
 function openNavigation() {
+  closeAppearanceMenu();
   $("nav-drawer").hidden = false;
   $("nav-backdrop").hidden = false;
   $("nav-toggle").setAttribute("aria-expanded", "true");
@@ -169,12 +181,25 @@ function closeNavigation() {
   $("nav-toggle").setAttribute("aria-expanded", "false");
 }
 
+function toggleAppearanceMenu() {
+  const shouldOpen = $("appearance-menu").hidden;
+  closeNavigation();
+  $("appearance-menu").hidden = !shouldOpen;
+  $("appearance-toggle").setAttribute("aria-expanded", String(shouldOpen));
+}
+
+function closeAppearanceMenu() {
+  $("appearance-menu").hidden = true;
+  $("appearance-toggle").setAttribute("aria-expanded", "false");
+}
+
 function showPage(page, updateHistory) {
   state.page = page === "settings" ? "settings" : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
   $("settings-page").hidden = state.page !== "settings";
   document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
   closeNavigation();
+  closeAppearanceMenu();
   if (updateHistory) window.history.pushState({page:state.page}, "", state.page === "settings" ? "/settings" : "/");
   if (state.page === "settings" && !appView.hidden) loadSettings();
   window.scrollTo({top:0, behavior:"smooth"});
@@ -217,7 +242,10 @@ async function loadSettings() {
 
 function renderWiFiSettings(wifi) {
   $("wifi-interface").textContent = wifi.available ? wifi.interface : "不可用";
-  $("wifi-interface").className = `badge${wifi.available ? " ok" : " error"}`;
+  $("wifi-mac-address").textContent = wifi.mac_address || "—";
+  $("wifi-ip-address").textContent = wifi.ip_address || "未获取";
+  $("wifi-status").textContent = wifi.current_connection ? `已连接 · ${wifi.current_connection}` : "未连接";
+  $("wifi-status").className = `hardware-value${wifi.current_connection ? " ok" : " error"}`;
   const warnings = [];
   if (wifi.single_radio_notice) warnings.push(wifi.single_radio_notice);
   if (wifi.recovery?.last_error) {
@@ -236,7 +264,10 @@ function renderWiFiSettings(wifi) {
 
 function renderWiFiUnavailable(message) {
   $("wifi-interface").textContent = "不可用";
-  $("wifi-interface").className = "badge error";
+  $("wifi-mac-address").textContent = "—";
+  $("wifi-ip-address").textContent = "—";
+  $("wifi-status").textContent = "不可用";
+  $("wifi-status").className = "hardware-value error";
   $("wifi-warning").hidden = false;
   $("wifi-warning").textContent = message;
   renderSavedNetworks([]);
@@ -441,7 +472,9 @@ async function forgetWiFi(network) {
 function renderAPSettings(ap) {
   const available = Boolean(ap.available);
   $("ap-status").textContent = !available ? "未配置" : ap.enabled ? "运行中" : "已停用";
-  $("ap-status").className = `badge${ap.enabled ? " ok" : " error"}`;
+  $("ap-status").className = `hardware-value${ap.enabled ? " ok" : " error"}`;
+  $("ap-interface").textContent = ap.interface || "—";
+  $("ap-mac-address").textContent = ap.mac_address || "—";
   $("ap-ssid").value = ap.ssid || "";
   $("ap-band").value = ap.band || "a";
   populateAPChannels($("ap-band").value, Number(ap.channel || 0));
@@ -454,7 +487,9 @@ function renderAPSettings(ap) {
 
 function renderAPUnavailable(message) {
   $("ap-status").textContent = "不可用";
-  $("ap-status").className = "badge error";
+  $("ap-status").className = "hardware-value error";
+  $("ap-interface").textContent = "—";
+  $("ap-mac-address").textContent = "—";
   $("ap-address").textContent = message;
   $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = true; });
 }
@@ -1469,6 +1504,18 @@ function applyTheme(theme) {
   $("theme-select").value = selected;
   $("theme-color").content = "#000000";
   writePreference("teslabox-theme", selected);
+}
+
+function normalizeUIFont(value) {
+  return ["compact", "small", "medium", "large", "xlarge"].includes(value) ? value : "medium";
+}
+
+function applyUIFont(value) {
+  const selected = normalizeUIFont(value);
+  state.uiFont = selected;
+  document.documentElement.dataset.uiFont = selected;
+  $("settings-font-size").value = selected;
+  writePreference("teslabox-settings-font", selected);
 }
 
 function preferredCamera(session) {
