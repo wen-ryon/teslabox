@@ -98,3 +98,22 @@ func TestManagerMountWrapsCommandError(t *testing.T) {
 		t.Fatal("Mount() error = nil, want command error")
 	}
 }
+
+type noActiveIdentity struct{}
+
+func (noActiveIdentity) Active() (storage.DeviceRecord, bool, error) {
+	return storage.DeviceRecord{}, false, nil
+}
+
+func TestRegisteredManagerRejectsMountWhileIdentityIsSuspended(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{}
+	manager := NewRegistered(runner, t.TempDir(), noActiveIdentity{}, "legacy", "TESLABOX")
+	err := manager.Mount(t.Context(), storage.Device{UUID: "legacy", Label: "TESLABOX", FSType: "xfs"})
+	if err == nil {
+		t.Fatal("Mount() error = nil")
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("commands = %#v", runner.commands)
+	}
+}

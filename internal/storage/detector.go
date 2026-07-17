@@ -51,6 +51,14 @@ type LSBLKDetector struct {
 	runner system.Runner
 	uuid   string
 	label  string
+	source IdentitySource
+}
+
+// NewRegisteredLSBLKDetector 优先使用系统盘登记册中的活动 UUID，并保留旧配置回退。
+func NewRegisteredLSBLKDetector(runner system.Runner, source IdentitySource, uuid, label string) *LSBLKDetector {
+	detector := NewLSBLKDetector(runner, uuid, label)
+	detector.source = source
+	return detector
 }
 
 type lsblkOutput struct {
@@ -90,10 +98,23 @@ func NewLSBLKDetector(runner system.Runner, uuid, label string) *LSBLKDetector {
 
 // Detect 返回唯一匹配的数据分区，重复卷标会失败而不是猜测设备。
 func (d *LSBLKDetector) Detect(ctx context.Context) (Device, error) {
+	uuid, label := d.uuid, d.label
+	if d.source != nil {
+		record, exists, err := d.source.Active()
+		if err != nil {
+			return Device{}, fmt.Errorf("读取活动数据盘登记: %w", err)
+		}
+		if exists {
+			uuid, label = record.UUID, record.Label
+		} else {
+			uuid, label = "", ""
+		}
+	}
 	output, err := d.runner.Run(
 		ctx,
 		"lsblk",
 		"--json",
+		"--tree",
 		"--bytes",
 		"--output",
 		"PATH,UUID,LABEL,FSTYPE,TYPE,MOUNTPOINT,RM,TRAN,SIZE,MODEL,SERIAL",
@@ -111,7 +132,7 @@ func (d *LSBLKDetector) Detect(ctx context.Context) (Device, error) {
 
 	matches := make([]Device, 0, 1)
 	for _, block := range payload.BlockDevices {
-		d.collect(block, inheritedFields{}, &matches)
+		d.collect(block, inheritedFields{}, uuid, label, &matches)
 	}
 	if len(matches) == 0 {
 		return Device{}, ErrDeviceNotFound
@@ -122,14 +143,14 @@ func (d *LSBLKDetector) Detect(ctx context.Context) (Device, error) {
 	return matches[0], nil
 }
 
-func (d *LSBLKDetector) collect(block lsblkDevice, parent inheritedFields, matches *[]Device) {
+func (d *LSBLKDetector) collect(block lsblkDevice, parent inheritedFields, uuid, label string, matches *[]Device) {
 	fields := inheritedFields{
 		removable: firstNonNil(block.Removable, parent.removable),
 		transport: firstNonEmpty(block.Transport, parent.transport),
 		model:     firstNonEmpty(block.Model, parent.model),
 		serial:    firstNonEmpty(block.Serial, parent.serial),
 	}
-	if block.Type == "part" && d.matches(block) {
+	if block.Type == "part" && matchesIdentity(block, uuid, label) {
 		*matches = append(*matches, Device{
 			Path:        block.Path,
 			UUID:        block.UUID,
@@ -144,15 +165,15 @@ func (d *LSBLKDetector) collect(block lsblkDevice, parent inheritedFields, match
 		})
 	}
 	for _, child := range block.Children {
-		d.collect(child, fields, matches)
+		d.collect(child, fields, uuid, label, matches)
 	}
 }
 
-func (d *LSBLKDetector) matches(block lsblkDevice) bool {
-	if d.uuid != "" {
-		return strings.EqualFold(block.UUID, d.uuid)
+func matchesIdentity(block lsblkDevice, uuid, label string) bool {
+	if uuid != "" {
+		return strings.EqualFold(block.UUID, uuid)
 	}
-	return d.label != "" && strings.EqualFold(block.Label, d.label)
+	return label != "" && strings.EqualFold(block.Label, label)
 }
 
 func normalizeMountPoint(value any) []string {

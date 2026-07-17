@@ -16,11 +16,14 @@ import (
 	"github.com/wen-ryon/teslabox/internal/config"
 	"github.com/wen-ryon/teslabox/internal/datamount"
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
+	"github.com/wen-ryon/teslabox/internal/driveinit"
 	"github.com/wen-ryon/teslabox/internal/gadget"
+	"github.com/wen-ryon/teslabox/internal/imageinit"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/storage"
+	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 	"github.com/wen-ryon/teslabox/internal/webauth"
@@ -36,7 +39,31 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
-	detector := storage.NewLSBLKDetector(runner, cfg.DataUUID, cfg.DataLabel)
+	registry := storage.NewFileRegistry(cfg.RegistryPath)
+	if err := registry.EnsureLegacy(cfg.DataUUID, cfg.DataLabel); err != nil {
+		logger.Error("初始化存储设备登记册失败", "error", err)
+		os.Exit(1)
+	}
+	detector := storage.NewRegisteredLSBLKDetector(runner, registry, cfg.DataUUID, cfg.DataLabel)
+	if active, exists, registryErr := registry.Active(); registryErr != nil {
+		logger.Error("读取活动存储设备登记失败", "error", registryErr)
+		os.Exit(1)
+	} else if exists && (active.UUID == "" || active.Serial == "" || active.SizeBytes == 0) {
+		migrationCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		device, detectErr := detector.Detect(migrationCtx)
+		cancel()
+		if detectErr == nil {
+			if err := registry.Complete(storage.DeviceRecord{
+				UUID: device.UUID, Label: device.Label, StablePath: active.StablePath,
+				Serial: device.Serial, Model: device.Model, SizeBytes: device.SizeBytes,
+			}); err != nil {
+				logger.Error("升级旧数据盘登记失败", "error", err)
+				os.Exit(1)
+			}
+		} else if !errors.Is(detectErr, storage.ErrDeviceNotFound) {
+			logger.Warn("暂时无法升级旧数据盘登记", "error", detectErr)
+		}
+	}
 	inspector := backing.NewInspector(backing.Layout{
 		Root:         cfg.DataMountPath,
 		ImagePath:    cfg.ImagePath,
@@ -45,7 +72,7 @@ func main() {
 		StatePath:    cfg.StatePath,
 	})
 	prober := gadget.NewFSProber(cfg.ConfigFSPath, cfg.UDCPath)
-	mounter := datamount.New(runner, cfg.DataMountPath, cfg.DataUUID, cfg.DataLabel)
+	mounter := datamount.NewRegistered(runner, cfg.DataMountPath, registry, cfg.DataUUID, cfg.DataLabel)
 	gadgetManager := gadget.NewManager(gadget.Config{
 		ConfigFSPath:  cfg.ConfigFSPath,
 		UDCPath:       cfg.UDCPath,
@@ -67,6 +94,13 @@ func main() {
 		MinFreePercent: cfg.MinFreePercent,
 	})
 	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(), logger)
+	driveInspector := driveinit.NewLSBLKInspector(runner)
+	storageAdmin := storageadmin.New(storageadmin.Config{
+		DataRoot:   cfg.DataMountPath,
+		ImagePath:  filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		DataLabel:  cfg.DataLabel,
+		ImageLabel: "TESLACAM",
+	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager)
 	authManager, err := webauth.New(webauth.Config{
 		PasswordSHA256: cfg.WebPasswordSHA256,
 		SessionSecret:  cfg.WebSessionSecret,
@@ -77,13 +111,14 @@ func main() {
 		os.Exit(1)
 	}
 	deviceAdmin := deviceadmin.New(runner, logger)
-	apiHandler := api.NewHandler(manager, logger, api.WithDeviceAdmin(deviceAdmin))
+	apiHandler := api.NewHandler(manager, logger, api.WithDeviceAdmin(deviceAdmin), api.WithStorageAdmin(storageAdmin))
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go manager.Run(ctx)
+	go deviceAdmin.Run(ctx)
 	watchReloadSignal(ctx, manager)
 
 	server := &http.Server{

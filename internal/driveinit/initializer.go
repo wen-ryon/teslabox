@@ -33,6 +33,8 @@ type Device struct {
 	Serial        string
 	Size          int64
 	FileSystem    string
+	UUID          string
+	Label         string
 	MountPoint    string
 	Children      []Device
 }
@@ -73,7 +75,7 @@ func (i *LSBLKInspector) Inspect(ctx context.Context, stablePath string) (Device
 		return Device{}, fmt.Errorf("解析设备稳定路径: %w", err)
 	}
 
-	output, err := i.runner.Run(ctx, "lsblk", "--json", "--tree", "--bytes", "--output", "PATH,TYPE,SIZE,TRAN,MODEL,SERIAL,FSTYPE,MOUNTPOINT", resolved)
+	output, err := i.runner.Run(ctx, "lsblk", "--json", "--tree", "--bytes", "--output", "PATH,TYPE,SIZE,TRAN,MODEL,SERIAL,FSTYPE,UUID,LABEL,MOUNTPOINT", resolved)
 	if err != nil {
 		return Device{}, fmt.Errorf("读取目标块设备: %w", err)
 	}
@@ -102,6 +104,8 @@ type lsblkDevice struct {
 	Model      string        `json:"model"`
 	Serial     string        `json:"serial"`
 	FileSystem string        `json:"fstype"`
+	UUID       string        `json:"uuid"`
+	Label      string        `json:"label"`
 	MountPoint *string       `json:"mountpoint"`
 	Children   []lsblkDevice `json:"children"`
 }
@@ -115,6 +119,8 @@ func (d lsblkDevice) device() Device {
 		Serial:       strings.TrimSpace(d.Serial),
 		Size:         d.Size,
 		FileSystem:   strings.TrimSpace(d.FileSystem),
+		UUID:         strings.TrimSpace(d.UUID),
+		Label:        strings.TrimSpace(d.Label),
 	}
 	if d.MountPoint != nil {
 		device.MountPoint = strings.TrimSpace(*d.MountPoint)
@@ -245,7 +251,7 @@ func buildCommands(devicePath, partitionPath string, options Options) []Command 
 		{Name: "udevadm", Args: []string{"settle"}},
 		{Name: "mkfs.xfs", Args: []string{"-f", "-m", "reflink=1", "-L", options.Label, partitionPath}},
 		{Name: "mkdir", Args: []string{"-p", options.MountPath}},
-		{Name: "mount", Args: []string{"-o", "noatime", partitionPath, options.MountPath}},
+		{Name: "mount", Args: []string{"-o", "noatime,nosuid,nodev", partitionPath, options.MountPath}},
 		{Name: "mkdir", Args: append([]string{"-p"}, directories...)},
 		{Name: "sync"},
 	}

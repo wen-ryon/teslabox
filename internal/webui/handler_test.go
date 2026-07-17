@@ -46,7 +46,7 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"session-player-view", "composite-grid", "camera-switcher", "session-timeline",
 		"event-marker-layer", "internet-indicator", "temperature-value", "cpu-value",
 		"memory-value", "system-disk-value", "nav-toggle", "settings-page", "wifi-scan",
-		"ap-form", "shutdown-button", "app.js?v=20260716-9",
+		"ap-form", "storage-device-list", "shutdown-button", "app.js?v=20260717-10",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)

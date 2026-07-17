@@ -19,6 +19,7 @@ const (
 	defaultSnapshotMount  = "/run/teslabox/snapshots"
 	defaultIndexPath      = "index"
 	defaultStatePath      = "state"
+	defaultRegistryPath   = "/var/lib/teslabox-system/storage-registry.json"
 	defaultConfigFSPath   = "/sys/kernel/config/usb_gadget"
 	defaultUDCPath        = "/sys/class/udc"
 	defaultGadgetName     = "teslabox"
@@ -46,6 +47,7 @@ type Config struct {
 	SnapshotMountPath string
 	IndexPath         string
 	StatePath         string
+	RegistryPath      string
 	ConfigFSPath      string
 	UDCPath           string
 	UDCName           string
@@ -114,6 +116,7 @@ func Load() (Config, error) {
 		SnapshotMountPath: envString("TESLABOX_SNAPSHOT_MOUNT_PATH", defaultSnapshotMount),
 		IndexPath:         envString("TESLABOX_INDEX_PATH", defaultIndexPath),
 		StatePath:         envString("TESLABOX_STATE_PATH", defaultStatePath),
+		RegistryPath:      envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		ConfigFSPath:      envString("TESLABOX_CONFIGFS_PATH", defaultConfigFSPath),
 		UDCPath:           envString("TESLABOX_UDC_PATH", defaultUDCPath),
 		UDCName:           strings.TrimSpace(os.Getenv("TESLABOX_UDC_NAME")),
@@ -165,6 +168,9 @@ func (c Config) Validate() error {
 	}
 	if !isSafeAbsolutePath(c.SnapshotMountPath) {
 		return fmt.Errorf("TESLABOX_SNAPSHOT_MOUNT_PATH 必须是非根目录的绝对路径")
+	}
+	if !isSafeAbsolutePath(c.RegistryPath) {
+		return fmt.Errorf("TESLABOX_STORAGE_REGISTRY 必须是非根目录的绝对路径")
 	}
 	for name, value := range map[string]string{
 		"TESLABOX_UDC_NAME":       c.UDCName,

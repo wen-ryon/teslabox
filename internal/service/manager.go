@@ -267,7 +267,7 @@ func (m *Manager) reconcile(ctx context.Context) error {
 	device, err := m.detector.Detect(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrDeviceNotFound) {
-			return m.handleMissingDataDrive(previous)
+			return m.handleMissingDataDrive(ctx, previous)
 		}
 		return m.stopForFault(nil, fmt.Errorf("检测数据盘: %w", err))
 	}
@@ -487,7 +487,7 @@ func (m *Manager) cleanupRetiredUntil(ctx context.Context, keep int) error {
 	return nil
 }
 
-func (m *Manager) handleMissingDataDrive(previous Snapshot) error {
+func (m *Manager) handleMissingDataDrive(ctx context.Context, previous Snapshot) error {
 	status, inspectErr := m.lifecycle.Inspect()
 	wasActive := previous.Phase == PhaseGadgetActive || previous.Phase == PhaseSnapshotCreating || previous.Phase == PhaseSnapshotReady ||
 		(previous.Phase == PhaseFault && previous.LastError == ErrDataDriveDisconnected.Error())
@@ -495,13 +495,15 @@ func (m *Manager) handleMissingDataDrive(previous Snapshot) error {
 		wasActive = wasActive || status.Bound
 	}
 	status, stopErr := m.lifecycle.Stop()
+	cleanupErr := m.cleanupDisconnectedSnapshots(ctx, previous)
 	now := time.Now()
 	state := Snapshot{Phase: PhaseWaitingForDataDrive, GadgetStatus: status, LastRefreshAt: &now}
-	if stopErr != nil {
+	if stopErr != nil || cleanupErr != nil {
 		state.Phase = PhaseFault
-		state.LastError = fmt.Sprintf("数据盘缺失且停止 Gadget 失败: %v", stopErr)
+		cause := errors.Join(stopErr, cleanupErr)
+		state.LastError = fmt.Sprintf("数据盘缺失且安全回收失败: %v", cause)
 		m.store(state)
-		resultErr := fmt.Errorf("数据盘缺失且停止 Gadget: %w", stopErr)
+		resultErr := fmt.Errorf("数据盘缺失且安全回收: %w", cause)
 		if inspectErr != nil {
 			resultErr = errors.Join(fmt.Errorf("检查缺盘时的 Gadget: %w", inspectErr), resultErr)
 		}
@@ -515,6 +517,24 @@ func (m *Manager) handleMissingDataDrive(previous Snapshot) error {
 	}
 	m.store(state)
 	return storage.ErrDeviceNotFound
+}
+
+func (m *Manager) cleanupDisconnectedSnapshots(ctx context.Context, previous Snapshot) error {
+	views := slices.Clone(m.retired)
+	if previous.MediaSnapshot != nil {
+		views = append(views, *previous.MediaSnapshot)
+	}
+	m.retired = nil
+	m.snapshotRecovered = false
+	m.snapshotFailures = 0
+	m.snapshotRetryAt = time.Time{}
+	var result error
+	for _, view := range views {
+		if err := m.snapshotter.Remove(ctx, view); err != nil {
+			result = errors.Join(result, fmt.Errorf("回收掉盘快照 %s: %w", view.ID, err))
+		}
+	}
+	return result
 }
 
 func (m *Manager) stopForFault(device *storage.Device, cause error) error {

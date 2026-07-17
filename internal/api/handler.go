@@ -17,6 +17,7 @@ import (
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/service"
+	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 )
 
@@ -32,14 +33,23 @@ type DeviceAdmin interface {
 	WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error)
 	Scan(context.Context) ([]deviceadmin.AccessPoint, error)
 	Connect(context.Context, deviceadmin.ConnectRequest) error
+	SetAutoConnect(context.Context, deviceadmin.AutoConnectUpdate) error
 	Forget(context.Context, string) error
 	APSettings(context.Context) (deviceadmin.APSettings, error)
 	UpdateAP(context.Context, deviceadmin.APUpdate) error
 	SchedulePower(string) error
 }
 
+// StorageAdmin 定义设置中心的外接存储发现和显式初始化能力。
+type StorageAdmin interface {
+	Status(context.Context) (storageadmin.Status, error)
+	Initialize(context.Context, storageadmin.InitializeRequest) (storageadmin.Candidate, error)
+	Cancel(context.Context, storageadmin.CancelRequest) error
+}
+
 type handlerOptions struct {
-	deviceAdmin DeviceAdmin
+	deviceAdmin  DeviceAdmin
+	storageAdmin StorageAdmin
 }
 
 // Option 配置可选的 API 能力。
@@ -48,6 +58,11 @@ type Option func(*handlerOptions)
 // WithDeviceAdmin 启用设置中心的设备管理接口。
 func WithDeviceAdmin(admin DeviceAdmin) Option {
 	return func(options *handlerOptions) { options.deviceAdmin = admin }
+}
+
+// WithStorageAdmin 启用外接存储登记和初始化接口。
+func WithStorageAdmin(admin StorageAdmin) Option {
+	return func(options *handlerOptions) { options.storageAdmin = admin }
 }
 
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
@@ -107,7 +122,61 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.deviceAdmin != nil {
 		registerDeviceAdminRoutes(mux, settings.deviceAdmin, logger)
 	}
+	if settings.storageAdmin != nil {
+		registerStorageAdminRoutes(mux, settings.storageAdmin, logger)
+	}
 	return requestLogger(mux, logger)
+}
+
+func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/storage/devices", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.Status(r.Context())
+		if err != nil {
+			logger.Warn("读取外接存储设备失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取外接存储设备"})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/storage/initialize", func(w http.ResponseWriter, r *http.Request) {
+		var input storageadmin.InitializeRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		device, err := admin.Initialize(r.Context(), input)
+		if err != nil {
+			logger.Warn("初始化外接存储设备失败", "device", input.StablePath, "error", err)
+			if errors.Is(err, storageadmin.ErrUnsafeState) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "当前数据盘或车机 USB 正在使用，必须先安全移除原数据盘"})
+				return
+			}
+			var inputError *storageadmin.InputError
+			if errors.As(err, &inputError) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "存储设备初始化失败，请查看设备状态后重试"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"initialized": true, "device": device})
+	})
+	mux.HandleFunc("POST /api/v1/storage/initialize/cancel", func(w http.ResponseWriter, r *http.Request) {
+		var input storageadmin.CancelRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.Cancel(r.Context(), input); err != nil {
+			logger.Warn("放弃外接存储初始化失败", "device", input.StablePath, "error", err)
+			var inputError *storageadmin.InputError
+			if errors.As(err, &inputError) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法放弃初始化任务"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+	})
 }
 
 func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *slog.Logger) {
@@ -137,6 +206,17 @@ func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *sl
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+	})
+	mux.HandleFunc("POST /api/v1/network/wifi/autoconnect", func(w http.ResponseWriter, r *http.Request) {
+		var input deviceadmin.AutoConnectUpdate
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.SetAutoConnect(r.Context(), input); err != nil {
+			writeDeviceAdminError(w, logger, "更新 WiFi 自动连接设置失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
 	})
 	mux.HandleFunc("POST /api/v1/network/wifi/forget", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {

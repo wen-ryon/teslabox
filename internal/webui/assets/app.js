@@ -8,7 +8,7 @@ const state = {
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
   page: window.location.pathname === "/settings" ? "settings" : "dashboard",
-  wifi: null, ap: null,
+  wifi: null, ap: null, storage: null,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -33,6 +33,7 @@ let allSessions = [];
 let compositeTracks = new Map();
 let lastCompositeSync = 0;
 let pendingWiFi = null;
+let pendingStorage = null;
 let confirmResolver = null;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
@@ -124,7 +125,10 @@ $("wifi-scan").addEventListener("click", scanWiFi);
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
 $("ap-form").addEventListener("submit", saveAPSettings);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
+$("storage-refresh").addEventListener("click", loadStorageDevices);
+$("storage-init-form").addEventListener("submit", initializeStorageDevice);
 document.querySelectorAll("[data-close-wifi]").forEach((element) => element.addEventListener("click", closeWiFiModal));
+document.querySelectorAll("[data-close-storage]").forEach((element) => element.addEventListener("click", closeStorageModal));
 document.querySelectorAll("[data-close-confirm]").forEach((element) => element.addEventListener("click", () => resolveConfirmation(false)));
 $("confirm-submit").addEventListener("click", () => resolveConfirmation(true));
 $("reboot-button").addEventListener("click", () => requestPower("reboot"));
@@ -186,8 +190,8 @@ async function postJSON(path, body) {
 
 async function loadSettings() {
   setSettingsNotice("正在读取网络设置…", false);
-  const [wifiResult, apResult] = await Promise.allSettled([
-    request("/api/v1/network/wifi"), request("/api/v1/network/ap"),
+  const [wifiResult, apResult, storageResult] = await Promise.allSettled([
+    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"),
   ]);
   if (wifiResult.status === "fulfilled") {
     state.wifi = wifiResult.value;
@@ -201,15 +205,29 @@ async function loadSettings() {
   } else {
     renderAPUnavailable(apResult.reason.message);
   }
-  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
-  else setSettingsNotice("部分设置暂不可用，请检查 NetworkManager 状态", true);
+  if (storageResult.status === "fulfilled") {
+    state.storage = storageResult.value;
+    renderStorageDevices(state.storage);
+  } else {
+    renderStorageUnavailable(storageResult.reason.message);
+  }
+  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
+  else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
 }
 
 function renderWiFiSettings(wifi) {
   $("wifi-interface").textContent = wifi.available ? wifi.interface : "不可用";
   $("wifi-interface").className = `badge${wifi.available ? " ok" : " error"}`;
-  $("wifi-warning").hidden = !wifi.single_radio_notice;
-  $("wifi-warning").textContent = wifi.single_radio_notice || "";
+  const warnings = [];
+  if (wifi.single_radio_notice) warnings.push(wifi.single_radio_notice);
+  if (wifi.recovery?.last_error) {
+    const retry = wifi.recovery.next_attempt_at ? `，下次尝试 ${new Date(wifi.recovery.next_attempt_at).toLocaleTimeString("zh-CN", {hour12:false})}` : "";
+    warnings.push(`上游自动恢复：${wifi.recovery.last_error}${retry}`);
+  } else if (wifi.recovery?.last_success_at) {
+    warnings.push(`上游自动恢复最近成功：${new Date(wifi.recovery.last_success_at).toLocaleString("zh-CN", {hour12:false})}`);
+  }
+  $("wifi-warning").hidden = warnings.length === 0;
+  $("wifi-warning").textContent = warnings.join(" ");
   renderSavedNetworks(wifi.saved_networks || []);
   renderAvailableNetworks(wifi.available_networks || []);
   $("wifi-scan").disabled = false;
@@ -248,6 +266,16 @@ function renderSavedNetworks(networks) {
     identity.append(title, detail);
     const actions = document.createElement("div");
     actions.className = "network-actions";
+    const autoConnect = document.createElement("label");
+    autoConnect.className = "auto-connect-control";
+    const autoConnectInput = document.createElement("input");
+    autoConnectInput.type = "checkbox";
+    autoConnectInput.checked = Boolean(network.auto_connect);
+    autoConnectInput.setAttribute("aria-label", `${network.ssid || network.name} 自动连接`);
+    autoConnectInput.addEventListener("change", () => updateWiFiAutoConnect(network, autoConnectInput));
+    const autoConnectText = document.createElement("span");
+    autoConnectText.textContent = "自动连接";
+    autoConnect.append(autoConnectInput, autoConnectText);
     const connect = document.createElement("button");
     connect.type = "button";
     connect.className = "secondary";
@@ -260,7 +288,7 @@ function renderSavedNetworks(networks) {
     forget.textContent = "忘记";
     forget.disabled = network.active;
     forget.addEventListener("click", () => forgetWiFi(network));
-    actions.append(connect, forget);
+    actions.append(autoConnect, connect, forget);
     row.append(identity, actions);
     list.append(row);
   });
@@ -328,7 +356,27 @@ async function scanWiFi() {
 }
 
 async function connectSavedWiFi(network) {
-  await runWiFiConnect({uuid:network.uuid});
+  const accessPoint = (state.wifi?.available_networks || []).find((item) => item.ssid === network.ssid);
+  await runWiFiConnect({
+    uuid:network.uuid,
+    bssid:accessPoint?.bssid || "",
+    channel:Number(accessPoint?.channel || 0),
+  });
+}
+
+async function updateWiFiAutoConnect(network, input) {
+  const enabled = input.checked;
+  input.disabled = true;
+  try {
+    await postJSON("/api/v1/network/wifi/autoconnect", {uuid:network.uuid, enabled});
+    network.auto_connect = enabled;
+    setSettingsNotice(enabled ? "已开启自动连接" : "已关闭自动连接", false);
+  } catch (error) {
+    input.checked = !enabled;
+    setSettingsNotice(error.message, true);
+  } finally {
+    input.disabled = false;
+  }
 }
 
 function openAvailableWiFi(network) {
@@ -344,6 +392,7 @@ function openAvailableWiFi(network) {
   $("wifi-password-label").hidden = !needsPassword;
   $("wifi-password").required = needsPassword;
   $("wifi-password").value = "";
+  $("wifi-autoconnect").checked = true;
   $("wifi-modal").hidden = false;
   if (needsPassword) window.setTimeout(() => $("wifi-password").focus(), 0);
 }
@@ -361,12 +410,13 @@ async function connectNewWiFi(event) {
   const password = $("wifi-password").value;
   closeWiFiModal();
   await runWiFiConnect({
-    ssid:network.ssid, security:network.security, password,
+    ssid:network.ssid, bssid:network.bssid, channel:Number(network.channel || 0),
+    security:network.security, password, auto_connect:$("wifi-autoconnect").checked,
   });
 }
 
 async function runWiFiConnect(payload) {
-  setSettingsNotice("正在切换 WiFi，当前页面可能断开…", false);
+  setSettingsNotice("正在连接 WiFi；若需要同步信道，热点会短暂重启…", false);
   try {
     await postJSON("/api/v1/network/wifi/connect", payload);
     setSettingsNotice("WiFi 已连接", false);
@@ -436,6 +486,154 @@ async function saveAPSettings(event) {
     $("ap-password").value = "";
     setSettingsNotice("热点设置已应用", false);
     await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function loadStorageDevices() {
+  const button = $("storage-refresh");
+  button.disabled = true;
+  try {
+    state.storage = await request("/api/v1/storage/devices");
+    renderStorageDevices(state.storage);
+    setSettingsNotice("存储设备列表已更新", false);
+  } catch (error) {
+    renderStorageUnavailable(error.message);
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderStorageDevices(storage) {
+  const devices = storage.devices || [];
+  const list = $("storage-device-list");
+  list.replaceChildren();
+  const ready = devices.filter((device) => device.initialized).length;
+  $("storage-status").textContent = ready ? `${ready} 个已初始化` : devices.length ? "需要初始化" : "未检测到设备";
+  $("storage-status").className = `badge${ready ? " ok" : devices.length ? " error" : ""}`;
+  if (!devices.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "未检测到具有稳定 by-id 的 USB 存储整盘";
+    list.append(empty);
+    return;
+  }
+  devices.forEach((device) => {
+    const row = document.createElement("article");
+    row.className = "storage-device-row";
+    const identity = document.createElement("div");
+    identity.className = "storage-device-identity";
+    const title = document.createElement("strong");
+    title.textContent = device.model || "USB 存储设备";
+    const detail = document.createElement("small");
+    detail.textContent = `${formatBytes(device.size_bytes)} · 序列号 ${device.serial || "不可用"}`;
+    const path = document.createElement("code");
+    path.textContent = device.stable_path;
+    identity.append(title, detail, path);
+    const stateBox = document.createElement("div");
+    stateBox.className = "storage-device-actions";
+    const badge = document.createElement("span");
+    badge.className = `badge${device.active || device.initialized ? " ok" : " error"}`;
+    badge.textContent = storageStateLabel(device);
+    const reason = document.createElement("small");
+    reason.textContent = device.last_error || device.reason || "—";
+    stateBox.append(badge, reason);
+    if (device.can_initialize || device.can_resume) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = device.can_resume ? "secondary compact" : "danger-button compact";
+      button.textContent = device.can_resume ? "继续初始化" : "初始化设备";
+      button.addEventListener("click", () => openStorageModal(device));
+      stateBox.append(button);
+    }
+    if (device.can_cancel) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "ghost compact";
+      cancel.textContent = "放弃未完成任务";
+      cancel.addEventListener("click", () => cancelStorageInitialization(device));
+      stateBox.append(cancel);
+    }
+    row.append(identity, stateBox);
+    list.append(row);
+  });
+}
+
+function renderStorageUnavailable(message) {
+  $("storage-status").textContent = "不可用";
+  $("storage-status").className = "badge error";
+  const list = $("storage-device-list");
+  list.replaceChildren();
+  const error = document.createElement("p");
+  error.className = "empty-state";
+  error.textContent = message;
+  list.append(error);
+}
+
+function storageStateLabel(device) {
+  if (device.active) return "当前数据盘";
+  if (device.initialized) return "已初始化";
+  if (device.state === "initializing") return "初始化中断";
+  if (device.state === "failed") return "初始化失败";
+  if (device.state === "unsafe") return "正在使用";
+  if (device.state === "unsupported") return "不支持";
+  return "未初始化";
+}
+
+function openStorageModal(device) {
+  pendingStorage = device;
+  $("storage-modal-title").textContent = device.can_resume ? "继续初始化存储设备" : "初始化存储设备";
+  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，${formatBytes(device.size_bytes)}。目标序列号：${device.serial}。该操作可能擦除整块设备。`;
+  $("storage-confirm-serial").value = "";
+  $("storage-confirm-erase").checked = false;
+  $("storage-modal").hidden = false;
+  $("storage-confirm-serial").focus();
+}
+
+function closeStorageModal() {
+  $("storage-modal").hidden = true;
+  pendingStorage = null;
+}
+
+async function initializeStorageDevice(event) {
+  event.preventDefault();
+  if (!pendingStorage) return;
+  const button = $("storage-init-submit");
+  button.disabled = true;
+  button.textContent = "初始化中，请勿拔出…";
+  try {
+    await postJSON("/api/v1/storage/initialize", {
+      stable_path:pendingStorage.stable_path,
+      confirm_serial:$("storage-confirm-serial").value,
+      confirm_erase:$("storage-confirm-erase").checked,
+    });
+    closeStorageModal();
+    setSettingsNotice("存储设备初始化完成，正在恢复 TeslaUSB", false);
+    await loadStorageDevices();
+    await refreshAll();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "擦除并初始化";
+  }
+}
+
+async function cancelStorageInitialization(device) {
+  const confirmed = await askConfirmation(
+    "放弃未完成初始化",
+    `将卸载 ${device.model || "目标设备"} 并恢复原活动数据盘选择，不会再次擦除设备。`,
+    "确认放弃", true,
+  );
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/storage/initialize/cancel", {
+      stable_path:device.stable_path, confirm_serial:device.serial,
+    });
+    setSettingsNotice("已放弃未完成初始化任务", false);
+    await loadStorageDevices();
   } catch (error) {
     setSettingsNotice(error.message, true);
   }

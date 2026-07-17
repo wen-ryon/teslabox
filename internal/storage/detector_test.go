@@ -11,6 +11,13 @@ type fakeRunner struct {
 	err    error
 }
 
+type fakeIdentitySource struct {
+	record DeviceRecord
+	exists bool
+}
+
+func (f fakeIdentitySource) Active() (DeviceRecord, bool, error) { return f.record, f.exists, nil }
+
 func (r fakeRunner) Run(context.Context, string, ...string) ([]byte, error) {
 	return []byte(r.output), r.err
 }
@@ -69,6 +76,16 @@ func TestLSBLKDetectorRejectsDuplicateLabel(t *testing.T) {
 func TestLSBLKDetectorDetectNotFound(t *testing.T) {
 	t.Parallel()
 	detector := NewLSBLKDetector(fakeRunner{output: `{"blockdevices":[]}`}, "", "TESLABOX")
+	_, err := detector.Detect(t.Context())
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("Detect() error = %v, want ErrDeviceNotFound", err)
+	}
+}
+
+func TestRegisteredDetectorDoesNotFallbackWhileRegistryHasNoActiveDevice(t *testing.T) {
+	t.Parallel()
+	payload := `{"blockdevices":[{"path":"/dev/sda","type":"disk","children":[{"path":"/dev/sda1","uuid":"legacy","label":"TESLABOX","type":"part"}]}]}`
+	detector := NewRegisteredLSBLKDetector(fakeRunner{output: payload}, fakeIdentitySource{}, "legacy", "TESLABOX")
 	_, err := detector.Detect(t.Context())
 	if !errors.Is(err, ErrDeviceNotFound) {
 		t.Fatalf("Detect() error = %v, want ErrDeviceNotFound", err)

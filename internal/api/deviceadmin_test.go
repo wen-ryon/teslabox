@@ -13,8 +13,9 @@ import (
 )
 
 type fakeDeviceAdmin struct {
-	status      deviceadmin.WiFiStatus
-	powerAction string
+	status            deviceadmin.WiFiStatus
+	autoConnectUpdate deviceadmin.AutoConnectUpdate
+	powerAction       string
 }
 
 func (a *fakeDeviceAdmin) WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error) {
@@ -24,7 +25,11 @@ func (a *fakeDeviceAdmin) Scan(context.Context) ([]deviceadmin.AccessPoint, erro
 	return []deviceadmin.AccessPoint{}, nil
 }
 func (a *fakeDeviceAdmin) Connect(context.Context, deviceadmin.ConnectRequest) error { return nil }
-func (a *fakeDeviceAdmin) Forget(context.Context, string) error                      { return nil }
+func (a *fakeDeviceAdmin) SetAutoConnect(_ context.Context, update deviceadmin.AutoConnectUpdate) error {
+	a.autoConnectUpdate = update
+	return nil
+}
+func (a *fakeDeviceAdmin) Forget(context.Context, string) error { return nil }
 func (a *fakeDeviceAdmin) APSettings(context.Context) (deviceadmin.APSettings, error) {
 	return deviceadmin.APSettings{Available: true, SSID: "TeslaBox-5G"}, nil
 }
@@ -43,6 +48,17 @@ func TestDeviceAdminRoutes(t *testing.T) {
 	handler.ServeHTTP(wifi, httptest.NewRequest(http.MethodGet, "/api/v1/network/wifi", nil))
 	if wifi.Code != http.StatusOK || !strings.Contains(wifi.Body.String(), `"interface":"wlan0"`) {
 		t.Fatalf("wifi status = %d, body = %s", wifi.Code, wifi.Body.String())
+	}
+
+	autoConnect := httptest.NewRecorder()
+	autoConnectRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/network/wifi/autoconnect",
+		strings.NewReader(`{"uuid":"11111111-1111-1111-1111-111111111111","enabled":true}`),
+	)
+	handler.ServeHTTP(autoConnect, autoConnectRequest)
+	if autoConnect.Code != http.StatusOK || !admin.autoConnectUpdate.Enabled {
+		t.Fatalf("autoconnect status = %d, update = %#v", autoConnect.Code, admin.autoConnectUpdate)
 	}
 
 	power := httptest.NewRecorder()
