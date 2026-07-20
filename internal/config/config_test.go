@@ -35,6 +35,18 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadUsesDefaultHTTPAddr(t *testing.T) {
+	t.Setenv("TESLABOX_HTTP_ADDR", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.HTTPAddr != ":80" {
+		t.Errorf("HTTPAddr = %q, want :80", cfg.HTTPAddr)
+	}
+}
+
 func TestLoadRejectsInvalidDuration(t *testing.T) {
 	t.Setenv("TESLABOX_SCAN_INTERVAL", "immediately")
 	if _, err := Load(); err == nil {
@@ -51,7 +63,7 @@ func TestLoadRejectsInvalidFreeSpaceThreshold(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	valid := Config{
-		HTTPAddr:          ":8080",
+		HTTPAddr:          ":80",
 		DataLabel:         "TESLABOX",
 		DataMountPath:     "/var/lib/teslabox",
 		ImagePath:         "images/teslacam.img",

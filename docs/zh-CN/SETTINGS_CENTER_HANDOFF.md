@@ -25,7 +25,7 @@
 | 加密 | WPA-PSK |
 | AP 地址 | `192.168.88.1/24` |
 | 共享方式 | NetworkManager `ipv4.method=shared` |
-| 当前管理地址 | `192.0.2.38:8080`（有线，以实际 DHCP 地址为准） |
+| 当前管理地址 | `http://192.0.2.38/`（有线，以实际 DHCP 地址为准） |
 
 已经存在 `TeslaBox-Upstream`、`WendeWiFi_5G` 等客户端连接配置。后端不会读取或返回任何已保存 WiFi 密码。
 

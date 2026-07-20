@@ -29,7 +29,7 @@ func main() {
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("teslabox-acceptance", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	baseURL := flags.String("base-url", "http://127.0.0.1:8080", "TeslaBox API 根地址")
+	baseURL := flags.String("base-url", "http://127.0.0.1", "TeslaBox API 根地址")
 	duration := flags.Duration("duration", 10*time.Minute, "持续验收时长")
 	interval := flags.Duration("interval", 5*time.Second, "状态和 Range 探测间隔")
 	requestTimeout := flags.Duration("request-timeout", 5*time.Second, "单个 HTTP 请求超时")

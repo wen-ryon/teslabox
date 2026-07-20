@@ -48,10 +48,45 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"memory-value", "system-disk-value", "nav-toggle", "settings-page", "wifi-scan",
 		"ap-form", "storage-device-list", "shutdown-button", "appearance-toggle", "appearance-menu",
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
-		"logout-button", "app.js?v=20260717-14",
+		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
+		"app.js?v=20260720-4",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerServesCompositeLayoutGeometry(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.css", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	for _, marker := range []string{
+		`.composite-grid[data-layout="composite4b"]`, `grid-template-rows: 3fr 1fr`,
+		`.composite-grid[data-layout="composite3"]`, `grid-template-rows: 2fr 1fr`, `width: 100vw !important`,
+	} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("播放器布局样式缺少标记 %q", marker)
+		}
+	}
+
+	scriptRequest := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil)
+	scriptRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(scriptRecorder, scriptRequest)
+	if scriptRecorder.Code != http.StatusOK {
+		t.Fatalf("script status = %d, body = %s", scriptRecorder.Code, scriptRecorder.Body.String())
+	}
+	for _, marker := range []string{
+		"applyCompositeFrameGeometry", "layoutFactors", "composite6:3/2", "composite4a:1",
+		"composite4b:3/4", "composite3:2/3", "fitCompositeFrame", "fitFullscreenCompositeGrid", "isPlayerFullscreen",
+	} {
+		if !strings.Contains(scriptRecorder.Body.String(), marker) {
+			t.Errorf("播放器布局脚本缺少标记 %q", marker)
 		}
 	}
 }
@@ -65,7 +100,10 @@ func TestHandlerServesPersistentAppearancePreferences(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	for _, marker := range []string{"localStorage", "teslabox-theme", "teslabox-settings-font"} {
+	for _, marker := range []string{
+		"localStorage", "teslabox-theme", "teslabox-settings-font", "teslabox-player-layout",
+		"teslabox-playback-quality", "四路合成 A", "四路合成 B", "三路合成",
+	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("外观设置脚本缺少持久化标记 %q", marker)
 		}

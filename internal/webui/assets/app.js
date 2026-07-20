@@ -1,9 +1,16 @@
 "use strict";
 
 const cameraOrder = ["left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"];
+const compositeLayouts = {
+  composite6: {label:"六路合成", cameras:cameraOrder},
+  composite4a: {label:"四路合成 A", cameras:["front", "back", "right_repeater", "left_repeater"]},
+  composite4b: {label:"四路合成 B", cameras:["front", "right_repeater", "back", "left_repeater"]},
+  composite3: {label:"三路合成", cameras:["front", "right_repeater", "left_repeater"]},
+};
 const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
+const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
 const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
@@ -29,13 +36,20 @@ let activeVideo = null;
 let activeMomentIndex = -1;
 let requestedPosition = 0;
 let loadToken = 0;
-let activeDisplay = "composite";
+let activeDisplay = normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6"));
 let allSessions = [];
 let compositeTracks = new Map();
 let lastCompositeSync = 0;
 let pendingWiFi = null;
 let pendingStorage = null;
 let confirmResolver = null;
+let playbackQuality = savedPlaybackQuality;
+let playbackDiagnosticsTimer = 0;
+let playbackStalls = 0;
+let isPlaybackBuffering = false;
+let mediaThroughputSamples = [];
+let activeCompositeAspect = 0;
+const observedMediaEntries = new Set();
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
@@ -148,6 +162,8 @@ $("play-toggle").addEventListener("click", togglePlayback);
 $("session-timeline").addEventListener("input", previewTimelinePosition);
 $("session-timeline").addEventListener("change", seekTimelinePosition);
 $("fullscreen-button").addEventListener("click", enterFullscreen);
+$("player-quality").value = playbackQuality;
+$("player-quality").addEventListener("change", (event) => setPlaybackQuality(event.target.value));
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-period]").forEach((button) => button.addEventListener("click", () => setPeriod(button.dataset.period)));
 document.querySelectorAll("[data-close-player]").forEach((element) => element.addEventListener("click", closePlayer));
@@ -163,6 +179,12 @@ sessionVideo.addEventListener("timeupdate", updateUnifiedTimeline);
 sessionVideo.addEventListener("ended", advanceToNextSegment);
 sessionVideo.addEventListener("play", updatePlayButton);
 sessionVideo.addEventListener("pause", updatePlayButton);
+sessionVideo.addEventListener("waiting", markPlaybackStall);
+sessionVideo.addEventListener("playing", () => { isPlaybackBuffering = false; });
+navigator.connection?.addEventListener?.("change", updatePlaybackDiagnostics);
+window.addEventListener("resize", handlePlayerViewportChange);
+document.addEventListener("fullscreenchange", handlePlayerViewportChange);
+document.addEventListener("webkitfullscreenchange", handlePlayerViewportChange);
 
 async function refreshAll() {
   await Promise.allSettled([loadStatus(), loadSessions(false)]);
@@ -988,7 +1010,7 @@ async function openSessionPlayer(summary, camera, position, display) {
     closePlayerMedia();
     activeSession = session;
     activeCamera = session.cameras.includes(camera) ? camera : preferredCamera(session);
-    activeDisplay = display === "composite" ? "composite" : "single";
+    activeDisplay = display === "composite" ? normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6")) : "single";
     $("player-title").textContent = formatSessionRange(session.start_at, session.end_at);
     renderPlayerMeta(session);
     $("session-timeline").max = String(session.duration_seconds);
@@ -1001,6 +1023,8 @@ async function openSessionPlayer(summary, camera, position, display) {
     applyDisplayState();
     playerModal.hidden = false;
     document.body.style.overflow = "hidden";
+    resetPlaybackDiagnostics();
+    startPlaybackDiagnostics();
     await loadSessionPosition(position, false);
   } catch (error) {
     setNotice(`无法打开录像：${error.message}`, true);
@@ -1010,12 +1034,14 @@ async function openSessionPlayer(summary, camera, position, display) {
 function renderCameraSwitcher() {
   const switcher = $("camera-switcher");
   switcher.replaceChildren();
-  const compositeButton = document.createElement("button");
-  compositeButton.type = "button";
-  compositeButton.textContent = "六路合成";
-  compositeButton.classList.toggle("active", activeDisplay === "composite");
-  compositeButton.addEventListener("click", () => setDisplayMode("composite"));
-  switcher.append(compositeButton);
+  Object.entries(compositeLayouts).forEach(([display, layout]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = layout.label;
+    button.classList.toggle("active", activeDisplay === display);
+    button.addEventListener("click", () => setDisplayMode(display));
+    switcher.append(button);
+  });
   cameraOrder.forEach((camera) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -1076,7 +1102,7 @@ function renderEventMarker() {
 async function loadSessionPosition(position, autoplay) {
   if (!activeSession) return;
   requestedPosition = Math.max(0, Math.min(Number(position), Number(activeSession.duration_seconds)));
-  if (activeDisplay === "composite") {
+  if (isCompositeDisplay(activeDisplay)) {
     await loadCompositePosition(requestedPosition, autoplay);
     return;
   }
@@ -1120,12 +1146,21 @@ async function loadCompositePosition(position, autoplay) {
   }
   hidePlayerMessage();
   activeMomentIndex = selection.momentIndex;
-  const masterVideo = selection.moment.videos.find((video) => video.camera === "front") || selection.moment.videos[0];
+  const layout = compositeLayouts[activeDisplay] || compositeLayouts.composite6;
+  const layoutVideos = layout.cameras
+    .map((camera) => selection.moment.videos.find((video) => video.camera === camera))
+    .filter(Boolean);
+  if (layoutVideos.length === 0) {
+    showPlayerMessage("这个时刻缺少当前布局需要的摄像头画面");
+    pauseCompositeTracks();
+    return;
+  }
+  const masterVideo = layoutVideos.find((video) => video.camera === "front") || layoutVideos[0];
   activeCamera = masterVideo.camera;
   activeVideo = masterVideo;
   const token = ++loadToken;
   const nextTracks = new Map();
-  const preparations = selection.moment.videos.map(async (video) => {
+  const preparations = layoutVideos.map(async (video) => {
     const element = video.id === masterVideo.id ? sessionVideo : compositeVideoElement(video.camera);
     element.muted = true;
     element.preload = "auto";
@@ -1135,9 +1170,10 @@ async function loadCompositePosition(position, autoplay) {
   });
   await Promise.all(preparations);
   if (token !== loadToken) return;
+  applyCompositeFrameGeometry(nextTracks.get(masterVideo.camera)?.element);
   clearUnusedCompositeTracks(nextTracks);
   compositeTracks = nextTracks;
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${selection.moment.videos.length} 路同窗`;
+  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${layoutVideos.length} 路可用`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   renderCameraSwitcher();
   if (autoplay) await playCompositeTracks();
@@ -1165,9 +1201,11 @@ function compositeVideoElement(camera) {
 }
 
 function ensureCompositeTiles() {
-  if (compositeGrid.childElementCount === cameraOrder.length) return;
+  const layout = compositeLayouts[activeDisplay] || compositeLayouts.composite6;
+  if (compositeGrid.dataset.layout === activeDisplay && compositeGrid.childElementCount === layout.cameras.length) return;
   compositeGrid.replaceChildren();
-  cameraOrder.forEach((camera) => {
+  compositeGrid.dataset.layout = activeDisplay;
+  layout.cameras.forEach((camera) => {
     const tile = document.createElement("div");
     tile.className = "composite-tile";
     tile.dataset.camera = camera;
@@ -1209,7 +1247,8 @@ function clearUnusedCompositeTracks(nextTracks) {
     if (nextTracks.has(camera) || track.element === sessionVideo) return;
     releaseVideoElement(track.element);
   });
-  cameraOrder.forEach((camera) => {
+  const layout = compositeLayouts[activeDisplay] || compositeLayouts.composite6;
+  layout.cameras.forEach((camera) => {
     if (nextTracks.has(camera)) return;
     const placeholder = compositeGrid.querySelector(`[data-camera="${camera}"] .composite-tile-placeholder`);
     if (placeholder) placeholder.hidden = false;
@@ -1237,7 +1276,7 @@ async function switchCamera(camera) {
   const position = currentSessionPosition();
   const autoplay = !sessionVideo.paused;
   activeCamera = camera;
-  if (activeDisplay === "composite") {
+  if (isCompositeDisplay(activeDisplay)) {
     sessionVideo.pause();
     activeDisplay = "single";
     releaseCompositeAuxiliaryTracks();
@@ -1254,7 +1293,7 @@ function togglePlayback() {
     loadSessionPosition(Number($("session-timeline").value), true);
     return;
   }
-  if (activeDisplay === "composite") {
+  if (isCompositeDisplay(activeDisplay)) {
     if (sessionVideo.paused) playCompositeTracks();
     else pauseCompositeTracks();
     return;
@@ -1269,7 +1308,7 @@ function previewTimelinePosition() {
 
 function seekTimelinePosition() {
   const autoplay = !sessionVideo.paused;
-  if (activeDisplay === "composite") pauseCompositeTracks();
+  if (isCompositeDisplay(activeDisplay)) pauseCompositeTracks();
   else sessionVideo.pause();
   loadSessionPosition(Number($("session-timeline").value), autoplay);
 }
@@ -1280,7 +1319,7 @@ function updateUnifiedTimeline() {
   requestedPosition = Math.min(position, activeSession.duration_seconds);
   $("session-timeline").value = String(requestedPosition);
   $("current-time").textContent = formatDuration(requestedPosition);
-  if (activeDisplay === "composite") synchronizeCompositeTracks();
+  if (isCompositeDisplay(activeDisplay)) synchronizeCompositeTracks();
 }
 
 function advanceToNextSegment() {
@@ -1308,12 +1347,13 @@ function currentSessionPosition() {
 }
 
 async function setDisplayMode(display) {
-  if (!["composite", "single"].includes(display) || display === activeDisplay || !activeSession) return;
+  if (!(display === "single" || compositeLayouts[display]) || display === activeDisplay || !activeSession) return;
   const position = currentSessionPosition();
   const autoplay = !sessionVideo.paused;
   pauseCompositeTracks();
   sessionVideo.pause();
   activeDisplay = display;
+  if (isCompositeDisplay(display)) writePreference("teslabox-player-layout", display);
   if (display === "single") releaseCompositeAuxiliaryTracks();
   applyDisplayState();
   renderCameraSwitcher();
@@ -1321,7 +1361,9 @@ async function setDisplayMode(display) {
 }
 
 function applyDisplayState() {
-  const composite = activeDisplay === "composite";
+  const composite = isCompositeDisplay(activeDisplay);
+  mainVideoFrame.dataset.layout = composite ? activeDisplay : "single";
+  if (!composite) resetCompositeFrameGeometry();
   compositeGrid.hidden = !composite;
   if (composite) {
     ensureCompositeTiles();
@@ -1333,6 +1375,80 @@ function applyDisplayState() {
     sessionVideo.muted = false;
   }
   $("active-camera-label").hidden = composite;
+}
+
+function applyCompositeFrameGeometry(masterElement) {
+  if (!isCompositeDisplay(activeDisplay)) {
+    resetCompositeFrameGeometry();
+    return;
+  }
+  const sourceAspect = masterElement?.videoWidth > 0 && masterElement?.videoHeight > 0
+    ? masterElement.videoWidth/masterElement.videoHeight
+    : 16/9;
+  const layoutFactors = {composite6:3/2, composite4a:1, composite4b:3/4, composite3:2/3};
+  activeCompositeAspect = sourceAspect*(layoutFactors[activeDisplay] || 1);
+  mainVideoFrame.style.aspectRatio = String(activeCompositeAspect);
+  mainVideoFrame.style.maxHeight = "none";
+  mainVideoFrame.style.marginInline = "auto";
+  fitCompositeFrame();
+}
+
+function fitCompositeFrame() {
+  if (!activeCompositeAspect || !isCompositeDisplay(activeDisplay) || playerModal.hidden) return;
+  if (isPlayerFullscreen()) {
+    fitFullscreenCompositeGrid();
+    return;
+  }
+  resetFullscreenCompositeGrid();
+  const panel = document.querySelector(".player-panel");
+  const frameHeight = mainVideoFrame.getBoundingClientRect().height;
+  const fixedHeight = Math.max(0, panel.scrollHeight-frameHeight);
+  const availableHeight = Math.max(180, window.innerHeight-40-fixedHeight);
+  const availableWidth = Math.max(240, panel.clientWidth-2);
+  mainVideoFrame.style.width = `${Math.floor(Math.min(availableWidth, availableHeight*activeCompositeAspect))}px`;
+}
+
+function handlePlayerViewportChange() {
+  if (playerModal.hidden) return;
+  window.requestAnimationFrame(() => {
+    if (isPlayerFullscreen()) fitFullscreenCompositeGrid();
+    else fitCompositeFrame();
+  });
+}
+
+function fitFullscreenCompositeGrid() {
+  if (!activeCompositeAspect || !isCompositeDisplay(activeDisplay)) return;
+  const availableWidth = mainVideoFrame.clientWidth || window.innerWidth;
+  const availableHeight = mainVideoFrame.clientHeight || window.innerHeight;
+  const width = Math.min(availableWidth, availableHeight*activeCompositeAspect);
+  const height = width/activeCompositeAspect;
+  compositeGrid.style.width = `${Math.floor(width)}px`;
+  compositeGrid.style.height = `${Math.floor(height)}px`;
+}
+
+function resetFullscreenCompositeGrid() {
+  compositeGrid.style.removeProperty("width");
+  compositeGrid.style.removeProperty("height");
+}
+
+function isPlayerFullscreen() {
+  if (document.fullscreenElement === mainVideoFrame || document.webkitFullscreenElement === mainVideoFrame) return true;
+  try {
+    if (mainVideoFrame.matches(":fullscreen") || mainVideoFrame.matches(":-webkit-full-screen")) return true;
+  } catch (_) {
+    // 某些浏览器不识别带前缀的全屏伪类，继续使用尺寸兜底判断。
+  }
+  const rect = mainVideoFrame.getBoundingClientRect();
+  return rect.width >= window.innerWidth-2 && rect.height >= window.innerHeight-2;
+}
+
+function resetCompositeFrameGeometry() {
+  activeCompositeAspect = 0;
+  mainVideoFrame.style.removeProperty("width");
+  mainVideoFrame.style.removeProperty("max-height");
+  mainVideoFrame.style.removeProperty("margin-inline");
+  mainVideoFrame.style.removeProperty("aspect-ratio");
+  resetFullscreenCompositeGrid();
 }
 
 async function playCompositeTracks() {
@@ -1386,7 +1502,7 @@ function hasBufferedTime(video, time) {
 
 function enterFullscreen() {
   const frame = document.querySelector(".main-video-frame");
-  if (frame.requestFullscreen) frame.requestFullscreen().catch(() => {});
+  if (frame.requestFullscreen) frame.requestFullscreen().then(handlePlayerViewportChange).catch(() => {});
   else if (sessionVideo.webkitEnterFullscreen) sessionVideo.webkitEnterFullscreen();
 }
 
@@ -1416,6 +1532,7 @@ function closePlayerMedia() {
   compositeTracks.clear();
   releaseVideoElement(sessionVideo);
   compositeGrid.replaceChildren();
+  resetCompositeFrameGeometry();
   activeSession = null;
   activeVideo = null;
   activeMomentIndex = -1;
@@ -1424,6 +1541,95 @@ function closePlayerMedia() {
   $("segment-markers").replaceChildren();
   $("event-marker-layer").replaceChildren();
   hidePlayerMessage();
+  stopPlaybackDiagnostics();
+}
+
+function setPlaybackQuality(quality) {
+  playbackQuality = normalizePlaybackQuality(quality);
+  $("player-quality").value = playbackQuality;
+  writePreference("teslabox-playback-quality", playbackQuality);
+  if (playbackQuality === "auto") showPlayerMessage("自动画质已开启；低码率转码完成前会使用原画");
+  else hidePlayerMessage();
+}
+
+function normalizePlaybackQuality(quality) {
+  return ["auto", "original"].includes(quality) ? quality : "auto";
+}
+
+function startPlaybackDiagnostics() {
+  stopPlaybackDiagnostics();
+  updatePlaybackDiagnostics();
+  playbackDiagnosticsTimer = window.setInterval(updatePlaybackDiagnostics, 2000);
+}
+
+function stopPlaybackDiagnostics() {
+  if (playbackDiagnosticsTimer) window.clearInterval(playbackDiagnosticsTimer);
+  playbackDiagnosticsTimer = 0;
+}
+
+function resetPlaybackDiagnostics() {
+  playbackStalls = 0;
+  isPlaybackBuffering = false;
+  mediaThroughputSamples = [];
+  observedMediaEntries.clear();
+  $("playback-throughput").textContent = "媒体吞吐：等待数据";
+  $("playback-stalls").textContent = "卡顿：0 次";
+}
+
+function markPlaybackStall() {
+  if (!activeSession || sessionVideo.paused || isPlaybackBuffering) return;
+  isPlaybackBuffering = true;
+  playbackStalls++;
+  $("playback-stalls").textContent = `卡顿：${playbackStalls} 次`;
+}
+
+function updatePlaybackDiagnostics() {
+  if (!$("playback-path")) return;
+  collectMediaThroughputSamples();
+  const connection = navigator.connection;
+  const hints = [];
+  if (connection?.effectiveType) hints.push(connection.effectiveType.toUpperCase());
+  if (Number.isFinite(connection?.downlink)) hints.push(`浏览器估算 ${connection.downlink.toFixed(1)} Mbps`);
+  if (Number.isFinite(connection?.rtt)) hints.push(`RTT ${connection.rtt} ms`);
+  $("playback-path").textContent = `链路：${classifyAccessPath()}${hints.length ? ` · ${hints.join(" · ")}` : ""}`;
+  const average = mediaThroughputSamples.length
+    ? mediaThroughputSamples.reduce((sum, value) => sum+value, 0)/mediaThroughputSamples.length
+    : 0;
+  $("playback-throughput").textContent = average > 0 ? `媒体实测：${average.toFixed(1)} Mbps` : "媒体吞吐：等待数据";
+  $("playback-buffer").textContent = `缓冲：${bufferedSeconds(sessionVideo).toFixed(1)} 秒`;
+}
+
+function collectMediaThroughputSamples() {
+  performance.getEntriesByType("resource").forEach((entry) => {
+    if (!entry.name.includes("/api/v1/videos/") || !entry.name.includes("/content") || entry.duration <= 0) return;
+    const key = `${entry.name}|${entry.startTime}|${entry.duration}`;
+    if (observedMediaEntries.has(key)) return;
+    observedMediaEntries.add(key);
+    const bytes = entry.encodedBodySize || entry.transferSize;
+    if (!bytes) return;
+    const mbps = bytes*8/entry.duration/1000;
+    if (Number.isFinite(mbps) && mbps > 0) mediaThroughputSamples.push(mbps);
+  });
+  if (mediaThroughputSamples.length > 8) mediaThroughputSamples = mediaThroughputSamples.slice(-8);
+}
+
+function bufferedSeconds(video) {
+  if (!video || !Number.isFinite(video.currentTime)) return 0;
+  for (let index=0; index<video.buffered.length; index++) {
+    if (video.buffered.start(index) <= video.currentTime && video.buffered.end(index) >= video.currentTime) {
+      return Math.max(0, video.buffered.end(index)-video.currentTime);
+    }
+  }
+  return 0;
+}
+
+function classifyAccessPath() {
+  const hostname = window.location.hostname.toLowerCase();
+  if (hostname.endsWith(".local") || hostname === "localhost" || hostname === "127.0.0.1") return "AP/局域网";
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname)) return "AP/局域网";
+  const tailscale = hostname.match(/^100\.(\d+)\./);
+  if (tailscale && Number(tailscale[1]) >= 64 && Number(tailscale[1]) <= 127) return "Tailscale";
+  return navigator.onLine ? "公网或中继（待服务端确认）" : "浏览器离线";
 }
 
 function releaseVideoElement(element) {
@@ -1504,6 +1710,14 @@ function applyTheme(theme) {
   $("theme-select").value = selected;
   $("theme-color").content = "#000000";
   writePreference("teslabox-theme", selected);
+}
+
+function isCompositeDisplay(display) {
+  return Boolean(compositeLayouts[display]);
+}
+
+function normalizeDisplayMode(display) {
+  return compositeLayouts[display] ? display : "composite6";
 }
 
 function normalizeUIFont(value) {

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultHTTPAddr       = ":8080"
+	defaultHTTPAddr       = ":80"
 	defaultDataMountPath  = "/var/lib/teslabox"
 	defaultDataLabel      = "TESLABOX"
 	defaultImagePath      = "images/teslacam.img"

@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260717-14">
-  <script src="/app.js?v=20260717-14" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260720-4">
+  <script src="/app.js?v=20260720-4" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -222,8 +222,20 @@
     <div class="player-panel">
       <div class="player-head">
         <div><p class="eyebrow">PLAYBACK</p><h2 id="player-title">录像播放</h2><p id="player-meta" class="muted"></p></div>
-        <button class="icon-button" type="button" data-close-player aria-label="关闭播放器">×</button>
+        <div class="player-head-actions">
+          <label class="quality-control">画质
+            <select id="player-quality" aria-label="播放画质">
+              <option value="auto">自动（当前原画）</option>
+              <option value="smooth" disabled>流畅（待板端转码）</option>
+              <option value="standard" disabled>标准（待板端转码）</option>
+              <option value="high" disabled>高清（待板端转码）</option>
+              <option value="original">原画</option>
+            </select>
+          </label>
+          <button class="icon-button" type="button" data-close-player aria-label="关闭播放器">×</button>
+        </div>
       </div>
+      <div class="playback-diagnostics" aria-live="polite"><span id="playback-path">链路：检测中</span><span id="playback-throughput">媒体吞吐：等待数据</span><span id="playback-buffer">缓冲：0.0 秒</span><span id="playback-stalls">卡顿：0 次</span></div>
       <div id="session-player-view" class="session-player-view">
         <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><p id="player-message" class="player-message" hidden></p></div>
         <div id="camera-switcher" class="camera-switcher" aria-label="摄像头视角"></div>

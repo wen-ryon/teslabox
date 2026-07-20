@@ -19,6 +19,10 @@ TeslaBox 通过 ROCK 3A 的 USB OTG 口向 Tesla 模拟 USB Mass Storage。TF �
 
 设置中心第一版的需求、接口、安全限制和后续交接见 [设置中心第一版需求与交接说明](SETTINGS_CENTER_HANDOFF.md)。
 
+在 Windows 上构建 ARM64 二进制并部署到 ROCK 3A，见 [部署说明](DEPLOYMENT.md)。
+
+远程低码率播放、三路/四路/六路布局、自定义导出、WebRTC 和云端访问的实施顺序，见 [远程播放、视频导出与云端访问开发流程](REMOTE_PLAYBACK_EXPORT_PLAN.md)。
+
 未来 USB 功能：
 
 - 锁车提示音管理器
