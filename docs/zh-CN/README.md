@@ -1,5 +1,9 @@
 # 功能特性
 
+## 第一次安装
+
+新 ROCK 3A 请先阅读 [第一次安装教程](FIRST_INSTALL.md)。公开引导脚本会安装 TeslaBox、FFmpeg/MPP/RGA、systemd/udev 和签名升级组件，但不会自动擦除外接存储，也不会默认安装 MT7922 测试内核。
+
 ## Tesla USB
 
 TeslaBox 通过 ROCK 3A 的 USB OTG 口向 Tesla 模拟 USB Mass Storage。TF 卡只运行 Debian，外接 128GB U 盘保存 TeslaCam 虚拟磁盘、快照和媒体索引。
