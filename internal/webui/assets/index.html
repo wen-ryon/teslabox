@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260720-4">
-  <script src="/app.js?v=20260720-4" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260720-5">
+  <script src="/app.js?v=20260721-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -188,6 +188,28 @@
         </article>
       </section>
 
+      <section class="settings-section security-section" aria-labelledby="security-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">SECURITY</p><h2 id="security-title">安全与账户</h2></div><span id="password-status" class="badge">密码已设置</span></div>
+        <article class="settings-card account-card">
+          <div><h3>管理页面密码</h3><p>修改后会立即注销其他浏览器中的旧登录会话。请使用至少 8 个字符且容易记住的独立密码。</p></div>
+          <div class="power-actions"><button id="password-change-open" class="secondary" type="button">修改密码</button></div>
+        </article>
+      </section>
+
+      <section class="settings-section update-section" aria-labelledby="update-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">SIGNED UPDATE</p><h2 id="update-title">系统更新</h2></div><span id="update-status" class="badge">读取中</span></div>
+        <article class="settings-card update-card">
+          <div class="update-summary">
+            <div><h3>TeslaBox 程序</h3><p id="update-version-detail">正在读取当前版本…</p></div>
+            <div class="update-versions"><span>当前版本<strong id="update-current-version">—</strong></span><span>最新版本<strong id="update-latest-version">—</strong></span></div>
+          </div>
+          <div id="update-progress-wrap" class="update-progress" hidden><progress id="update-progress" max="100" value="0"></progress><span id="update-progress-detail">0%</span></div>
+          <p id="update-release-notes" class="update-release-notes muted" hidden></p>
+          <div class="power-actions"><button id="update-check" class="secondary" type="button">检查更新</button><button id="update-download" class="secondary" type="button" hidden>下载更新</button><button id="update-install" class="primary" type="button" hidden>安装并重启</button></div>
+        </article>
+        <div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。安装仅替换 TeslaBox 主程序；车机 USB 已连接或正在导出视频时会拒绝安装。</div>
+      </section>
+
       <section class="settings-section power-section" aria-labelledby="power-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SYSTEM</p><h2 id="power-title">系统与电源</h2></div></div>
         <article class="settings-card power-card">
@@ -204,6 +226,19 @@
 
   <section id="confirm-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
     <div class="action-modal-backdrop" data-close-confirm></div><div class="action-modal-card"><p class="eyebrow">CONFIRM</p><h2 id="confirm-title">确认操作</h2><p id="confirm-message" class="muted"></p><div class="modal-actions"><button class="secondary" type="button" data-close-confirm>取消</button><button id="confirm-submit" class="danger-button" type="button">确认</button></div></div>
+  </section>
+
+  <section id="password-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="password-modal-title" hidden>
+    <div class="action-modal-backdrop" data-close-password></div>
+    <form id="password-change-form" class="action-modal-card">
+      <p class="eyebrow">ACCOUNT SECURITY</p><h2 id="password-modal-title">修改管理密码</h2>
+      <p id="password-modal-detail" class="muted">新密码保存后，其他浏览器中的旧登录会话会立即失效。</p>
+      <label>当前密码<input id="current-password" type="password" maxlength="128" autocomplete="current-password" required></label>
+      <label>新密码<input id="new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+      <label>确认新密码<input id="confirm-new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+      <p id="password-change-error" class="form-error" role="alert"></p>
+      <div class="modal-actions"><button id="password-change-close" class="secondary" type="button" data-close-password>取消</button><button id="password-change-submit" class="primary" type="submit">保存新密码</button></div>
+    </form>
   </section>
 
   <section id="storage-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="storage-modal-title" hidden>
@@ -226,9 +261,9 @@
           <label class="quality-control">画质
             <select id="player-quality" aria-label="播放画质">
               <option value="auto">自动（当前原画）</option>
-              <option value="smooth" disabled>流畅（待板端转码）</option>
-              <option value="standard" disabled>标准（待板端转码）</option>
-              <option value="high" disabled>高清（待板端转码）</option>
+              <option value="smooth">流畅（480p · 20 FPS）</option>
+              <option value="standard">标准（720p · 24 FPS）</option>
+              <option value="high">高清（720p · 30 FPS）</option>
               <option value="original">原画</option>
             </select>
           </label>
@@ -246,9 +281,30 @@
           <span id="total-time">00:00</span>
           <button id="fullscreen-button" class="secondary compact" type="button">全屏</button>
         </div>
-        <div class="player-actions"><span id="segment-status" class="muted">等待播放</span><a id="download-link" class="secondary" href="#" download>下载当前分钟</a></div>
+        <div class="player-actions"><span id="segment-status" class="muted">等待播放</span><div class="player-export-actions"><a id="download-link" class="secondary" href="#" download>下载当前分钟</a><button id="export-open" class="primary" type="button">自定义导出</button></div></div>
       </div>
     </div>
+  </section>
+
+  <section id="export-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="export-title" hidden>
+    <div class="action-modal-backdrop" data-close-export></div>
+    <form id="export-form" class="action-modal-card export-modal-card">
+      <p class="eyebrow">CUSTOM EXPORT</p><h2 id="export-title">导出完整录像</h2>
+      <p class="muted">跨分钟拼接所选视角，并按录像绝对时间对齐最多约 1–2 帧的时间差。</p>
+      <div class="form-grid export-range-grid">
+        <label>开始位置（秒）<input id="export-start" type="number" min="0" step="0.1" required></label>
+        <label>导出时长（秒）<input id="export-duration" type="number" min="1" max="1800" step="0.1" required></label>
+      </div>
+      <div class="form-grid export-view-grid">
+        <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>
+        <label id="export-camera-field">单路摄像头<select id="export-camera"></select></label>
+      </div>
+      <label>导出画质<select id="export-quality"><option value="smooth">流畅（480p · 20 FPS）</option><option value="standard" selected>标准（720p · 24 FPS）</option><option value="high">高清（1080p · 30 FPS）</option><option value="original">原画（源分辨率 · 36 FPS，仅单路）</option></select></label>
+      <p id="export-quality-help" class="muted"></p>
+      <div id="export-task-status" class="export-task-status" hidden><strong id="export-state">正在排队</strong><progress id="export-progress" max="100" value="0"></progress><span id="export-detail" class="muted"></span></div>
+      <p id="export-error" class="form-error" role="alert"></p>
+      <div class="modal-actions"><button class="secondary" type="button" data-close-export>关闭</button><button id="export-cancel" class="secondary" type="button" hidden>取消任务</button><a id="export-download" class="primary" href="#" download hidden>下载视频</a><button id="export-submit" class="primary" type="submit">开始导出</button></div>
+    </form>
   </section>
 </body>
 </html>

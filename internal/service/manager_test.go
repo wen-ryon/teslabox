@@ -249,6 +249,54 @@ func TestManagerSnapshotReturnsDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestManagerMediaLeaseDefersRetiredSnapshotCleanup(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	first := mediasnapshot.View{ID: "snapshot-1", MountPath: "/run/teslabox/snapshots/snapshot-1"}
+	second := mediasnapshot.View{ID: "snapshot-2", MountPath: "/run/teslabox/snapshots/snapshot-2"}
+	third := mediasnapshot.View{ID: "snapshot-3", MountPath: "/run/teslabox/snapshots/snapshot-3"}
+	snapshotter := &fakeSnapshotter{views: []mediasnapshot.View{first, second, third}}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{},
+		&fakeLifecycle{},
+		snapshotter,
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	leased, release := manager.AcquireMediaSnapshot()
+	if leased.MediaSnapshot == nil || leased.MediaSnapshot.ID != first.ID {
+		t.Fatalf("leased snapshot = %#v", leased.MediaSnapshot)
+	}
+	if err := manager.Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotter.removed) != 0 {
+		t.Fatalf("removed while leased = %#v", snapshotter.removed)
+	}
+
+	release()
+	release()
+	if err := manager.cleanupRetiredUntil(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshotter.removed) != 1 || snapshotter.removed[0].ID != first.ID {
+		t.Fatalf("removed after release = %#v", snapshotter.removed)
+	}
+}
+
 func TestManagerLateDataDriveMountsAndStartsGadget(t *testing.T) {
 	t.Parallel()
 	unmounted := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs"}

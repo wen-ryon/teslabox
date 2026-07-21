@@ -109,7 +109,9 @@ type Manager struct {
 	stateMu           sync.RWMutex
 	state             Snapshot
 	triggerCh         chan struct{}
+	cleanupCh         chan struct{}
 	retired           []mediasnapshot.View
+	mediaLeases       map[string]int
 	snapshotRecovered bool
 	snapshotFailures  int
 	snapshotRetryAt   time.Time
@@ -140,6 +142,8 @@ func NewManager(
 		logger:      logger,
 		state:       Snapshot{Phase: PhaseStarting},
 		triggerCh:   make(chan struct{}, 1),
+		cleanupCh:   make(chan struct{}, 1),
+		mediaLeases: make(map[string]int),
 		now:         time.Now,
 	}
 }
@@ -163,6 +167,8 @@ func (m *Manager) Run(ctx context.Context) {
 			m.snapshotWithTimeout(ctx)
 		case <-m.triggerCh:
 			m.refreshWithTimeout(ctx)
+		case <-m.cleanupCh:
+			m.cleanupWithTimeout(ctx)
 		}
 	}
 }
@@ -189,22 +195,58 @@ func (m *Manager) Scan(ctx context.Context) error {
 func (m *Manager) Snapshot() Snapshot {
 	m.stateMu.RLock()
 	defer m.stateMu.RUnlock()
-	result := m.state
-	result.Videos = slices.Clone(m.state.Videos)
-	result.Backing.Missing = slices.Clone(m.state.Backing.Missing)
-	result.Gadget.UDCNames = slices.Clone(m.state.Gadget.UDCNames)
-	result.GadgetStatus.OtherBindings = slices.Clone(m.state.GadgetStatus.OtherBindings)
-	if m.state.MediaSnapshot != nil {
-		view := *m.state.MediaSnapshot
+	return cloneSnapshot(m.state)
+}
+
+// AcquireMediaSnapshot 把媒体视图借给一次请求，防止播放期间的定时轮换卸载底层 loop 设备。
+func (m *Manager) AcquireMediaSnapshot() (Snapshot, func()) {
+	m.stateMu.Lock()
+	result := cloneSnapshot(m.state)
+	leaseID := ""
+	if result.MediaSnapshot != nil {
+		leaseID = result.MediaSnapshot.ID
+		m.mediaLeases[leaseID]++
+	}
+	m.stateMu.Unlock()
+
+	var once sync.Once
+	return result, func() {
+		once.Do(func() {
+			if leaseID == "" {
+				return
+			}
+			m.stateMu.Lock()
+			if m.mediaLeases[leaseID] <= 1 {
+				delete(m.mediaLeases, leaseID)
+			} else {
+				m.mediaLeases[leaseID]--
+			}
+			m.stateMu.Unlock()
+			select {
+			case m.cleanupCh <- struct{}{}:
+			default:
+			}
+		})
+	}
+}
+
+func cloneSnapshot(source Snapshot) Snapshot {
+	result := source
+	result.Videos = slices.Clone(source.Videos)
+	result.Backing.Missing = slices.Clone(source.Backing.Missing)
+	result.Gadget.UDCNames = slices.Clone(source.Gadget.UDCNames)
+	result.GadgetStatus.OtherBindings = slices.Clone(source.GadgetStatus.OtherBindings)
+	if source.MediaSnapshot != nil {
+		view := *source.MediaSnapshot
 		result.MediaSnapshot = &view
 	}
-	if m.state.SnapshotRetryAt != nil {
-		retryAt := *m.state.SnapshotRetryAt
+	if source.SnapshotRetryAt != nil {
+		retryAt := *source.SnapshotRetryAt
 		result.SnapshotRetryAt = &retryAt
 	}
-	if m.state.DataDrive != nil {
-		device := *m.state.DataDrive
-		device.MountPoints = slices.Clone(m.state.DataDrive.MountPoints)
+	if source.DataDrive != nil {
+		device := *source.DataDrive
+		device.MountPoints = slices.Clone(source.DataDrive.MountPoints)
 		result.DataDrive = &device
 	}
 	return result
@@ -227,6 +269,10 @@ func (m *Manager) Close(ctx context.Context) error {
 		views = append(views, *state.MediaSnapshot)
 	}
 	for _, view := range views {
+		if m.snapshotLeased(view.ID) {
+			result = errors.Join(result, fmt.Errorf("TeslaCam 快照 %s 仍被媒体请求使用", view.ID))
+			continue
+		}
 		if err := m.snapshotter.Remove(ctx, view); err != nil {
 			result = errors.Join(result, fmt.Errorf("清理 TeslaCam 快照 %s: %w", view.ID, err))
 		}
@@ -257,6 +303,18 @@ func (m *Manager) refreshWithTimeout(parent context.Context) {
 	if err := m.reconcile(ctx); err != nil && !errors.Is(err, storage.ErrDeviceNotFound) && !errors.Is(err, ErrDataDriveDisconnected) {
 		m.logger.Warn("收敛 TeslaUSB 运行状态失败", "error", err)
 	}
+}
+
+func (m *Manager) cleanupWithTimeout(parent context.Context) {
+	timeout := m.cfg.OperationTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	m.cleanupRetired(ctx)
 }
 
 func (m *Manager) reconcile(ctx context.Context) error {
@@ -471,20 +529,40 @@ func snapshotRetryDelay(interval, maximum time.Duration, failures int) time.Dura
 }
 
 func (m *Manager) cleanupRetired(ctx context.Context) {
-	if err := m.cleanupRetiredUntil(ctx, 1); err != nil {
+	keep := 0
+	if m.Snapshot().MediaSnapshot != nil {
+		keep = 1
+	}
+	if err := m.cleanupRetiredUntil(ctx, keep); err != nil {
 		m.logger.Warn("回收旧 TeslaCam 快照失败", "error", err)
 	}
 }
 
 func (m *Manager) cleanupRetiredUntil(ctx context.Context, keep int) error {
 	for len(m.retired) > keep {
-		view := m.retired[0]
+		candidate := -1
+		for index := 0; index < len(m.retired)-keep; index++ {
+			if !m.snapshotLeased(m.retired[index].ID) {
+				candidate = index
+				break
+			}
+		}
+		if candidate < 0 {
+			return nil
+		}
+		view := m.retired[candidate]
 		if err := m.snapshotter.Remove(ctx, view); err != nil {
 			return fmt.Errorf("回收 TeslaCam 快照 %s: %w", view.ID, err)
 		}
-		m.retired = m.retired[1:]
+		m.retired = slices.Delete(m.retired, candidate, candidate+1)
 	}
 	return nil
+}
+
+func (m *Manager) snapshotLeased(id string) bool {
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
+	return m.mediaLeases[id] > 0
 }
 
 func (m *Manager) handleMissingDataDrive(ctx context.Context, previous Snapshot) error {
@@ -520,6 +598,14 @@ func (m *Manager) handleMissingDataDrive(ctx context.Context, previous Snapshot)
 }
 
 func (m *Manager) cleanupDisconnectedSnapshots(ctx context.Context, previous Snapshot) error {
+	m.stateMu.Lock()
+	if m.state.MediaSnapshot != nil && previous.MediaSnapshot != nil && m.state.MediaSnapshot.ID == previous.MediaSnapshot.ID {
+		m.state.MediaSnapshot = nil
+		m.state.Videos = nil
+		m.state.VideoCount = 0
+	}
+	m.stateMu.Unlock()
+
 	views := slices.Clone(m.retired)
 	if previous.MediaSnapshot != nil {
 		views = append(views, *previous.MediaSnapshot)
@@ -530,6 +616,10 @@ func (m *Manager) cleanupDisconnectedSnapshots(ctx context.Context, previous Sna
 	m.snapshotRetryAt = time.Time{}
 	var result error
 	for _, view := range views {
+		if m.snapshotLeased(view.ID) {
+			m.retired = append(m.retired, view)
+			continue
+		}
 		if err := m.snapshotter.Remove(ctx, view); err != nil {
 			result = errors.Join(result, fmt.Errorf("回收掉盘快照 %s: %w", view.ID, err))
 		}

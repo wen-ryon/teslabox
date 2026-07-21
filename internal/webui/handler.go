@@ -23,7 +23,9 @@ var assets embed.FS
 // Authenticator 是页面路由使用的最小会话认证能力。
 type Authenticator interface {
 	Enabled() bool
+	MustChangePassword() bool
 	Authenticate(remoteAddr, password string) error
+	ChangePassword(remoteAddr, currentPassword, newPassword string) error
 	SetSession(w http.ResponseWriter, r *http.Request)
 	ClearSession(w http.ResponseWriter, r *http.Request)
 	Authenticated(r *http.Request) bool
@@ -43,6 +45,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	mux.HandleFunc("GET /api/v1/auth/session", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{
 			"enabled": authenticator.Enabled(), "authenticated": authenticator.Authenticated(r),
+			"must_change_password": authenticator.MustChangePassword(),
 		})
 	})
 	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +73,46 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 			return
 		}
 		authenticator.SetSession(w, r)
-		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+		writeJSON(w, http.StatusOK, map[string]bool{
+			"authenticated": true, "must_change_password": authenticator.MustChangePassword(),
+		})
+	})
+	mux.HandleFunc("POST /api/v1/auth/password", func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "请求来源无效"})
+			return
+		}
+		if !authenticator.Authenticated(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录"})
+			return
+		}
+		var input struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求参数无效"})
+			return
+		}
+		if err := authenticator.ChangePassword(r.RemoteAddr, input.CurrentPassword, input.NewPassword); err != nil {
+			switch {
+			case errors.Is(err, webauth.ErrRateLimited):
+				w.Header().Set("Retry-After", "300")
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "尝试次数过多，请稍后再试"})
+			case errors.Is(err, webauth.ErrInvalidCredentials):
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "当前密码错误"})
+			case errors.Is(err, webauth.ErrPasswordPolicy), errors.Is(err, webauth.ErrPasswordUnchanged):
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			default:
+				logger.Error("修改 Web 管理密码失败", "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "暂时无法保存新密码"})
+			}
+			return
+		}
+		authenticator.SetSession(w, r)
+		writeJSON(w, http.StatusOK, map[string]bool{"changed": true, "must_change_password": false})
 	})
 	mux.HandleFunc("POST /api/v1/auth/logout", func(w http.ResponseWriter, r *http.Request) {
 		if !sameOrigin(r) {
@@ -86,6 +128,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	}), authenticator))
 	mux.Handle("GET /api/v1/", protectedAPI)
 	mux.Handle("POST /api/v1/", protectedAPI)
+	mux.Handle("DELETE /api/v1/", protectedAPI)
 	mux.Handle("GET /healthz", apiHandler)
 	return securityHeaders(mux)
 }
@@ -96,7 +139,13 @@ func requireAuth(next http.Handler, authenticator Authenticator) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录"})
 			return
 		}
-		if r.Method == http.MethodPost && !sameOrigin(r) {
+		if authenticator.MustChangePassword() {
+			writeJSON(w, http.StatusPreconditionRequired, map[string]any{
+				"error": "请先修改默认管理密码", "password_change_required": true,
+			})
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "请求来源无效"})
 			return
 		}

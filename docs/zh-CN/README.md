@@ -19,6 +19,8 @@ TeslaBox 通过 ROCK 3A 的 USB OTG 口向 Tesla 模拟 USB Mass Storage。TF �
 
 设置中心第一版的需求、接口、安全限制和后续交接见 [设置中心第一版需求与交接说明](SETTINGS_CENTER_HANDOFF.md)。
 
+签名程序更新、失败回滚和 Gitee Release 发布流程见 [签名在线更新说明](ONLINE_UPDATE.md)。
+
 在 Windows 上构建 ARM64 二进制并部署到 ROCK 3A，见 [部署说明](DEPLOYMENT.md)。
 
 远程低码率播放、三路/四路/六路布局、自定义导出、WebRTC 和云端访问的实施顺序，见 [远程播放、视频导出与云端访问开发流程](REMOTE_PLAYBACK_EXPORT_PLAN.md)。
@@ -65,10 +67,10 @@ Tesla 浏览器自动启动 CarPlay 网页界面。
 
 ## OTA 更新
 
-- 一键 OTA 升级
-- 回滚支持
-- 增量升级
-- 版本管理
+- [x] Ed25519 签名的一键程序升级
+- [x] 启动健康检查与失败回滚
+- [x] 下载进度和版本管理
+- [ ] 增量升级
 
 ---
 
@@ -173,7 +175,7 @@ Dnsmasq
 - [ ] AP 路由器
 - [ ] MT7922
 - [ ] Tailscale
-- [ ] OTA 更新
+- [x] 签名程序更新与失败回滚
 
 ## 第四阶段
 

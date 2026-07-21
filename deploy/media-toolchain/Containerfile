@@ -1,0 +1,25 @@
+FROM docker.io/library/debian:bullseye
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libdrm-dev \
+        meson \
+        nasm \
+        ninja-build \
+        perl \
+        pkg-config \
+        python3 \
+        xz-utils \
+        yasm \
+    && apt-get clean \
+    && find /var/lib/apt/lists -mindepth 1 -delete
+
+COPY build-inside.sh /usr/local/bin/build-rockchip-media
+
+ENTRYPOINT ["/usr/local/bin/build-rockchip-media"]

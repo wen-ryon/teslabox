@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -16,14 +17,17 @@ import (
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
+	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
+	"github.com/wen-ryon/teslabox/internal/updater"
 )
 
 // Controller 定义 API 所需的最小状态和刷新能力。
 type Controller interface {
 	Snapshot() service.Snapshot
+	AcquireMediaSnapshot() (service.Snapshot, func())
 	Refresh(ctx context.Context) error
 	Scan(ctx context.Context) error
 }
@@ -47,9 +51,40 @@ type StorageAdmin interface {
 	Cancel(context.Context, storageadmin.CancelRequest) error
 }
 
+// MediaInspector 定义 API 所需的媒体能力和单文件探测边界。
+type MediaInspector interface {
+	Capabilities(context.Context) (media.Capabilities, error)
+	Probe(context.Context, string) (media.Metadata, error)
+}
+
+// MediaCompositor 定义请求取消后必须停止的实时合成边界。
+type MediaCompositor interface {
+	Stream(context.Context, media.CompositeRequest, io.Writer) error
+}
+
+// ExportAdmin 定义异步导出的任务边界，创建成功后由实现负责释放媒体快照租约。
+type ExportAdmin interface {
+	Create(media.ExportRequest, media.ExportSource, func()) (media.ExportTask, error)
+	Task(string) (media.ExportTask, error)
+	Cancel(string) (media.ExportTask, error)
+	Open(string) (*os.File, media.ExportTask, error)
+}
+
+// UpdateAdmin 定义设置中心所需的签名更新能力。
+type UpdateAdmin interface {
+	Status() updater.Status
+	Check(context.Context) (updater.Status, error)
+	StartDownload() (updater.Status, error)
+	Install(context.Context) (updater.Status, error)
+}
+
 type handlerOptions struct {
-	deviceAdmin  DeviceAdmin
-	storageAdmin StorageAdmin
+	deviceAdmin     DeviceAdmin
+	storageAdmin    StorageAdmin
+	mediaInspector  MediaInspector
+	mediaCompositor MediaCompositor
+	exportAdmin     ExportAdmin
+	updateAdmin     UpdateAdmin
 }
 
 // Option 配置可选的 API 能力。
@@ -63,6 +98,26 @@ func WithDeviceAdmin(admin DeviceAdmin) Option {
 // WithStorageAdmin 启用外接存储登记和初始化接口。
 func WithStorageAdmin(admin StorageAdmin) Option {
 	return func(options *handlerOptions) { options.storageAdmin = admin }
+}
+
+// WithMediaInspector 启用 Rockchip 媒体能力和录像技术元数据接口。
+func WithMediaInspector(inspector MediaInspector) Option {
+	return func(options *handlerOptions) { options.mediaInspector = inspector }
+}
+
+// WithMediaCompositor 启用单分钟多视角服务端实时合成。
+func WithMediaCompositor(compositor MediaCompositor) Option {
+	return func(options *handlerOptions) { options.mediaCompositor = compositor }
+}
+
+// WithExportAdmin 启用跨分钟、自定义视角的异步视频导出接口。
+func WithExportAdmin(admin ExportAdmin) Option {
+	return func(options *handlerOptions) { options.exportAdmin = admin }
+}
+
+// WithUpdateAdmin 启用受保护的在线更新接口。
+func WithUpdateAdmin(admin UpdateAdmin) Option {
+	return func(options *handlerOptions) { options.updateAdmin = admin }
 }
 
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
@@ -93,10 +148,14 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		writeVideoSession(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
-		serveVideo(w, r, controller.Snapshot(), false)
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		serveVideo(w, r, state, false)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/download", func(w http.ResponseWriter, r *http.Request) {
-		serveVideo(w, r, controller.Snapshot(), true)
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		serveVideo(w, r, state, true)
 	})
 	refresh := func(w http.ResponseWriter, r *http.Request) {
 		if err := controller.Refresh(r.Context()); err != nil {
@@ -125,7 +184,249 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.storageAdmin != nil {
 		registerStorageAdminRoutes(mux, settings.storageAdmin, logger)
 	}
+	if settings.mediaInspector != nil {
+		registerMediaRoutes(mux, controller, settings.mediaInspector, logger)
+	}
+	if settings.mediaCompositor != nil {
+		registerCompositeRoutes(mux, controller, settings.mediaCompositor, logger)
+	}
+	if settings.exportAdmin != nil {
+		registerExportRoutes(mux, controller, settings.exportAdmin, logger)
+	}
+	if settings.updateAdmin != nil {
+		registerUpdateRoutes(mux, settings.updateAdmin, logger)
+	}
 	return requestLogger(mux, logger)
+}
+
+func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/update", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, admin.Status())
+	})
+	mux.HandleFunc("POST /api/v1/update/check", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.Check(r.Context())
+		if err != nil {
+			logger.Warn("检查在线更新失败", "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/update/download", func(w http.ResponseWriter, _ *http.Request) {
+		status, err := admin.StartDownload()
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, status)
+	})
+	mux.HandleFunc("POST /api/v1/update/install", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.Install(r.Context())
+		if err != nil {
+			logger.Warn("提交在线更新安装失败", "error", err)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, status)
+	})
+}
+
+func registerExportRoutes(mux *http.ServeMux, controller Controller, admin ExportAdmin, logger *slog.Logger) {
+	mux.HandleFunc("POST /api/v1/exports", func(w http.ResponseWriter, r *http.Request) {
+		var request media.ExportRequest
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		state, release := controller.AcquireMediaSnapshot()
+		if state.MediaSnapshot == nil {
+			release()
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
+			return
+		}
+		session, found := findVideoSession(state.Videos, request.SessionID)
+		if !found {
+			release()
+			http.NotFound(w, r)
+			return
+		}
+		if !exportSpaceAvailable(state, request) {
+			release()
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
+			return
+		}
+		source, err := exportSource(state.MediaSnapshot.MountPath, session)
+		if err != nil {
+			release()
+			logger.Warn("准备导出录像失败", "session_id", request.SessionID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "导出录像文件暂不可用"})
+			return
+		}
+		task, err := admin.Create(request, source, release)
+		if err != nil {
+			writeExportError(w, logger, "创建导出任务失败", err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, task)
+	})
+	mux.HandleFunc("GET /api/v1/exports/{id}", func(w http.ResponseWriter, r *http.Request) {
+		task, err := admin.Task(r.PathValue("id"))
+		if err != nil {
+			writeExportError(w, logger, "读取导出任务失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, task)
+	})
+	mux.HandleFunc("DELETE /api/v1/exports/{id}", func(w http.ResponseWriter, r *http.Request) {
+		task, err := admin.Cancel(r.PathValue("id"))
+		if err != nil {
+			writeExportError(w, logger, "取消导出任务失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, task)
+	})
+	mux.HandleFunc("GET /api/v1/exports/{id}/download", func(w http.ResponseWriter, r *http.Request) {
+		file, task, err := admin.Open(r.PathValue("id"))
+		if err != nil {
+			writeExportError(w, logger, "打开导出文件失败", err)
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			logger.Warn("读取导出文件失败", "task_id", task.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "导出文件暂不可用"})
+			return
+		}
+		filename := "teslabox-" + task.ID + ".mp4"
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+		w.Header().Set("Content-Type", "video/mp4")
+		http.ServeContent(w, r, filename, info.ModTime(), file)
+	})
+}
+
+func exportSpaceAvailable(state service.Snapshot, request media.ExportRequest) bool {
+	estimated := media.EstimateExportBytes(request)
+	space := state.SnapshotSpace
+	if estimated == 0 || space.TotalBytes == 0 {
+		return true
+	}
+	if space.FreeBytes < estimated || space.FreeBytes-estimated < space.MinFreeBytes {
+		return false
+	}
+	projectedPercent := float64(space.FreeBytes-estimated) * 100 / float64(space.TotalBytes)
+	return projectedPercent >= float64(space.MinFreePercent)
+}
+
+func writeExportError(w http.ResponseWriter, logger *slog.Logger, message string, err error) {
+	if errors.Is(err, media.ErrExportNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "导出任务不存在"})
+		return
+	}
+	if errors.Is(err, media.ErrExportQueueFull) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "导出队列已满，请稍后重试"})
+		return
+	}
+	var inputError *media.InputError
+	if errors.As(err, &inputError) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": inputError.Error()})
+		return
+	}
+	logger.Warn(message, "error", err)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频导出暂不可用"})
+}
+
+func registerCompositeRoutes(mux *http.ServeMux, controller Controller, compositor MediaCompositor, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/video-groups/{id}/composite", func(w http.ResponseWriter, r *http.Request) {
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		if state.MediaSnapshot == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
+			return
+		}
+		var selected *videoGroup
+		for _, group := range groupVideos(state.Videos, videoGroupTolerance) {
+			if group.ID == r.PathValue("id") {
+				copy := group
+				selected = &copy
+				break
+			}
+		}
+		if selected == nil {
+			http.NotFound(w, r)
+			return
+		}
+		inputs := make(map[string]string, len(selected.Videos))
+		for _, video := range selected.Videos {
+			name, err := snapshotVideoPath(state.MediaSnapshot.MountPath, video.Path)
+			if err != nil {
+				logger.Warn("解析合成视频路径失败", "video_id", video.ID, "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频文件暂不可用"})
+				return
+			}
+			inputs[video.Camera] = name
+		}
+		tracked := &countingWriter{ResponseWriter: w}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "no-store")
+		err := compositor.Stream(r.Context(), media.CompositeRequest{
+			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Inputs: inputs,
+		}, tracked)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return
+		}
+		logger.Warn("实时合成录像失败", "group_id", selected.ID, "error", err)
+		if tracked.written > 0 {
+			return
+		}
+		var inputError *media.InputError
+		if errors.As(err, &inputError) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": inputError.Error()})
+			return
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "实时合成暂不可用"})
+	})
+}
+
+func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector MediaInspector, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/media/capabilities", func(w http.ResponseWriter, r *http.Request) {
+		capabilities, err := inspector.Capabilities(r.Context())
+		if err != nil {
+			logger.Warn("读取媒体工具链能力失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体工具链暂不可用"})
+			return
+		}
+		writeJSON(w, http.StatusOK, capabilities)
+	})
+	mux.HandleFunc("GET /api/v1/videos/{id}/metadata", func(w http.ResponseWriter, r *http.Request) {
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		if state.MediaSnapshot == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
+			return
+		}
+		video, found := findVideo(state.Videos, r.PathValue("id"))
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		name, err := snapshotVideoPath(state.MediaSnapshot.MountPath, video.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			logger.Warn("解析快照视频路径失败", "video_id", video.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频文件暂不可用"})
+			return
+		}
+		metadata, err := inspector.Probe(r.Context(), name)
+		if err != nil {
+			logger.Warn("读取视频技术元数据失败", "video_id", video.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取视频技术元数据"})
+			return
+		}
+		writeJSON(w, http.StatusOK, metadata)
+	})
 }
 
 func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *slog.Logger) {
@@ -298,14 +599,8 @@ func serveVideo(w http.ResponseWriter, r *http.Request, state service.Snapshot, 
 		http.Error(w, "媒体快照暂不可用", http.StatusServiceUnavailable)
 		return
 	}
-	var selected *teslacam.Video
-	for index := range state.Videos {
-		if state.Videos[index].ID == r.PathValue("id") {
-			selected = &state.Videos[index]
-			break
-		}
-	}
-	if selected == nil {
+	selected, found := findVideo(state.Videos, r.PathValue("id"))
+	if !found {
 		http.NotFound(w, r)
 		return
 	}
@@ -333,25 +628,36 @@ func serveVideo(w http.ResponseWriter, r *http.Request, state service.Snapshot, 
 }
 
 func openSnapshotVideo(root, relative string) (*os.File, error) {
+	name, err := snapshotVideoPath(root, relative)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(name)
+}
+
+func snapshotVideoPath(root, relative string) (string, error) {
 	cleaned := filepath.Clean(filepath.FromSlash(relative))
 	if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("视频路径越过快照根目录")
+		return "", fmt.Errorf("视频路径越过快照根目录")
 	}
 	name := filepath.Join(filepath.Clean(root), cleaned)
-	file, err := os.Open(name)
+	info, err := os.Stat(name)
 	if err != nil {
-		return nil, err
-	}
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, err
+		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		file.Close()
-		return nil, fmt.Errorf("视频路径不是普通文件")
+		return "", fmt.Errorf("视频路径不是普通文件")
 	}
-	return file, nil
+	return name, nil
+}
+
+func findVideo(videos []teslacam.Video, id string) (teslacam.Video, bool) {
+	for _, video := range videos {
+		if video.ID == id {
+			return video, true
+		}
+	}
+	return teslacam.Video{}, false
 }
 
 type videoListResponse struct {
@@ -510,13 +816,41 @@ func writeVideoSessionList(w http.ResponseWriter, r *http.Request, videos []tesl
 }
 
 func writeVideoSession(w http.ResponseWriter, r *http.Request, videos []teslacam.Video) {
-	for _, session := range groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap) {
-		if session.ID == r.PathValue("id") {
-			writeJSON(w, http.StatusOK, session)
-			return
-		}
+	session, found := findVideoSession(videos, r.PathValue("id"))
+	if found {
+		writeJSON(w, http.StatusOK, session)
+		return
 	}
 	http.NotFound(w, r)
+}
+
+func findVideoSession(videos []teslacam.Video, id string) (videoSession, bool) {
+	for _, session := range groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap) {
+		if session.ID == id {
+			return session, true
+		}
+	}
+	return videoSession{}, false
+}
+
+func exportSource(snapshotRoot string, session videoSession) (media.ExportSource, error) {
+	source := media.ExportSource{SessionStart: session.StartAt, SessionEnd: session.EndAt}
+	for _, moment := range session.Moments {
+		for _, video := range moment.Videos {
+			name, err := snapshotVideoPath(snapshotRoot, video.Path)
+			if err != nil {
+				return media.ExportSource{}, err
+			}
+			duration := video.Duration
+			if duration <= 0 {
+				duration = defaultSegmentDuration.Seconds()
+			}
+			source.Videos = append(source.Videos, media.ExportVideo{
+				Camera: video.Camera, Path: name, RecordedAt: video.RecordedAt, Duration: duration,
+			})
+		}
+	}
+	return source, nil
 }
 
 func groupVideos(videos []teslacam.Video, tolerance time.Duration) []videoGroup {
@@ -707,7 +1041,21 @@ type statusWriter struct {
 	status int
 }
 
+// Unwrap 让流式响应和可选 HTTP 接口穿过日志包装器。
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+type countingWriter struct {
+	http.ResponseWriter
+	written int64
+}
+
+func (w *countingWriter) Write(value []byte) (int, error) {
+	count, err := w.ResponseWriter.Write(value)
+	w.written += int64(count)
+	return count, err
 }

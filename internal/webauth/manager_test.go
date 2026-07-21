@@ -1,11 +1,15 @@
 package webauth
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +56,22 @@ func TestManagerRejectsTamperedCookie(t *testing.T) {
 	}
 }
 
+func TestManagerAcceptsLegacyV1SessionUntilPasswordChanges(t *testing.T) {
+	t.Parallel()
+	manager := newTestManager(t, "password")
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	payload := "v1." + strconv.FormatInt(expiresAt, 10)
+	manager.stateMu.RLock()
+	secret := append([]byte(nil), manager.credential.secret...)
+	manager.stateMu.RUnlock()
+	cookie := &http.Cookie{Name: CookieName, Value: payload + "." + signPayload(secret, payload)}
+	request := httptest.NewRequest("GET", "http://teslabox.local/", nil)
+	request.AddCookie(cookie)
+	if !manager.Authenticated(request) {
+		t.Fatal("legacy v1 session was rejected before credential migration")
+	}
+}
+
 func TestManagerRateLimitsRepeatedFailuresAndResetsAfterWindow(t *testing.T) {
 	t.Parallel()
 	manager := newTestManager(t, "password")
@@ -71,17 +91,86 @@ func TestManagerRateLimitsRepeatedFailuresAndResetsAfterWindow(t *testing.T) {
 	}
 }
 
-func TestNewSupportsExplicitDisabledModeAndRejectsPartialConfig(t *testing.T) {
+func TestNewCreatesForcedDefaultPasswordForFreshInstall(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "web-auth.json")
+	manager, err := New(Config{StatePath: statePath, SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.Enabled() || !manager.MustChangePassword() {
+		t.Fatalf("enabled = %v, must change = %v", manager.Enabled(), manager.MustChangePassword())
+	}
+	if err := manager.Authenticate("192.168.8.2:1234", DefaultPassword); err != nil {
+		t.Fatalf("default password authentication error = %v", err)
+	}
+	content, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(content, []byte(DefaultPassword)) || !bytes.Contains(content, []byte(`"must_change": true`)) {
+		t.Fatalf("credential state leaked password or omitted forced-change flag: %s", content)
+	}
+}
+
+func TestNewRejectsPartialLegacyConfig(t *testing.T) {
 	t.Parallel()
-	disabled, err := New(Config{})
-	if err != nil || disabled.Enabled() {
-		t.Fatalf("disabled manager = %#v, error = %v", disabled, err)
-	}
-	if !disabled.Authenticated(httptest.NewRequest("GET", "http://teslabox.local/", nil)) {
-		t.Fatal("disabled authentication rejected request")
-	}
-	if _, err := New(Config{PasswordSHA256: strings.Repeat("a", 64), SessionTTL: time.Hour}); err == nil {
+	if _, err := New(Config{StatePath: filepath.Join(t.TempDir(), "web-auth.json"), PasswordSHA256: strings.Repeat("a", 64), SessionTTL: time.Hour}); err == nil {
 		t.Fatal("New() error = nil, want missing secret error")
+	}
+}
+
+func TestChangePasswordMigratesLegacyStateAndInvalidatesSession(t *testing.T) {
+	manager := newTestManager(t, "old-password")
+	request := httptest.NewRequest("GET", "http://teslabox.local/api/v1/storage", nil)
+	recorder := httptest.NewRecorder()
+	manager.SetSession(recorder, request)
+	oldCookie := recorder.Result().Cookies()[0]
+
+	if err := manager.ChangePassword("192.168.8.2:1234", "old-password", "new memorable password"); err != nil {
+		t.Fatal(err)
+	}
+	if manager.MustChangePassword() {
+		t.Fatal("MustChangePassword() = true after change")
+	}
+	request.AddCookie(oldCookie)
+	if manager.Authenticated(request) {
+		t.Fatal("old session remained authenticated after password change")
+	}
+	if err := manager.Authenticate("192.168.8.2:1234", "old-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old password error = %v", err)
+	}
+	if err := manager.Authenticate("192.168.8.2:1234", "new memorable password"); err != nil {
+		t.Fatalf("new password error = %v", err)
+	}
+
+	reloaded, err := New(Config{StatePath: manager.statePath, SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.Authenticate("192.168.8.2:1234", "new memorable password"); err != nil {
+		t.Fatalf("reloaded password error = %v", err)
+	}
+}
+
+func TestChangePasswordValidatesCurrentPasswordAndPolicy(t *testing.T) {
+	t.Parallel()
+	manager := newTestManager(t, "old-password")
+	tests := []struct {
+		name    string
+		current string
+		next    string
+		want    error
+	}{
+		{name: "wrong current password", current: "wrong-password", next: "valid-new-password", want: ErrInvalidCredentials},
+		{name: "new password too short", current: "old-password", next: "short", want: ErrPasswordPolicy},
+		{name: "unchanged password", current: "old-password", next: "old-password", want: ErrPasswordUnchanged},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := manager.ChangePassword("192.168.8.2:1234", test.current, test.next); !errors.Is(err, test.want) {
+				t.Fatalf("ChangePassword() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
@@ -89,6 +178,7 @@ func newTestManager(t *testing.T, password string) *Manager {
 	t.Helper()
 	digest := sha256.Sum256([]byte(password))
 	manager, err := New(Config{
+		StatePath:      filepath.Join(t.TempDir(), "web-auth.json"),
 		PasswordSHA256: hex.EncodeToString(digest[:]),
 		SessionSecret:  strings.Repeat("ab", 32),
 		SessionTTL:     time.Hour,

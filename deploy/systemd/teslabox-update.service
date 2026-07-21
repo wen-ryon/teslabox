@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaBox signed update installer
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/libexec/teslabox-update-helper
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes

@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+
+# 固定源码提交是为了让板端问题可以准确复现，而不受上游分支更新影响。
+MPP_COMMIT="${MPP_COMMIT:-a9380ef333102ac318628f83b5f7a460d377749e}"
+RGA_COMMIT="${RGA_COMMIT:-1d330cc28551943bed3380261a5a9c6fbd58ff53}"
+FFMPEG_COMMIT="${FFMPEG_COMMIT:-388741a3544b92cf525f1cb3746ba9fb8f301d9a}"
+
+PREFIX="/opt/teslabox/media"
+WORK_ROOT="/work"
+SOURCE_ROOT="${WORK_ROOT}/sources"
+BUILD_ROOT="${WORK_ROOT}/build"
+STAGE_ROOT="${WORK_ROOT}/stage"
+OUTPUT_ROOT="${WORK_ROOT}/output"
+
+clean_directory() {
+    directory="$1"
+    mkdir -p "${directory}"
+    find "${directory}" -mindepth 1 -delete
+}
+
+checkout_commit() {
+    repository="$1"
+    commit="$2"
+    destination="$3"
+
+    mkdir -p "${destination}"
+    git -C "${destination}" init --quiet
+    git -C "${destination}" remote add origin "${repository}"
+    git -C "${destination}" fetch --quiet --depth 1 origin "${commit}"
+    git -C "${destination}" checkout --quiet --detach FETCH_HEAD
+}
+
+clean_directory "${SOURCE_ROOT}"
+clean_directory "${BUILD_ROOT}"
+clean_directory "${STAGE_ROOT}"
+clean_directory "${OUTPUT_ROOT}"
+
+checkout_commit "https://gitee.com/nyanmisaka/mpp.git" "${MPP_COMMIT}" "${SOURCE_ROOT}/mpp"
+checkout_commit "https://gitee.com/nyanmisaka/rga.git" "${RGA_COMMIT}" "${SOURCE_ROOT}/rga"
+checkout_commit "https://github.com/nyanmisaka/ffmpeg-rockchip.git" "${FFMPEG_COMMIT}" "${SOURCE_ROOT}/ffmpeg-rockchip"
+
+cmake \
+    -S "${SOURCE_ROOT}/mpp" \
+    -B "${BUILD_ROOT}/mpp" \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_SHARED_LIBS=ON \
+    -DBUILD_TEST=OFF
+cmake --build "${BUILD_ROOT}/mpp" --parallel "$(nproc)"
+DESTDIR="${STAGE_ROOT}" cmake --install "${BUILD_ROOT}/mpp"
+
+meson setup \
+    "${BUILD_ROOT}/rga" \
+    "${SOURCE_ROOT}/rga" \
+    --prefix="${PREFIX}" \
+    --libdir=lib \
+    --buildtype=release \
+    --default-library=shared \
+    -Dcpp_args=-fpermissive \
+    -Dlibdrm=false \
+    -Dlibrga_demo=false
+meson compile -C "${BUILD_ROOT}/rga" -j "$(nproc)"
+DESTDIR="${STAGE_ROOT}" meson install -C "${BUILD_ROOT}/rga"
+
+# FFmpeg 同时依赖容器自带的 libdrm 和刚构建的 MPP/RGA；临时复制到最终前缀
+# 可以让 pkg-config 正确解析两类依赖，容器退出后不会污染构建板。
+mkdir -p "${PREFIX}"
+cp -a "${STAGE_ROOT}${PREFIX}/." "${PREFIX}/"
+export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig"
+
+mkdir -p "${BUILD_ROOT}/ffmpeg-rockchip"
+cd "${BUILD_ROOT}/ffmpeg-rockchip"
+"${SOURCE_ROOT}/ffmpeg-rockchip/configure" \
+    --prefix="${PREFIX}" \
+    --enable-version3 \
+    --enable-libdrm \
+    --enable-rkmpp \
+    --enable-rkrga \
+    --disable-debug \
+    --disable-doc \
+    --disable-ffplay \
+    --extra-ldflags="-Wl,-rpath,${PREFIX}/lib"
+make -j "$(nproc)"
+make DESTDIR="${STAGE_ROOT}" install
+
+# 记录源码和目标运行时，便于部署后判断二进制是否来自预期构建。
+cat > "${STAGE_ROOT}${PREFIX}/BUILD_INFO" <<EOF
+target=debian-11-arm64
+prefix=${PREFIX}
+mpp_commit=${MPP_COMMIT}
+rga_commit=${RGA_COMMIT}
+ffmpeg_rockchip_commit=${FFMPEG_COMMIT}
+EOF
+
+# 目标板只需要命令行程序和运行库，移除开发文件可以显著缩小部署包。
+find "${STAGE_ROOT}${PREFIX}/include" -depth -delete
+find "${STAGE_ROOT}${PREFIX}/lib/pkgconfig" -depth -delete
+find "${STAGE_ROOT}${PREFIX}/lib" -maxdepth 1 -type f -name '*.a' -delete
+
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -version
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -hwaccels
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -decoders | sed -n '/_rkmpp/p'
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -filters | sed -n '/_rkrga/p'
+
+tar -C "${STAGE_ROOT}" -czf "${OUTPUT_ROOT}/teslabox-media-debian11-arm64.tar.gz" opt
+cd "${OUTPUT_ROOT}"
+sha256sum teslabox-media-debian11-arm64.tar.gz > teslabox-media-debian11-arm64.tar.gz.sha256

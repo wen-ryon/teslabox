@@ -1,0 +1,195 @@
+package media
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"strconv"
+	"strings"
+)
+
+// CompositeRequest 集中约束单分钟合成输入，避免客户端直接传递 FFmpeg 参数。
+type CompositeRequest struct {
+	Layout  string
+	Quality string
+	Inputs  map[string]string
+}
+
+// InputError 让 API 可以区分用户参数问题和媒体工具链故障。
+type InputError struct {
+	Message string
+}
+
+// Error 只暴露预先定义的安全描述，避免泄漏板端命令细节。
+func (e *InputError) Error() string { return e.Message }
+
+type streamingRunner interface {
+	RunStreaming(context.Context, string, []string, io.Writer) error
+}
+
+// Compositor 隔离硬件合成命令，让 HTTP 层不依赖 FFmpeg 参数细节。
+type Compositor struct {
+	runner     streamingRunner
+	ffmpegPath string
+}
+
+// NewCompositor 在启动阶段拒绝不安全路径，避免请求阶段执行任意程序。
+func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, error) {
+	if runner == nil {
+		return nil, errors.New("媒体流执行器不能为空")
+	}
+	if !isLinuxAbsolutePath(ffmpegPath) {
+		return nil, errors.New("FFmpeg 必须使用绝对路径")
+	}
+	return &Compositor{runner: runner, ffmpegPath: ffmpegPath}, nil
+}
+
+// Stream 沿用请求上下文，避免浏览器断开后遗留占用硬件的 FFmpeg 进程。
+func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, output io.Writer) error {
+	args, err := compositeArgs(request)
+	if err != nil {
+		return err
+	}
+	if err := c.runner.RunStreaming(ctx, c.ffmpegPath, args, output); err != nil {
+		return fmt.Errorf("实时合成录像: %w", err)
+	}
+	return nil
+}
+
+type compositeProfile struct {
+	width   int
+	height  int
+	fps     int
+	bitrate int
+}
+
+type compositeTile struct {
+	camera string
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+func compositeArgs(request CompositeRequest) ([]string, error) {
+	profile, ok := map[string]compositeProfile{
+		"smooth":   {width: 854, height: 480, fps: 20, bitrate: 1500},
+		"standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
+		"high":     {width: 1280, height: 720, fps: 30, bitrate: 5000},
+	}[request.Quality]
+	if !ok {
+		return nil, &InputError{Message: "不支持的播放画质"}
+	}
+	tiles, err := layoutTiles(request.Layout, profile.width, profile.height)
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin"}
+	for _, tile := range tiles {
+		input := request.Inputs[tile.camera]
+		if !isLinuxAbsolutePath(input) {
+			return nil, &InputError{Message: "当前片段缺少合成所需视角"}
+		}
+		args = append(args,
+			"-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime",
+			"-c:v", "h264_rkmpp", "-i", path.Clean(input),
+		)
+	}
+
+	filters := make([]string, 0, len(tiles)+1)
+	labels := make([]string, 0, len(tiles))
+	layout := make([]string, 0, len(tiles))
+	for index, tile := range tiles {
+		label := fmt.Sprintf("v%d", index)
+		filters = append(filters, fmt.Sprintf(
+			"[%d:v]fps=%d,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=decrease:force_divisible_by=2,hwdownload,format=nv12,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black[%s]",
+			index, profile.fps, tile.width, tile.height, tile.width, tile.height, label,
+		))
+		labels = append(labels, "["+label+"]")
+		layout = append(layout, strconv.Itoa(tile.x)+"_"+strconv.Itoa(tile.y))
+	}
+	filters = append(filters, strings.Join(labels, "")+fmt.Sprintf(
+		"xstack=inputs=%d:layout=%s:fill=black:shortest=1[out]", len(tiles), strings.Join(layout, "|"),
+	))
+
+	bitrate := strconv.Itoa(profile.bitrate) + "k"
+	args = append(args,
+		"-filter_complex", strings.Join(filters, ";"), "-map", "[out]", "-an",
+		"-c:v", "h264_rkmpp", "-rc_mode", "CBR", "-b:v", bitrate,
+		"-maxrate", bitrate, "-bufsize", strconv.Itoa(profile.bitrate*2)+"k",
+		"-g", strconv.Itoa(profile.fps*2), "-fps_mode", "cfr",
+		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+		"-f", "mp4", "pipe:1",
+	)
+	return args, nil
+}
+
+func layoutTiles(layout string, width, height int) ([]compositeTile, error) {
+	switch layout {
+	case "composite6":
+		columns := evenParts(width, 3)
+		rows := evenParts(height, 2)
+		return gridTiles([]string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"}, columns, rows), nil
+	case "composite4a":
+		return gridTiles([]string{"front", "back", "left_repeater", "right_repeater"}, evenParts(width, 2), evenParts(height, 2)), nil
+	case "composite4b":
+		rows := evenParts(height, 4)
+		topHeight := rows[0] + rows[1] + rows[2]
+		bottomHeight := height - topHeight
+		columns := evenParts(width, 3)
+		return []compositeTile{
+			{camera: "front", width: width, height: topHeight},
+			{camera: "right_repeater", y: topHeight, width: columns[0], height: bottomHeight},
+			{camera: "back", x: columns[0], y: topHeight, width: columns[1], height: bottomHeight},
+			{camera: "left_repeater", x: columns[0] + columns[1], y: topHeight, width: columns[2], height: bottomHeight},
+		}, nil
+	case "composite3":
+		rows := evenParts(height, 3)
+		topHeight := rows[0] + rows[1]
+		bottomHeight := height - topHeight
+		columns := evenParts(width, 2)
+		return []compositeTile{
+			{camera: "front", width: width, height: topHeight},
+			{camera: "right_repeater", y: topHeight, width: columns[0], height: bottomHeight},
+			{camera: "left_repeater", x: columns[0], y: topHeight, width: columns[1], height: bottomHeight},
+		}, nil
+	default:
+		return nil, &InputError{Message: "不支持的合成布局"}
+	}
+}
+
+func evenParts(total, count int) []int {
+	parts := make([]int, count)
+	remaining := total
+	for index := range parts {
+		if index == len(parts)-1 {
+			parts[index] = remaining
+			break
+		}
+		part := (remaining / (count - index)) &^ 1
+		parts[index] = part
+		remaining -= part
+	}
+	return parts
+}
+
+func gridTiles(cameras []string, columns, rows []int) []compositeTile {
+	tiles := make([]compositeTile, 0, len(cameras))
+	y := 0
+	for row, rowHeight := range rows {
+		x := 0
+		for column, columnWidth := range columns {
+			index := row*len(columns) + column
+			if index >= len(cameras) {
+				return tiles
+			}
+			tiles = append(tiles, compositeTile{camera: cameras[index], x: x, y: y, width: columnWidth, height: rowHeight})
+			x += columnWidth
+		}
+		y += rowHeight
+	}
+	return tiles
+}

@@ -3,7 +3,7 @@
 const cameraOrder = ["left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"];
 const compositeLayouts = {
   composite6: {label:"六路合成", cameras:cameraOrder},
-  composite4a: {label:"四路合成 A", cameras:["front", "back", "right_repeater", "left_repeater"]},
+  composite4a: {label:"四路合成 A", cameras:["front", "back", "left_repeater", "right_repeater"]},
   composite4b: {label:"四路合成 B", cameras:["front", "right_repeater", "back", "left_repeater"]},
   composite3: {label:"三路合成", cameras:["front", "right_repeater", "left_repeater"]},
 };
@@ -15,8 +15,8 @@ const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
-  page: window.location.pathname === "/settings" ? "settings" : "dashboard",
-  wifi: null, ap: null, storage: null, uiFont: savedUIFont,
+  page: window.location.pathname === "/settings" ? "settings" : "dashboard", mustChangePassword: false,
+  wifi: null, ap: null, storage: null, update: null, uiFont: savedUIFont,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -44,11 +44,20 @@ let pendingWiFi = null;
 let pendingStorage = null;
 let confirmResolver = null;
 let playbackQuality = savedPlaybackQuality;
+let effectivePlaybackQuality = resolvePlaybackQuality(playbackQuality, activeDisplay);
+let playbackFallbackInProgress = false;
+let playbackWasPlaying = false;
 let playbackDiagnosticsTimer = 0;
 let playbackStalls = 0;
 let isPlaybackBuffering = false;
+let lastPlaybackProgressAt = 0;
+let lastPlaybackTime = 0;
 let mediaThroughputSamples = [];
 let activeCompositeAspect = 0;
+let exportTask = null;
+let exportPollTimer = 0;
+let passwordChangeForced = false;
+let updatePollTimer = 0;
 const observedMediaEntries = new Set();
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
@@ -87,11 +96,16 @@ async function initialize() {
   try {
     const session = await fetch("/api/v1/auth/session", { credentials: "same-origin" }).then((response) => response.json());
     state.authEnabled = session.enabled;
+    state.mustChangePassword = Boolean(session.must_change_password);
     if (session.enabled && !session.authenticated) {
       showLogin();
       return;
     }
     showApp();
+    if (state.mustChangePassword) {
+      openPasswordModal(true);
+      return;
+    }
     await refreshAll();
     if (state.page === "settings") await loadSettings();
   } catch (error) {
@@ -113,7 +127,12 @@ loginForm.addEventListener("submit", async (event) => {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "登录失败");
     $("password").value = "";
+    state.mustChangePassword = Boolean(payload.must_change_password);
     showApp();
+    if (state.mustChangePassword) {
+      openPasswordModal(true);
+      return;
+    }
     await refreshAll();
   } catch (error) {
     loginError.textContent = error.message;
@@ -125,6 +144,7 @@ loginForm.addEventListener("submit", async (event) => {
 $("logout-button").addEventListener("click", async () => {
   await fetch("/api/v1/auth/logout", { method: "POST", credentials: "same-origin" });
   closeAppearanceMenu();
+  closePasswordModal(true);
   closePlayer();
   showLogin();
 });
@@ -151,17 +171,28 @@ $("ap-form").addEventListener("submit", saveAPSettings);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
 $("storage-refresh").addEventListener("click", loadStorageDevices);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
+$("password-change-open").addEventListener("click", () => openPasswordModal(false));
+$("password-change-form").addEventListener("submit", changeManagementPassword);
+document.querySelectorAll("[data-close-password]").forEach((element) => element.addEventListener("click", () => closePasswordModal(false)));
 document.querySelectorAll("[data-close-wifi]").forEach((element) => element.addEventListener("click", closeWiFiModal));
 document.querySelectorAll("[data-close-storage]").forEach((element) => element.addEventListener("click", closeStorageModal));
 document.querySelectorAll("[data-close-confirm]").forEach((element) => element.addEventListener("click", () => resolveConfirmation(false)));
 $("confirm-submit").addEventListener("click", () => resolveConfirmation(true));
 $("reboot-button").addEventListener("click", () => requestPower("reboot"));
 $("shutdown-button").addEventListener("click", () => requestPower("shutdown"));
+$("update-check").addEventListener("click", checkUpdate);
+$("update-download").addEventListener("click", downloadUpdate);
+$("update-install").addEventListener("click", installUpdate);
 $("filter-form").addEventListener("submit", (event) => { event.preventDefault(); loadSessions(false); });
 $("play-toggle").addEventListener("click", togglePlayback);
 $("session-timeline").addEventListener("input", previewTimelinePosition);
 $("session-timeline").addEventListener("change", seekTimelinePosition);
 $("fullscreen-button").addEventListener("click", enterFullscreen);
+$("export-open").addEventListener("click", openExportModal);
+$("export-form").addEventListener("submit", createExportTask);
+$("export-cancel").addEventListener("click", cancelExportTask);
+$("export-layout").addEventListener("change", renderExportOptions);
+document.querySelectorAll("[data-close-export]").forEach((element) => element.addEventListener("click", closeExportModal));
 $("player-quality").value = playbackQuality;
 $("player-quality").addEventListener("change", (event) => setPlaybackQuality(event.target.value));
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
@@ -170,6 +201,8 @@ document.querySelectorAll("[data-close-player]").forEach((element) => element.ad
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("confirm-modal").hidden) resolveConfirmation(false);
+  else if (!$("password-modal").hidden) closePasswordModal(false);
+  else if (!$("export-modal").hidden) closeExportModal();
   else if (!$("wifi-modal").hidden) closeWiFiModal();
   else if (!$("appearance-menu").hidden) closeAppearanceMenu();
   else if (!$("nav-drawer").hidden) closeNavigation();
@@ -177,10 +210,16 @@ document.addEventListener("keydown", (event) => {
 });
 sessionVideo.addEventListener("timeupdate", updateUnifiedTimeline);
 sessionVideo.addEventListener("ended", advanceToNextSegment);
-sessionVideo.addEventListener("play", updatePlayButton);
+sessionVideo.addEventListener("play", () => {
+  playbackWasPlaying = true;
+  lastPlaybackProgressAt = Date.now();
+  lastPlaybackTime = sessionVideo.currentTime;
+  updatePlayButton();
+});
 sessionVideo.addEventListener("pause", updatePlayButton);
 sessionVideo.addEventListener("waiting", markPlaybackStall);
 sessionVideo.addEventListener("playing", () => { isPlaybackBuffering = false; });
+sessionVideo.addEventListener("error", handlePlaybackError);
 navigator.connection?.addEventListener?.("change", updatePlaybackDiagnostics);
 window.addEventListener("resize", handlePlayerViewportChange);
 document.addEventListener("fullscreenchange", handlePlayerViewportChange);
@@ -201,6 +240,61 @@ function closeNavigation() {
   $("nav-drawer").hidden = true;
   $("nav-backdrop").hidden = true;
   $("nav-toggle").setAttribute("aria-expanded", "false");
+}
+
+function openPasswordModal(forced) {
+  passwordChangeForced = Boolean(forced);
+  $("password-modal").hidden = false;
+  $("password-modal-title").textContent = forced ? "请先修改默认密码" : "修改管理密码";
+  $("password-modal-detail").textContent = forced
+    ? "当前仍在使用首次启动默认密码 teslabox。修改成功前，设备管理和录像接口不会开放。"
+    : "新密码保存后，其他浏览器中的旧登录会话会立即失效。";
+  $("password-change-close").hidden = passwordChangeForced;
+  $("password-change-error").textContent = "";
+  $("current-password").value = "";
+  $("new-password").value = "";
+  $("confirm-new-password").value = "";
+  window.setTimeout(() => $("current-password").focus(), 0);
+}
+
+function closePasswordModal(force) {
+  if (passwordChangeForced && !force) return;
+  $("password-modal").hidden = true;
+  passwordChangeForced = false;
+}
+
+async function changeManagementPassword(event) {
+  event.preventDefault();
+  const currentPassword = $("current-password").value;
+  const newPassword = $("new-password").value;
+  const confirmation = $("confirm-new-password").value;
+  const errorElement = $("password-change-error");
+  errorElement.textContent = "";
+  if (newPassword !== confirmation) {
+    errorElement.textContent = "两次输入的新密码不一致";
+    return;
+  }
+  if (newPassword.length < 8 || new TextEncoder().encode(newPassword).length > 128) {
+    errorElement.textContent = "新密码必须为 8 到 128 个字节";
+    return;
+  }
+  const button = $("password-change-submit");
+  button.disabled = true;
+  try {
+    await request("/api/v1/auth/password", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({current_password:currentPassword, new_password:newPassword}),
+    });
+    state.mustChangePassword = false;
+    $("password-status").textContent = "密码已更新";
+    closePasswordModal(true);
+    await refreshAll();
+    if (state.page === "settings") await loadSettings();
+  } catch (error) {
+    errorElement.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function toggleAppearanceMenu() {
@@ -237,8 +331,8 @@ async function postJSON(path, body) {
 
 async function loadSettings() {
   setSettingsNotice("正在读取网络设置…", false);
-  const [wifiResult, apResult, storageResult] = await Promise.allSettled([
-    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"),
+  const [wifiResult, apResult, storageResult, updateResult] = await Promise.allSettled([
+    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"),
   ]);
   if (wifiResult.status === "fulfilled") {
     state.wifi = wifiResult.value;
@@ -258,8 +352,118 @@ async function loadSettings() {
   } else {
     renderStorageUnavailable(storageResult.reason.message);
   }
-  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
+  if (updateResult.status === "fulfilled") {
+    state.update = updateResult.value;
+    renderUpdate(state.update);
+  } else {
+    renderUpdateUnavailable(updateResult.reason.message);
+  }
+  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
   else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
+}
+
+function renderUpdate(update) {
+  const labels = {
+    disabled:"未配置", idle:"可检查", checking:"检查中", available:"发现更新", current:"已是最新",
+    downloading:"下载中", downloaded:"等待安装", installing:"正在安装", failed:"更新失败",
+  };
+  $("update-status").textContent = labels[update.state] || "状态未知";
+  $("update-status").className = `badge${["current", "downloaded"].includes(update.state) ? " ok" : update.state === "failed" ? " error" : ""}`;
+  $("update-current-version").textContent = update.current_version || "dev";
+  $("update-latest-version").textContent = update.latest_version || "—";
+  const detail = update.configured
+    ? `更新通道：${update.channel || "stable"}${update.current_commit && update.current_commit !== "unknown" ? ` · 提交 ${update.current_commit.slice(0, 12)}` : ""}`
+    : "尚未配置 Gitee 更新清单地址和设备公钥。";
+  const installDetail = update.install_result === "success" ? "上次更新已成功安装。" : "";
+  $("update-version-detail").textContent = update.error || installDetail || detail;
+  $("update-release-notes").hidden = !update.release_notes;
+  $("update-release-notes").textContent = update.release_notes || "";
+  const downloading = update.state === "downloading";
+  $("update-progress-wrap").hidden = !downloading;
+  $("update-progress").value = Number(update.progress_percent || 0);
+  $("update-progress-detail").textContent = `${Number(update.progress_percent || 0)}% · ${formatBytes(update.downloaded_bytes || 0)} / ${formatBytes(update.total_bytes || 0)}`;
+  $("update-check").disabled = !update.configured || ["checking", "downloading", "installing"].includes(update.state);
+  $("update-download").hidden = update.state !== "available";
+  $("update-install").hidden = update.state !== "downloaded";
+  if (["downloading", "installing"].includes(update.state)) scheduleUpdatePoll();
+  else clearUpdatePoll();
+}
+
+function renderUpdateUnavailable(message) {
+  clearUpdatePoll();
+  $("update-status").textContent = "不可用";
+  $("update-status").className = "badge error";
+  $("update-version-detail").textContent = message;
+  $("update-check").disabled = true;
+  $("update-download").hidden = true;
+  $("update-install").hidden = true;
+}
+
+function scheduleUpdatePoll() {
+  clearUpdatePoll();
+  updatePollTimer = window.setTimeout(async () => {
+    try {
+      state.update = await request("/api/v1/update");
+      renderUpdate(state.update);
+    } catch (_) {
+      if (state.update?.state === "installing") {
+        $("update-version-detail").textContent = "服务正在重启，页面恢复后请重新检查版本。";
+        scheduleUpdatePoll();
+      }
+    }
+  }, 1000);
+}
+
+function clearUpdatePoll() {
+  if (updatePollTimer) window.clearTimeout(updatePollTimer);
+  updatePollTimer = 0;
+}
+
+async function checkUpdate() {
+  $("update-check").disabled = true;
+  try {
+    state.update = await postJSON("/api/v1/update/check", {});
+    renderUpdate(state.update);
+    setSettingsNotice(state.update.available ? `发现 ${state.update.latest_version} 更新` : "当前已是最新版本", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+    await refreshUpdateStatus();
+  }
+}
+
+async function downloadUpdate() {
+  try {
+    state.update = await postJSON("/api/v1/update/download", {});
+    renderUpdate(state.update);
+    setSettingsNotice("更新包正在后台下载并校验", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function installUpdate() {
+  const confirmed = await askConfirmation(
+    "安装系统更新",
+    `将安装 ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先断开车机 OTG，确认没有视频导出任务。失败时设备会自动恢复旧程序。`,
+    "安装并重启", true,
+  );
+  if (!confirmed) return;
+  try {
+    state.update = await postJSON("/api/v1/update/install", {});
+    renderUpdate(state.update);
+    setSettingsNotice("安装请求已提交，服务即将重启", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function refreshUpdateStatus() {
+  try {
+    state.update = await request("/api/v1/update");
+    renderUpdate(state.update);
+  } catch (error) {
+    renderUpdateUnavailable(error.message);
+  }
 }
 
 function renderWiFiSettings(wifi) {
@@ -1009,8 +1213,10 @@ async function openSessionPlayer(summary, camera, position, display) {
     const session = await request(`/api/v1/video-sessions/${encodeURIComponent(summary.id)}`);
     closePlayerMedia();
     activeSession = session;
+    playbackWasPlaying = false;
     activeCamera = session.cameras.includes(camera) ? camera : preferredCamera(session);
     activeDisplay = display === "composite" ? normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6")) : "single";
+    resetPlaybackFallbackState();
     $("player-title").textContent = formatSessionRange(session.start_at, session.end_at);
     renderPlayerMeta(session);
     $("session-timeline").max = String(session.duration_seconds);
@@ -1121,7 +1327,8 @@ async function loadSessionPosition(position, autoplay) {
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
   const token = ++loadToken;
   const source = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`;
-  if (sessionVideo.dataset.videoId !== activeVideo.id) {
+  delete sessionVideo.dataset.compositeKey;
+  if (sessionVideo.dataset.videoId !== activeVideo.id || sessionVideo.getAttribute("src") !== source) {
     sessionVideo.dataset.videoId = activeVideo.id;
     sessionVideo.src = source;
     sessionVideo.load();
@@ -1158,6 +1365,11 @@ async function loadCompositePosition(position, autoplay) {
   const masterVideo = layoutVideos.find((video) => video.camera === "front") || layoutVideos[0];
   activeCamera = masterVideo.camera;
   activeVideo = masterVideo;
+  if (usesServerComposite()) {
+    await loadServerComposite(selection, layout, masterVideo, autoplay);
+    return;
+  }
+  delete sessionVideo.dataset.compositeKey;
   const token = ++loadToken;
   const nextTracks = new Map();
   const preparations = layoutVideos.map(async (video) => {
@@ -1177,6 +1389,36 @@ async function loadCompositePosition(position, autoplay) {
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   renderCameraSwitcher();
   if (autoplay) await playCompositeTracks();
+}
+
+async function loadServerComposite(selection, layout, masterVideo, autoplay) {
+  releaseCompositeAuxiliaryTracks();
+  const token = ++loadToken;
+  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}`;
+  const sourceKey = `${selection.moment.id}:${activeDisplay}:${effectivePlaybackQuality}`;
+  if (sessionVideo.dataset.compositeKey !== sourceKey) {
+    sessionVideo.pause();
+    sessionVideo.dataset.compositeKey = sourceKey;
+    sessionVideo.dataset.videoId = masterVideo.id;
+    sessionVideo.src = source;
+    sessionVideo.load();
+    const loaded = await waitForMetadata(sessionVideo);
+    if (!loaded) {
+      requestPlaybackFallback("板端合成视频加载失败");
+      return;
+    }
+  }
+  if (token !== loadToken) return;
+  const localTime = Math.max(0, (selection.absolute-new Date(selection.moment.recorded_at).getTime())/1000);
+  sessionVideo.currentTime = Number.isFinite(sessionVideo.duration)
+    ? Math.min(localTime, Math.max(0, sessionVideo.duration-.05))
+    : localTime;
+  compositeTracks = new Map([[masterVideo.camera, {element:sessionVideo, video:masterVideo, lastHardSync:0}]]);
+  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
+  $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
+  applyDisplayState();
+  renderCameraSwitcher();
+  if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
 }
 
 function selectMomentAtPosition(session, position) {
@@ -1229,10 +1471,11 @@ function attachCompositeElement(camera, element) {
 }
 
 async function prepareVideoElement(element, video, absolute) {
-  if (element.dataset.videoId !== video.id) {
+  const source = `/api/v1/videos/${encodeURIComponent(video.id)}/content`;
+  if (element.dataset.videoId !== video.id || element.getAttribute("src") !== source) {
     element.pause();
     element.dataset.videoId = video.id;
-    element.src = `/api/v1/videos/${encodeURIComponent(video.id)}/content`;
+    element.src = source;
     element.load();
     await waitForMetadata(element);
   }
@@ -1276,7 +1519,7 @@ async function switchCamera(camera) {
   const position = currentSessionPosition();
   const autoplay = !sessionVideo.paused;
   activeCamera = camera;
-  if (isCompositeDisplay(activeDisplay)) {
+  if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) {
     sessionVideo.pause();
     activeDisplay = "single";
     releaseCompositeAuxiliaryTracks();
@@ -1293,13 +1536,23 @@ function togglePlayback() {
     loadSessionPosition(Number($("session-timeline").value), true);
     return;
   }
-  if (isCompositeDisplay(activeDisplay)) {
-    if (sessionVideo.paused) playCompositeTracks();
-    else pauseCompositeTracks();
+  if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) {
+    if (sessionVideo.paused) {
+      playbackWasPlaying = true;
+      playCompositeTracks();
+    } else {
+      playbackWasPlaying = false;
+      pauseCompositeTracks();
+    }
     return;
   }
-  if (sessionVideo.paused) sessionVideo.play().catch(() => showPlayerMessage("请再次点击播放"));
-  else sessionVideo.pause();
+  if (sessionVideo.paused) {
+    playbackWasPlaying = true;
+    sessionVideo.play().catch(() => showPlayerMessage("请再次点击播放"));
+  } else {
+    playbackWasPlaying = false;
+    sessionVideo.pause();
+  }
 }
 
 function previewTimelinePosition() {
@@ -1308,7 +1561,7 @@ function previewTimelinePosition() {
 
 function seekTimelinePosition() {
   const autoplay = !sessionVideo.paused;
-  if (isCompositeDisplay(activeDisplay)) pauseCompositeTracks();
+  if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) pauseCompositeTracks();
   else sessionVideo.pause();
   loadSessionPosition(Number($("session-timeline").value), autoplay);
 }
@@ -1319,7 +1572,7 @@ function updateUnifiedTimeline() {
   requestedPosition = Math.min(position, activeSession.duration_seconds);
   $("session-timeline").value = String(requestedPosition);
   $("current-time").textContent = formatDuration(requestedPosition);
-  if (isCompositeDisplay(activeDisplay)) synchronizeCompositeTracks();
+  if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) synchronizeCompositeTracks();
 }
 
 function advanceToNextSegment() {
@@ -1353,6 +1606,7 @@ async function setDisplayMode(display) {
   pauseCompositeTracks();
   sessionVideo.pause();
   activeDisplay = display;
+  resetPlaybackFallbackState();
   if (isCompositeDisplay(display)) writePreference("teslabox-player-layout", display);
   if (display === "single") releaseCompositeAuxiliaryTracks();
   applyDisplayState();
@@ -1362,19 +1616,164 @@ async function setDisplayMode(display) {
 
 function applyDisplayState() {
   const composite = isCompositeDisplay(activeDisplay);
+  const serverComposite = composite && usesServerComposite();
   mainVideoFrame.dataset.layout = composite ? activeDisplay : "single";
-  if (!composite) resetCompositeFrameGeometry();
-  compositeGrid.hidden = !composite;
-  if (composite) {
+  if (!composite || serverComposite) resetCompositeFrameGeometry();
+  compositeGrid.hidden = !composite || serverComposite;
+  if (composite && !serverComposite) {
     ensureCompositeTiles();
     sessionVideo.hidden = true;
   } else {
     mainVideoFrame.insertBefore(sessionVideo, $("active-camera-label"));
     sessionVideo.hidden = false;
-    sessionVideo.preload = "metadata";
+    sessionVideo.preload = serverComposite ? "auto" : "metadata";
     sessionVideo.muted = false;
   }
   $("active-camera-label").hidden = composite;
+}
+
+function openExportModal() {
+  if (!activeSession) return;
+  const modal = $("export-modal");
+  modal.hidden = false;
+  $("export-error").textContent = "";
+  if (exportTask && exportTask.request?.session_id === activeSession.id) {
+    renderExportTask(exportTask);
+    if (["queued", "running"].includes(exportTask.state)) scheduleExportPoll(0);
+    return;
+  }
+  exportTask = null;
+  const position = Math.min(currentSessionPosition(), Math.max(0, activeSession.duration_seconds-1));
+  $("export-start").max = String(Math.max(0, activeSession.duration_seconds-1));
+  $("export-start").value = position.toFixed(1);
+  $("export-duration").max = String(Math.min(1800, activeSession.duration_seconds-position));
+  $("export-duration").value = Math.min(60, Math.max(1, activeSession.duration_seconds-position)).toFixed(1);
+  $("export-layout").value = isCompositeDisplay(activeDisplay) ? activeDisplay : "single";
+  $("export-camera").value = activeCamera;
+  $("export-quality").value = effectivePlaybackQuality === "original" ? "original" : effectivePlaybackQuality;
+  renderExportOptions();
+  resetExportTaskUI();
+}
+
+function renderExportOptions() {
+  Object.entries(compositeLayouts).forEach(([layout, definition]) => {
+    const option = $("export-layout").querySelector(`option[value="${layout}"]`);
+    option.disabled = definition.cameras.some((camera) => !activeSession.cameras.includes(camera));
+  });
+  if ($("export-layout").selectedOptions[0]?.disabled) $("export-layout").value = "single";
+  const cameraSelect = $("export-camera");
+  const selectedCamera = cameraSelect.value || activeCamera;
+  cameraSelect.replaceChildren();
+  cameraOrder.forEach((camera) => {
+    if (!activeSession.cameras.includes(camera)) return;
+    const option = document.createElement("option");
+    option.value = camera;
+    option.textContent = cameraLabel(camera);
+    cameraSelect.append(option);
+  });
+  if ([...cameraSelect.options].some((option) => option.value === selectedCamera)) cameraSelect.value = selectedCamera;
+  $("export-camera-field").hidden = $("export-layout").value !== "single";
+  const originalOption = $("export-quality").querySelector('option[value="original"]');
+  originalOption.disabled = $("export-layout").value !== "single";
+  if (originalOption.disabled && $("export-quality").value === "original") $("export-quality").value = "high";
+  $("export-quality-help").textContent = $("export-layout").value === "single"
+    ? "单路可选择源分辨率原画；跨分钟或精确裁剪时仍会进行高质量重新编码。"
+    : "多路必须重新合成编码，最高输出 1080p。";
+}
+
+async function createExportTask(event) {
+  event.preventDefault();
+  if (!activeSession || ["queued", "running"].includes(exportTask?.state)) return;
+  const layout = $("export-layout").value;
+  const cameras = layout === "single" ? [$("export-camera").value] : (compositeLayouts[layout]?.cameras || []);
+  const start = Number($("export-start").value);
+  const duration = Number($("export-duration").value);
+  $("export-error").textContent = "";
+  if (cameras.length === 0) {
+    $("export-error").textContent = "请至少选择一个摄像头视角";
+    return;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || start < 0 || duration < 1 || duration > 1800 || start+duration > activeSession.duration_seconds+.01) {
+    $("export-error").textContent = "导出范围必须位于当前完整录像内，且最长 30 分钟";
+    return;
+  }
+  $("export-submit").disabled = true;
+  try {
+    playbackWasPlaying = false;
+    pauseCompositeTracks();
+    releaseCompositeAuxiliaryTracks();
+    releaseVideoElement(sessionVideo);
+    showPlayerMessage("导出任务已接管硬件媒体资源，当前播放已停止");
+    exportTask = await request("/api/v1/exports", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value}),
+    });
+    renderExportTask(exportTask);
+    scheduleExportPoll(1000);
+  } catch (error) {
+    $("export-error").textContent = error.message;
+    $("export-submit").disabled = false;
+  }
+}
+
+function scheduleExportPoll(delay = 1500) {
+  window.clearTimeout(exportPollTimer);
+  if (!exportTask || !["queued", "running"].includes(exportTask.state)) return;
+  exportPollTimer = window.setTimeout(pollExportTask, delay);
+}
+
+async function pollExportTask() {
+  if (!exportTask) return;
+  try {
+    exportTask = await request(`/api/v1/exports/${encodeURIComponent(exportTask.id)}`);
+    renderExportTask(exportTask);
+  } catch (error) {
+    $("export-error").textContent = error.message;
+  }
+  scheduleExportPoll();
+}
+
+async function cancelExportTask() {
+  if (!exportTask || !["queued", "running"].includes(exportTask.state)) return;
+  $("export-cancel").disabled = true;
+  try {
+    exportTask = await request(`/api/v1/exports/${encodeURIComponent(exportTask.id)}`, {method:"DELETE"});
+    renderExportTask(exportTask);
+  } catch (error) {
+    $("export-error").textContent = error.message;
+  } finally {
+    $("export-cancel").disabled = false;
+  }
+}
+
+function renderExportTask(task) {
+  const labels = {queued:"正在排队", running:"正在导出", completed:"导出完成", failed:"导出失败", canceled:"已取消"};
+  const running = ["queued", "running"].includes(task.state);
+  $("export-task-status").hidden = false;
+  $("export-state").textContent = labels[task.state] || task.state;
+  $("export-progress").value = task.progress_percent || 0;
+  const estimate = task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "";
+  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${estimate}` : `可以修改参数后再次导出${estimate}`);
+  $("export-cancel").hidden = !running;
+  $("export-download").hidden = task.state !== "completed" || !task.download_ready;
+  $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";
+  $("export-submit").disabled = running;
+  $("export-submit").textContent = task.state === "completed" ? "再次导出" : "开始导出";
+}
+
+function resetExportTaskUI() {
+  window.clearTimeout(exportPollTimer);
+  $("export-task-status").hidden = true;
+  $("export-cancel").hidden = true;
+  $("export-download").hidden = true;
+  $("export-download").href = "#";
+  $("export-submit").disabled = false;
+  $("export-submit").textContent = "开始导出";
+}
+
+function closeExportModal() {
+  window.clearTimeout(exportPollTimer);
+  $("export-modal").hidden = true;
 }
 
 function applyCompositeFrameGeometry(masterElement) {
@@ -1452,6 +1851,7 @@ function resetCompositeFrameGeometry() {
 }
 
 async function playCompositeTracks() {
+  playbackWasPlaying = true;
   const results = await Promise.allSettled([...compositeTracks.values()].map((track) => track.element.play()));
   if (results.some((result) => result.status === "rejected")) showPlayerMessage("浏览器阻止了自动播放，请再次点击播放");
 }
@@ -1507,12 +1907,21 @@ function enterFullscreen() {
 }
 
 function waitForMetadata(video) {
-  if (video.readyState >= 1) return Promise.resolve();
+  if (video.readyState >= 1 && !video.error) return Promise.resolve(true);
   return new Promise((resolve) => {
-    const done = () => resolve();
-    video.addEventListener("loadedmetadata", done, {once:true});
-    video.addEventListener("error", done, {once:true});
-    window.setTimeout(done, 4000);
+    let settled = false;
+    let timer = 0;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeEventListener("loadedmetadata", done);
+      video.removeEventListener("error", done);
+      resolve(video.readyState >= 1 && !video.error);
+    };
+    video.addEventListener("loadedmetadata", done);
+    video.addEventListener("error", done);
+    timer = window.setTimeout(done, 4000);
   });
 }
 
@@ -1537,6 +1946,8 @@ function closePlayerMedia() {
   activeVideo = null;
   activeMomentIndex = -1;
   requestedPosition = 0;
+  playbackWasPlaying = false;
+  resetPlaybackFallbackState();
   $("camera-switcher").replaceChildren();
   $("segment-markers").replaceChildren();
   $("event-marker-layer").replaceChildren();
@@ -1546,14 +1957,93 @@ function closePlayerMedia() {
 
 function setPlaybackQuality(quality) {
   playbackQuality = normalizePlaybackQuality(quality);
+  resetPlaybackFallbackState();
   $("player-quality").value = playbackQuality;
   writePreference("teslabox-playback-quality", playbackQuality);
-  if (playbackQuality === "auto") showPlayerMessage("自动画质已开启；低码率转码完成前会使用原画");
+  if (playbackQuality === "auto") showPlayerMessage("自动画质：多路使用标准合成，单路使用原画");
   else hidePlayerMessage();
+  if (activeSession && isCompositeDisplay(activeDisplay)) {
+    const position = currentSessionPosition();
+    const autoplay = playbackWasPlaying;
+    sessionVideo.pause();
+    pauseCompositeTracks();
+    applyDisplayState();
+    loadSessionPosition(position, autoplay);
+  }
 }
 
 function normalizePlaybackQuality(quality) {
-  return ["auto", "original"].includes(quality) ? quality : "auto";
+  return ["auto", "smooth", "standard", "high", "original"].includes(quality) ? quality : "auto";
+}
+
+function usesServerComposite() {
+  return ["smooth", "standard", "high"].includes(effectivePlaybackQuality);
+}
+
+function qualityLabel(quality) {
+  return ({smooth:"流畅", standard:"标准", high:"高清", original:"原画", auto:"自动"})[quality] || "自动";
+}
+
+const playbackFallbackLadder = {high:"standard", standard:"smooth", smooth:"single"};
+
+function resetPlaybackFallbackState() {
+  effectivePlaybackQuality = resolvePlaybackQuality(playbackQuality, activeDisplay);
+  playbackFallbackInProgress = false;
+}
+
+function resolvePlaybackQuality(quality, display) {
+  if (quality !== "auto") return quality;
+  return isCompositeDisplay(display) ? "standard" : "original";
+}
+
+function handlePlaybackError() {
+  requestPlaybackFallback("视频流播放失败");
+}
+
+function requestPlaybackFallback(reason) {
+  if (!activeSession || playbackFallbackInProgress || !isCompositeDisplay(activeDisplay) || !usesServerComposite()) return;
+  playbackFallbackInProgress = true;
+  recoverPlayback(reason).catch(() => {
+    showPlayerMessage("自动降级失败，请手动选择单路原画");
+  }).finally(() => {
+    playbackFallbackInProgress = false;
+  });
+}
+
+async function recoverPlayback(reason) {
+  const session = activeSession;
+  const position = currentSessionPosition();
+  const autoplay = playbackWasPlaying;
+  while (activeSession === session && isCompositeDisplay(activeDisplay) && usesServerComposite()) {
+    const next = playbackFallbackLadder[effectivePlaybackQuality] || "single";
+    let notice = "";
+    sessionVideo.pause();
+    pauseCompositeTracks();
+    releaseCompositeAuxiliaryTracks();
+
+    if (next === "single") {
+      effectivePlaybackQuality = "original";
+      activeDisplay = "single";
+      activeCamera = preferredCamera(activeSession);
+      notice = `${reason}，已自动切换到单路原画`;
+    } else {
+      effectivePlaybackQuality = next;
+      notice = `${reason}，已自动降至${qualityLabel(next)}画质`;
+    }
+
+    applyDisplayState();
+    renderCameraSwitcher();
+    await loadSessionPosition(position, autoplay);
+    if (activeSession !== session) return;
+    if (!sessionVideo.error) {
+      showPlayerMessage(notice);
+      return;
+    }
+    if (next === "single") {
+      showPlayerMessage("板端合成和单路原画均无法播放，请稍后重试");
+      return;
+    }
+  }
 }
 
 function startPlaybackDiagnostics() {
@@ -1570,6 +2060,8 @@ function stopPlaybackDiagnostics() {
 function resetPlaybackDiagnostics() {
   playbackStalls = 0;
   isPlaybackBuffering = false;
+  lastPlaybackProgressAt = Date.now();
+  lastPlaybackTime = 0;
   mediaThroughputSamples = [];
   observedMediaEntries.clear();
   $("playback-throughput").textContent = "媒体吞吐：等待数据";
@@ -1586,6 +2078,7 @@ function markPlaybackStall() {
 function updatePlaybackDiagnostics() {
   if (!$("playback-path")) return;
   collectMediaThroughputSamples();
+  monitorPlaybackProgress();
   const connection = navigator.connection;
   const hints = [];
   if (connection?.effectiveType) hints.push(connection.effectiveType.toUpperCase());
@@ -1599,9 +2092,28 @@ function updatePlaybackDiagnostics() {
   $("playback-buffer").textContent = `缓冲：${bufferedSeconds(sessionVideo).toFixed(1)} 秒`;
 }
 
+function monitorPlaybackProgress() {
+  if (!activeSession || sessionVideo.paused || sessionVideo.seeking) {
+    lastPlaybackProgressAt = Date.now();
+    lastPlaybackTime = sessionVideo.currentTime || 0;
+    return;
+  }
+  if (sessionVideo.currentTime > lastPlaybackTime+.05) {
+    lastPlaybackTime = sessionVideo.currentTime;
+    lastPlaybackProgressAt = Date.now();
+    return;
+  }
+  if (usesServerComposite() && Date.now()-lastPlaybackProgressAt >= 8000) {
+    lastPlaybackProgressAt = Date.now();
+    requestPlaybackFallback("播放连续卡顿超过 8 秒");
+  }
+}
+
 function collectMediaThroughputSamples() {
   performance.getEntriesByType("resource").forEach((entry) => {
-    if (!entry.name.includes("/api/v1/videos/") || !entry.name.includes("/content") || entry.duration <= 0) return;
+    const singleVideo = entry.name.includes("/api/v1/videos/") && entry.name.includes("/content");
+    const compositeVideo = entry.name.includes("/api/v1/video-groups/") && entry.name.includes("/composite");
+    if ((!singleVideo && !compositeVideo) || entry.duration <= 0) return;
     const key = `${entry.name}|${entry.startTime}|${entry.duration}`;
     if (observedMediaEntries.has(key)) return;
     observedMediaEntries.add(key);
@@ -1637,12 +2149,14 @@ function releaseVideoElement(element) {
   element.pause();
   element.removeAttribute("src");
   element.removeAttribute("data-video-id");
+  element.removeAttribute("data-composite-key");
   element.load();
   if (element !== sessionVideo) element.remove();
   if (placeholder) placeholder.hidden = false;
 }
 
 function closePlayer() {
+  closeExportModal();
   closePlayerMedia();
   playerModal.hidden = true;
   document.body.style.overflow = "";

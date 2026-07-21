@@ -62,7 +62,7 @@ sudo nano /etc/teslabox/teslabox.env
 TESLABOX_HTTP_ADDR=:80
 ```
 
-不要用示例配置整体覆盖 `/etc/teslabox/teslabox.env`，否则可能丢失 Web 会话密钥、密码摘要和数据盘 UUID。保存后继续：
+不要用示例配置整体覆盖 `/etc/teslabox/teslabox.env`，否则可能丢失旧版 Web 认证兼容配置和数据盘 UUID。新版认证状态保存在 `/var/lib/teslabox-system/web-auth.json`，升级时同样不得删除。保存后继续：
 
 ```sh
 sudo systemctl start teslabox.service
@@ -105,7 +105,7 @@ sudo systemctl enable teslabox.service
 sudo systemctl start teslabox.service
 ```
 
-首次启动前必须按实际设备补齐数据盘身份和 Web 认证配置。数据盘初始化、TeslaCam 镜像创建、udev 规则和 AP 服务是独立步骤，不能仅凭本节命令盲目初始化或格式化存储设备。
+首次启动前必须按实际设备补齐数据盘身份。Web 认证会自动启用，全新安装初始密码为 `teslabox`，首次登录后必须立即修改。数据盘初始化、TeslaCam 镜像创建、udev 规则和 AP 服务是独立步骤，不能仅凭本节命令盲目初始化或格式化存储设备。
 
 ## 回滚
 

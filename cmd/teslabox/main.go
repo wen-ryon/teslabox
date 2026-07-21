@@ -19,6 +19,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/driveinit"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
+	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
@@ -26,6 +27,8 @@ import (
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
+	"github.com/wen-ryon/teslabox/internal/updater"
+	buildversion "github.com/wen-ryon/teslabox/internal/version"
 	"github.com/wen-ryon/teslabox/internal/webauth"
 	"github.com/wen-ryon/teslabox/internal/webui"
 )
@@ -102,6 +105,7 @@ func main() {
 		ImageLabel: "TESLACAM",
 	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager)
 	authManager, err := webauth.New(webauth.Config{
+		StatePath:      cfg.WebAuthStatePath,
 		PasswordSHA256: cfg.WebPasswordSHA256,
 		SessionSecret:  cfg.WebSessionSecret,
 		SessionTTL:     cfg.WebSessionTTL,
@@ -111,7 +115,62 @@ func main() {
 		os.Exit(1)
 	}
 	deviceAdmin := deviceadmin.New(runner, logger)
-	apiHandler := api.NewHandler(manager, logger, api.WithDeviceAdmin(deviceAdmin), api.WithStorageAdmin(storageAdmin))
+	mediaInspector, err := media.NewInspector(runner, media.Config{
+		FFmpegPath: cfg.FFmpegPath, FFprobePath: cfg.FFprobePath, Timeout: cfg.MediaProbeTimeout,
+	})
+	if err != nil {
+		logger.Error("初始化媒体工具链失败", "error", err)
+		os.Exit(1)
+	}
+	mediaCompositor, err := media.NewCompositor(runner, cfg.FFmpegPath)
+	if err != nil {
+		logger.Error("初始化实时合成器失败", "error", err)
+		os.Exit(1)
+	}
+	mediaExporter, err := media.NewExporter(runner, media.ExportConfig{
+		FFmpegPath:  cfg.FFmpegPath,
+		OutputDir:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
+		QueueSize:   cfg.ExportQueueSize,
+		MaxDuration: cfg.ExportMaxDuration,
+		Logger:      logger,
+	})
+	if err != nil {
+		logger.Error("初始化视频导出器失败", "error", err)
+		os.Exit(1)
+	}
+	updateManager, err := updater.New(updater.Config{
+		ManifestURL: cfg.UpdateManifestURL, PublicKey: cfg.UpdatePublicKey,
+		Channel: cfg.UpdateChannel, Board: cfg.UpdateBoard,
+		CurrentVersion: buildversion.Version, CurrentCommit: buildversion.Commit,
+		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
+		ResultPath: cfg.UpdateResultPath, MaximumSize: cfg.UpdateMaxBytes, Logger: logger,
+		CanInstall: func() error {
+			if manager.Snapshot().GadgetStatus.HostConnected {
+				return errors.New("车机 USB 当前已连接，请停车并断开 OTG 后再安装更新")
+			}
+			if mediaExporter.Busy() {
+				return errors.New("仍有视频导出任务，完成或取消后再安装更新")
+			}
+			return nil
+		},
+	}, updater.NewSystemdStarter(runner))
+	if err != nil {
+		logger.Error("在线更新配置无效，TeslaUSB 主链路继续运行", "error", err)
+		updateManager, _ = updater.New(updater.Config{
+			CurrentVersion: buildversion.Version, CurrentCommit: buildversion.Commit,
+			Channel: "stable", Board: "radxa-rock-3a", Logger: logger,
+		}, nil)
+	}
+	apiHandler := api.NewHandler(
+		manager,
+		logger,
+		api.WithDeviceAdmin(deviceAdmin),
+		api.WithStorageAdmin(storageAdmin),
+		api.WithMediaInspector(mediaInspector),
+		api.WithMediaCompositor(mediaCompositor),
+		api.WithExportAdmin(mediaExporter),
+		api.WithUpdateAdmin(updateManager),
+	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -119,6 +178,7 @@ func main() {
 
 	go manager.Run(ctx)
 	go deviceAdmin.Run(ctx)
+	go mediaExporter.Run(ctx)
 	watchReloadSignal(ctx, manager)
 
 	server := &http.Server{

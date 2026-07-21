@@ -32,3 +32,4 @@ This project was developed with the assistance of ChatGPT Codex and the GPT-5.6 
 - [设置中心第一版需求与交接说明](docs/zh-CN/SETTINGS_CENTER_HANDOFF.md)
 - [Windows 构建与 ROCK 3A 部署说明](docs/zh-CN/DEPLOYMENT.md)
 - [远程播放、视频导出与云端访问开发流程](docs/zh-CN/REMOTE_PLAYBACK_EXPORT_PLAN.md)
+- [签名在线更新与 Gitee 发布说明](docs/zh-CN/ONLINE_UPDATE.md)

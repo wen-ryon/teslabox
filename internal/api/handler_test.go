@@ -19,11 +19,24 @@ import (
 )
 
 type fakeController struct {
-	state service.Snapshot
+	state    service.Snapshot
+	acquired func()
+	released func()
 }
 
 func (c fakeController) Snapshot() service.Snapshot {
 	return c.state
+}
+
+func (c fakeController) AcquireMediaSnapshot() (service.Snapshot, func()) {
+	if c.acquired != nil {
+		c.acquired()
+	}
+	return c.state, func() {
+		if c.released != nil {
+			c.released()
+		}
+	}
 }
 
 func (c fakeController) Refresh(context.Context) error {
@@ -199,6 +212,8 @@ func TestGroupVideosDoesNotCreateToleranceChain(t *testing.T) {
 
 func TestVideoContentSupportsHTTPRange(t *testing.T) {
 	t.Parallel()
+	acquired := 0
+	released := 0
 	root := t.TempDir()
 	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "2026-07-16_10-00-00-front.mp4"))
 	name := filepath.Join(root, filepath.FromSlash(relative))
@@ -208,10 +223,14 @@ func TestVideoContentSupportsHTTPRange(t *testing.T) {
 	if err := os.WriteFile(name, []byte("0123456789"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	controller := fakeController{state: service.Snapshot{
-		MediaSnapshot: &mediasnapshot.View{ID: "snapshot-1", MountPath: root},
-		Videos:        []teslacam.Video{{ID: "video-1", Path: relative}},
-	}}
+	controller := fakeController{
+		state: service.Snapshot{
+			MediaSnapshot: &mediasnapshot.View{ID: "snapshot-1", MountPath: root},
+			Videos:        []teslacam.Video{{ID: "video-1", Path: relative}},
+		},
+		acquired: func() { acquired++ },
+		released: func() { released++ },
+	}
 	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/videos/video-1/content", nil)
 	request.Header.Set("Range", "bytes=2-5")
@@ -224,6 +243,9 @@ func TestVideoContentSupportsHTTPRange(t *testing.T) {
 	}
 	if response.Header().Get("Content-Range") != "bytes 2-5/10" {
 		t.Fatalf("Content-Range = %q", response.Header().Get("Content-Range"))
+	}
+	if acquired != 1 || released != 1 {
+		t.Fatalf("media lease acquired = %d, released = %d", acquired, released)
 	}
 }
 

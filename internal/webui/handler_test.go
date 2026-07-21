@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,10 +50,32 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"ap-form", "storage-device-list", "shutdown-button", "appearance-toggle", "appearance-menu",
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
-		"app.js?v=20260720-4",
+		"export-open", "export-progress", "password-change-open",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "app.js?v=20260721-1",
+		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerServesCustomExportWorkflow(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	for _, marker := range []string{
+		"createExportTask", `request("/api/v1/exports"`, "scheduleExportPoll", "cancelExportTask",
+		"start_seconds", "duration_seconds", "releaseVideoElement(sessionVideo)",
+		`layout === "single"`, "originalOption.disabled", "layout, cameras",
+	} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("自定义导出脚本缺少标记 %q", marker)
 		}
 	}
 }
@@ -84,6 +107,8 @@ func TestHandlerServesCompositeLayoutGeometry(t *testing.T) {
 	for _, marker := range []string{
 		"applyCompositeFrameGeometry", "layoutFactors", "composite6:3/2", "composite4a:1",
 		"composite4b:3/4", "composite3:2/3", "fitCompositeFrame", "fitFullscreenCompositeGrid", "isPlayerFullscreen",
+		"if (!composite || serverComposite) resetCompositeFrameGeometry();",
+		`resolvePlaybackQuality(playbackQuality, activeDisplay)`, `return isCompositeDisplay(display) ? "standard" : "original"`,
 	} {
 		if !strings.Contains(scriptRecorder.Body.String(), marker) {
 			t.Errorf("播放器布局脚本缺少标记 %q", marker)
@@ -103,9 +128,29 @@ func TestHandlerServesPersistentAppearancePreferences(t *testing.T) {
 	for _, marker := range []string{
 		"localStorage", "teslabox-theme", "teslabox-settings-font", "teslabox-player-layout",
 		"teslabox-playback-quality", "四路合成 A", "四路合成 B", "三路合成",
+		`sessionVideo.getAttribute("src") !== source`,
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("外观设置脚本缺少持久化标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerServesPlaybackFailureFallback(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	for _, marker := range []string{
+		"requestPlaybackFallback", "playbackFallbackLadder", "effectivePlaybackQuality",
+		"已自动降至", "已自动切换到单路原画", "播放连续卡顿超过 8 秒", `sessionVideo.addEventListener("error"`,
+	} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("播放器缺少失败自动降级标记 %q", marker)
 		}
 	}
 }
@@ -137,6 +182,14 @@ func TestHandlerProtectsAPIAndAcceptsSignedLoginSession(t *testing.T) {
 	if storage.Code != http.StatusOK || !strings.Contains(storage.Body.String(), `"source":"api"`) {
 		t.Fatalf("storage status = %d, body = %s", storage.Code, storage.Body.String())
 	}
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "http://teslabox.local/api/v1/exports/task", nil)
+	deleteRequest.AddCookie(login.Result().Cookies()[0])
+	deleted := httptest.NewRecorder()
+	handler.ServeHTTP(deleted, deleteRequest)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("DELETE protected API status = %d, body = %s", deleted.Code, deleted.Body.String())
+	}
 }
 
 func TestHandlerRejectsCrossOriginLogin(t *testing.T) {
@@ -151,10 +204,60 @@ func TestHandlerRejectsCrossOriginLogin(t *testing.T) {
 	}
 }
 
+func TestHandlerForcesFreshInstallPasswordChange(t *testing.T) {
+	authenticator, err := webauth.New(webauth.Config{
+		StatePath: filepath.Join(t.TempDir(), "web-auth.json"), SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"source":"api"}`)
+	})
+	handler := NewHandler(apiHandler, authenticator, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	loginRequest := httptest.NewRequest(http.MethodPost, "http://teslabox.local/api/v1/auth/login", strings.NewReader(`{"password":"teslabox"}`))
+	loginRequest.Header.Set("Origin", "http://teslabox.local")
+	loginRequest.RemoteAddr = "192.168.8.2:1234"
+	login := httptest.NewRecorder()
+	handler.ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"must_change_password":true`) {
+		t.Fatalf("login status = %d, body = %s", login.Code, login.Body.String())
+	}
+	oldCookie := login.Result().Cookies()[0]
+
+	blockedRequest := httptest.NewRequest(http.MethodGet, "http://teslabox.local/api/v1/storage", nil)
+	blockedRequest.AddCookie(oldCookie)
+	blocked := httptest.NewRecorder()
+	handler.ServeHTTP(blocked, blockedRequest)
+	if blocked.Code != http.StatusPreconditionRequired || !strings.Contains(blocked.Body.String(), `"password_change_required":true`) {
+		t.Fatalf("blocked status = %d, body = %s", blocked.Code, blocked.Body.String())
+	}
+
+	changeRequest := httptest.NewRequest(http.MethodPost, "http://teslabox.local/api/v1/auth/password", strings.NewReader(`{"current_password":"teslabox","new_password":"new memorable password"}`))
+	changeRequest.Header.Set("Origin", "http://teslabox.local")
+	changeRequest.RemoteAddr = "192.168.8.2:1234"
+	changeRequest.AddCookie(oldCookie)
+	changed := httptest.NewRecorder()
+	handler.ServeHTTP(changed, changeRequest)
+	if changed.Code != http.StatusOK || len(changed.Result().Cookies()) != 1 {
+		t.Fatalf("change status = %d, cookies = %#v, body = %s", changed.Code, changed.Result().Cookies(), changed.Body.String())
+	}
+
+	storageRequest := httptest.NewRequest(http.MethodGet, "http://teslabox.local/api/v1/storage", nil)
+	storageRequest.AddCookie(changed.Result().Cookies()[0])
+	storage := httptest.NewRecorder()
+	handler.ServeHTTP(storage, storageRequest)
+	if storage.Code != http.StatusOK || !strings.Contains(storage.Body.String(), `"source":"api"`) {
+		t.Fatalf("storage status = %d, body = %s", storage.Code, storage.Body.String())
+	}
+}
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	digest := sha256.Sum256([]byte("owner-password"))
 	authenticator, err := webauth.New(webauth.Config{
+		StatePath:      filepath.Join(t.TempDir(), "web-auth.json"),
 		PasswordSHA256: hex.EncodeToString(digest[:]),
 		SessionSecret:  strings.Repeat("ab", 32),
 		SessionTTL:     time.Hour,

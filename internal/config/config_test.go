@@ -33,6 +33,15 @@ func TestLoad(t *testing.T) {
 	if cfg.MinFreeBytes != 1073741824 || cfg.MinFreePercent != 7 {
 		t.Errorf("free-space thresholds = %d bytes, %d percent", cfg.MinFreeBytes, cfg.MinFreePercent)
 	}
+	if cfg.FFmpegPath != "/opt/teslabox/media/bin/ffmpeg" || cfg.FFprobePath != "/opt/teslabox/media/bin/ffprobe" || cfg.MediaProbeTimeout != 10*time.Second {
+		t.Errorf("media config = %q, %q, %s", cfg.FFmpegPath, cfg.FFprobePath, cfg.MediaProbeTimeout)
+	}
+	if cfg.ExportPath != "exports" || cfg.ExportMaxDuration != 30*time.Minute || cfg.ExportQueueSize != 4 {
+		t.Errorf("export config = %q, %s, %d", cfg.ExportPath, cfg.ExportMaxDuration, cfg.ExportQueueSize)
+	}
+	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {
+		t.Errorf("WebAuthStatePath = %q", cfg.WebAuthStatePath)
+	}
 }
 
 func TestLoadUsesDefaultHTTPAddr(t *testing.T) {
@@ -71,7 +80,15 @@ func TestConfigValidate(t *testing.T) {
 		SnapshotMountPath: "/run/teslabox/snapshots",
 		IndexPath:         "index",
 		StatePath:         "state",
+		ExportPath:        "exports",
 		RegistryPath:      "/var/lib/teslabox-system/storage-registry.json",
+		WebAuthStatePath:  "/var/lib/teslabox-system/web-auth.json",
+		UpdateChannel:     "stable",
+		UpdateBoard:       "radxa-rock-3a",
+		UpdateDownloadDir: "/var/lib/teslabox-system/updates",
+		UpdateRequestPath: "/var/lib/teslabox-system/update-request.json",
+		UpdateResultPath:  "/var/lib/teslabox-system/update-result.json",
+		UpdateMaxBytes:    128 * 1024 * 1024,
 		ConfigFSPath:      "/sys/kernel/config/usb_gadget",
 		UDCPath:           "/sys/class/udc",
 		GadgetName:        "teslabox",
@@ -82,10 +99,15 @@ func TestConfigValidate(t *testing.T) {
 		OperationTimeout:  time.Second,
 		SnapshotTimeout:   time.Minute,
 		SnapshotRetryMax:  10 * time.Minute,
+		MediaProbeTimeout: 10 * time.Second,
+		ExportMaxDuration: 30 * time.Minute,
+		ExportQueueSize:   4,
 		ShutdownTimeout:   time.Second,
 		MinFreeBytes:      8 * 1024 * 1024 * 1024,
 		MinFreePercent:    5,
 		WebSessionTTL:     7 * 24 * time.Hour,
+		FFmpegPath:        "/opt/teslabox/media/bin/ffmpeg",
+		FFprobePath:       "/opt/teslabox/media/bin/ffprobe",
 	}
 
 	tests := []struct {
@@ -98,8 +120,13 @@ func TestConfigValidate(t *testing.T) {
 		{name: "root data mount", mutate: func(cfg *Config) { cfg.DataMountPath = "/" }, wantErr: true},
 		{name: "escaping image path", mutate: func(cfg *Config) { cfg.ImagePath = "../system.img" }, wantErr: true},
 		{name: "absolute snapshot path", mutate: func(cfg *Config) { cfg.SnapshotPath = "/tmp/snapshots" }, wantErr: true},
+		{name: "escaping export path", mutate: func(cfg *Config) { cfg.ExportPath = "../exports" }, wantErr: true},
 		{name: "relative snapshot mount path", mutate: func(cfg *Config) { cfg.SnapshotMountPath = "run/teslabox/snapshots" }, wantErr: true},
 		{name: "relative registry path", mutate: func(cfg *Config) { cfg.RegistryPath = "var/lib/registry.json" }, wantErr: true},
+		{name: "relative web auth path", mutate: func(cfg *Config) { cfg.WebAuthStatePath = "var/lib/web-auth.json" }, wantErr: true},
+		{name: "relative ffmpeg path", mutate: func(cfg *Config) { cfg.FFmpegPath = "ffmpeg" }, wantErr: true},
+		{name: "zero media probe timeout", mutate: func(cfg *Config) { cfg.MediaProbeTimeout = 0 }, wantErr: true},
+		{name: "excessive export queue", mutate: func(cfg *Config) { cfg.ExportQueueSize = 17 }, wantErr: true},
 		{name: "missing selector", mutate: func(cfg *Config) { cfg.DataLabel = "" }, wantErr: true},
 		{name: "unsafe gadget name", mutate: func(cfg *Config) { cfg.GadgetName = "../gadget" }, wantErr: true},
 		{name: "zero minimum free bytes", mutate: func(cfg *Config) { cfg.MinFreeBytes = 0 }, wantErr: true},
