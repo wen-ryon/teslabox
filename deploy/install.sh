@@ -33,6 +33,15 @@ cleanup() {
     fi
 }
 
+normalize_checksum_file() {
+    checksum_file="$1"
+    normalized_file="${checksum_file}.lf"
+
+    # 兼容早期由 Windows 构建脚本生成的 CRLF 校验清单，避免回车被当作文件名的一部分。
+    tr -d '\r' <"${checksum_file}" >"${normalized_file}"
+    mv "${normalized_file}" "${checksum_file}"
+}
+
 trap cleanup EXIT HUP INT TERM
 
 for argument in "$@"; do
@@ -98,6 +107,7 @@ tar -C "${PAYLOAD_DIR}" -xzf "${BOOTSTRAP_PATH}"
 if [ ! -f "${PAYLOAD_DIR}/SHA256SUMS" ]; then
     die "首装包缺少 SHA256SUMS。"
 fi
+normalize_checksum_file "${PAYLOAD_DIR}/SHA256SUMS"
 (
     cd "${PAYLOAD_DIR}"
     sha256sum -c SHA256SUMS
@@ -269,6 +279,10 @@ EOF
     fi
     mkdir -p "${MT_DIR}"
     tar -C "${MT_DIR}" -xzf "${MT_PATH}"
+    if [ ! -f "${MT_DIR}/SHA256SUMS" ]; then
+        die "MT7922 测试内核包缺少 SHA256SUMS。"
+    fi
+    normalize_checksum_file "${MT_DIR}/SHA256SUMS"
     (
         cd "${MT_DIR}"
         sha256sum -c SHA256SUMS

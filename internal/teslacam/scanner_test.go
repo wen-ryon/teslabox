@@ -10,7 +10,9 @@ func TestScannerScan(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
 		"TeslaCam/RecentClips/2026-07-15_12-30-00-front.mp4":                            "front",
+		"TeslaCam/RecentClips/thumb.png":                                                "recent thumbnail",
 		"TeslaCam/SavedClips/2026-07-15_12-31-00/2026-07-15_12-31-01-left_repeater.mp4": "left",
+		"TeslaCam/SavedClips/2026-07-15_12-31-00/thumb.png":                             "saved thumbnail",
 		"TeslaCam/RecentClips/2026-07-15_12-32-00-left_pillar.mp4":                      "pillar",
 		"TeslaCam/SentryClips/2026-07-15_12-32-00/event.json":                           "{}",
 		"TeslaCam/SavedClips/2026-07-15_12-31-00/event.json":                            `{"timestamp":"2026-07-15T12:31:42","city":"宁波","street":"测试路","est_lat":"29.8421","est_lon":"121.622","reason":"user_interaction_dashcam_icon_tapped","camera":"0"}`,
@@ -36,8 +38,14 @@ func TestScannerScan(t *testing.T) {
 	if videos[0].ClipType != "recent" || videos[0].Camera != "left_pillar" {
 		t.Errorf("pillar video = %#v", videos[0])
 	}
+	if videos[0].ThumbnailPath != "TeslaCam/RecentClips/thumb.png" || videos[0].ThumbnailID == "" {
+		t.Errorf("pillar thumbnail = %#v", videos[0])
+	}
 	if videos[1].ClipType != "saved" || videos[1].Event != "2026-07-15_12-31-00" {
 		t.Errorf("saved video = %#v", videos[1])
+	}
+	if videos[1].ThumbnailPath != "TeslaCam/SavedClips/2026-07-15_12-31-00/thumb.png" || videos[1].ThumbnailID == videos[0].ThumbnailID {
+		t.Errorf("saved thumbnail = %#v", videos[1])
 	}
 	metadata := videos[1].EventMetadata
 	if metadata == nil || metadata.OccurredAt == nil || metadata.OccurredAt.Second() != 42 ||
@@ -47,6 +55,9 @@ func TestScannerScan(t *testing.T) {
 	}
 	if videos[2].ClipType != "recent" || videos[2].Camera != "front" {
 		t.Errorf("recent video = %#v", videos[2])
+	}
+	if videos[2].ThumbnailID != videos[0].ThumbnailID || videos[2].ThumbnailPath != videos[0].ThumbnailPath {
+		t.Errorf("recent videos should share thumbnail: first=%#v second=%#v", videos[0], videos[2])
 	}
 }
 

@@ -1108,6 +1108,22 @@ function createSessionTimeline(session) {
   card.className = `session-card clip-${clipTypeClass(session.clip_type)}`;
   const head = document.createElement("div");
   head.className = "session-head";
+  if (session.thumbnail_url) {
+    head.classList.add("has-thumbnail");
+    const thumbnail = document.createElement("div");
+    thumbnail.className = "session-thumbnail";
+    const image = document.createElement("img");
+    image.src = session.thumbnail_url;
+    image.alt = `${clipLabel(session.clip_type)}缩略图`;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      thumbnail.remove();
+      head.classList.remove("has-thumbnail");
+    }, {once:true});
+    thumbnail.append(image);
+    head.append(thumbnail);
+  }
   const heading = document.createElement("div");
   const title = document.createElement("h3");
   title.className = "session-title";
@@ -1123,30 +1139,21 @@ function createSessionTimeline(session) {
   duration.textContent = formatDuration(session.duration_seconds);
   const aside = document.createElement("div");
   aside.className = "session-head-aside";
+  const asideMeta = document.createElement("div");
+  asideMeta.className = "session-aside-meta";
   const location = eventPlace(session.event_metadata) || eventCoordinates(session.event_metadata);
   if (location) {
     const locationLabel = document.createElement("span");
     locationLabel.className = "session-location";
     locationLabel.textContent = location;
-    aside.append(locationLabel);
+    asideMeta.append(locationLabel);
   }
-  aside.append(duration);
+  asideMeta.append(duration);
+  aside.append(asideMeta);
   heading.append(title, meta);
   const eventSummary = createEventSummary(session.event_metadata);
   if (eventSummary) heading.append(eventSummary);
-  head.append(heading, aside);
 
-  const body = document.createElement("div");
-  body.className = "session-timeline-body";
-  if (state.view === "multi") {
-    body.append(createTrackRow(session, "六路合并", ""));
-  } else {
-    const cameras = cameraOrder.filter((camera) => session.cameras.includes(camera));
-    cameras.forEach((camera) => body.append(createTrackRow(session, cameraLabel(camera), camera)));
-  }
-
-  const footer = document.createElement("div");
-  footer.className = "session-footer";
   const open = document.createElement("button");
   open.className = "primary session-open";
   open.type = "button";
@@ -1159,12 +1166,20 @@ function createSessionTimeline(session) {
     const status = document.createElement("span");
     status.className = "session-warning";
     status.textContent = "部分分钟存在视角缺失";
-    footer.append(status);
-  } else {
-    footer.classList.add("only-action");
+    aside.append(status);
   }
-  footer.append(open);
-  body.append(footer);
+  aside.append(open);
+  head.append(heading, aside);
+
+  const body = document.createElement("div");
+  body.className = "session-timeline-body";
+  if (state.view === "multi") {
+    body.append(createTrackRow(session, "六路合并", ""));
+  } else {
+    const cameras = cameraOrder.filter((camera) => session.cameras.includes(camera));
+    cameras.forEach((camera) => body.append(createTrackRow(session, cameraLabel(camera), camera)));
+  }
+
   card.append(head, body);
   return card;
 }

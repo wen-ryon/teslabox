@@ -121,9 +121,9 @@ func TestGroupVideoSessionsMergesContinuousMinuteSegments(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
 	groups := []videoGroup{
-		{ID: "first", ClipType: "recent", RecordedAt: base, EndAt: base.Add(time.Minute), Complete: true, TotalSize: 10, Videos: []teslacam.Video{{Camera: "front"}}},
-		{ID: "second", ClipType: "recent", RecordedAt: base.Add(time.Minute), EndAt: base.Add(2 * time.Minute), Complete: true, TotalSize: 20, Videos: []teslacam.Video{{Camera: "front"}}},
-		{ID: "after-gap", ClipType: "recent", RecordedAt: base.Add(3 * time.Minute), EndAt: base.Add(4 * time.Minute), Complete: false, TotalSize: 30, Videos: []teslacam.Video{{Camera: "back"}}},
+		{ID: "first", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base, EndAt: base.Add(time.Minute), Complete: true, TotalSize: 10, Videos: []teslacam.Video{{Camera: "front"}}},
+		{ID: "second", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base.Add(time.Minute), EndAt: base.Add(2 * time.Minute), Complete: true, TotalSize: 20, Videos: []teslacam.Video{{Camera: "front"}}},
+		{ID: "after-gap", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base.Add(3 * time.Minute), EndAt: base.Add(4 * time.Minute), Complete: false, TotalSize: 30, Videos: []teslacam.Video{{Camera: "back"}}},
 	}
 	sessions := groupVideoSessions(groups, 5*time.Second)
 	if len(sessions) != 2 {
@@ -138,6 +138,75 @@ func TestGroupVideoSessionsMergesContinuousMinuteSegments(t *testing.T) {
 	}
 	if sessions[0].SegmentCount != 1 || sessions[0].Complete {
 		t.Fatalf("newer session = %#v", sessions[0])
+	}
+	if continuous.ThumbnailURL != "/api/v1/thumbnails/recent-thumb" || sessions[0].ThumbnailURL != continuous.ThumbnailURL {
+		t.Fatalf("recent sessions should share thumbnail URL: %#v", sessions)
+	}
+}
+
+func TestThumbnailEndpoint(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "thumb.png"))
+	thumbnail := []byte("png thumbnail")
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, thumbnail, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		id         string
+		state      service.Snapshot
+		wantStatus int
+		wantBody   []byte
+	}{
+		{
+			name: "serves indexed thumbnail",
+			id:   "shared-thumb",
+			state: service.Snapshot{
+				MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root},
+				Videos:        []teslacam.Video{{ThumbnailID: "shared-thumb", ThumbnailPath: relative}},
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   thumbnail,
+		},
+		{
+			name: "rejects unknown thumbnail",
+			id:   "missing",
+			state: service.Snapshot{
+				MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root},
+				Videos:        []teslacam.Video{{ThumbnailID: "shared-thumb", ThumbnailPath: relative}},
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "requires media snapshot",
+			id:         "shared-thumb",
+			state:      service.Snapshot{Videos: []teslacam.Video{{ThumbnailID: "shared-thumb", ThumbnailPath: relative}}},
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(fakeController{state: test.state}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/thumbnails/"+test.id, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+			if test.wantBody != nil && string(response.Body.Bytes()) != string(test.wantBody) {
+				t.Fatalf("body = %q, want %q", response.Body.Bytes(), test.wantBody)
+			}
+			if test.wantStatus == http.StatusOK && response.Header().Get("Content-Type") != "image/png" {
+				t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+			}
+		})
 	}
 }
 
@@ -157,6 +226,7 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 			videos = append(videos, teslacam.Video{
 				ID: camera + time.Duration(minute).String(), ClipType: "recent", Camera: camera,
 				RecordedAt: base.Add(time.Duration(minute) * time.Minute), Duration: 60, Size: 100, EventMetadata: metadata,
+				ThumbnailID: "timeline-thumb",
 			})
 		}
 	}
@@ -178,6 +248,9 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	session := payload.Items[0]
 	if session.Duration != 120 || session.SegmentCount != 2 || len(session.Moments) != 0 || len(session.Cameras) != 6 || !session.Complete {
 		t.Fatalf("session = %#v", session)
+	}
+	if session.ThumbnailURL != "/api/v1/thumbnails/timeline-thumb" {
+		t.Fatalf("thumbnail URL = %q", session.ThumbnailURL)
 	}
 	if session.EventMetadata == nil || session.EventMetadata.OccurredAt == nil || !session.EventMetadata.OccurredAt.Equal(eventAt) || session.EventMetadata.City != "宁波" {
 		t.Fatalf("session event metadata = %#v", session.EventMetadata)

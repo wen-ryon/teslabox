@@ -123,7 +123,7 @@ Implement basic Web UI.
 - [x] TeslaCam browsing
 - [x] Video details and single-camera playback
 - [x] Video download
-- [ ] Video thumbnails
+- [x] Display Tesla `thumb.png` thumbnails and reuse one image across split RecentClips sessions
 - [x] Filter by clip type, date, and event
 - [x] System status page
 - [x] Show internet connectivity, temperature, CPU, memory, system-disk, and data-disk status on the dashboard

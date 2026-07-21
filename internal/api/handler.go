@@ -147,6 +147,11 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	mux.HandleFunc("GET /api/v1/video-sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		writeVideoSession(w, r, controller.Snapshot().Videos)
 	})
+	mux.HandleFunc("GET /api/v1/thumbnails/{id}", func(w http.ResponseWriter, r *http.Request) {
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		serveThumbnail(w, r, state)
+	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
@@ -636,9 +641,13 @@ func openSnapshotVideo(root, relative string) (*os.File, error) {
 }
 
 func snapshotVideoPath(root, relative string) (string, error) {
+	return snapshotFilePath(root, relative)
+}
+
+func snapshotFilePath(root, relative string) (string, error) {
 	cleaned := filepath.Clean(filepath.FromSlash(relative))
 	if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("视频路径越过快照根目录")
+		return "", fmt.Errorf("媒体路径越过快照根目录")
 	}
 	name := filepath.Join(filepath.Clean(root), cleaned)
 	info, err := os.Stat(name)
@@ -646,9 +655,57 @@ func snapshotVideoPath(root, relative string) (string, error) {
 		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("视频路径不是普通文件")
+		return "", fmt.Errorf("媒体路径不是普通文件")
 	}
 	return name, nil
+}
+
+func serveThumbnail(w http.ResponseWriter, r *http.Request, state service.Snapshot) {
+	if state.MediaSnapshot == nil {
+		http.Error(w, "媒体快照暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	relative, found := findThumbnail(state.Videos, r.PathValue("id"))
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	name, err := snapshotFilePath(state.MediaSnapshot.MountPath, relative)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "缩略图暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "缩略图暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.Error(w, "缩略图暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	http.ServeContent(w, r, filepath.Base(relative), info.ModTime(), file)
+}
+
+func findThumbnail(videos []teslacam.Video, id string) (string, bool) {
+	for _, video := range videos {
+		if video.ThumbnailID == id && video.ThumbnailPath != "" {
+			return video.ThumbnailPath, true
+		}
+	}
+	return "", false
 }
 
 func findVideo(videos []teslacam.Video, id string) (teslacam.Video, bool) {
@@ -678,6 +735,7 @@ type videoGroup struct {
 	ClipType      string                  `json:"clip_type"`
 	Event         string                  `json:"event,omitempty"`
 	EventMetadata *teslacam.EventMetadata `json:"event_metadata,omitempty"`
+	ThumbnailID   string                  `json:"-"`
 	RecordedAt    time.Time               `json:"recorded_at"`
 	EndAt         time.Time               `json:"end_at"`
 	Duration      float64                 `json:"duration_seconds"`
@@ -692,6 +750,8 @@ type videoSession struct {
 	ClipType      string                  `json:"clip_type"`
 	Event         string                  `json:"event,omitempty"`
 	EventMetadata *teslacam.EventMetadata `json:"event_metadata,omitempty"`
+	ThumbnailID   string                  `json:"-"`
+	ThumbnailURL  string                  `json:"thumbnail_url,omitempty"`
 	StartAt       time.Time               `json:"start_at"`
 	EndAt         time.Time               `json:"end_at"`
 	Duration      float64                 `json:"duration_seconds"`
@@ -864,7 +924,8 @@ func groupVideos(videos []teslacam.Video, tolerance time.Duration) []videoGroup 
 		if groupIndex < 0 {
 			groups = append(groups, videoGroup{
 				ID: video.ID, ClipType: video.ClipType, Event: video.Event, EventMetadata: video.EventMetadata,
-				RecordedAt: video.RecordedAt, Videos: []teslacam.Video{video}, TotalSize: video.Size,
+				ThumbnailID: video.ThumbnailID,
+				RecordedAt:  video.RecordedAt, Videos: []teslacam.Video{video}, TotalSize: video.Size,
 			})
 			continue
 		}
@@ -873,6 +934,9 @@ func groupVideos(videos []teslacam.Video, tolerance time.Duration) []videoGroup 
 		group.TotalSize += video.Size
 		if group.EventMetadata == nil {
 			group.EventMetadata = video.EventMetadata
+		}
+		if group.ThumbnailID == "" {
+			group.ThumbnailID = video.ThumbnailID
 		}
 		if video.RecordedAt.Before(group.RecordedAt) {
 			group.RecordedAt = video.RecordedAt
@@ -918,7 +982,8 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 		if len(sessions) == 0 || !sessionAcceptsGroup(sessions[len(sessions)-1], group, continuityGap) {
 			sessions = append(sessions, videoSession{
 				ID: group.ID, ClipType: group.ClipType, Event: group.Event, EventMetadata: group.EventMetadata,
-				StartAt: group.RecordedAt, EndAt: group.EndAt,
+				ThumbnailID: group.ThumbnailID,
+				StartAt:     group.RecordedAt, EndAt: group.EndAt,
 				TotalSize: group.TotalSize, Complete: group.Complete,
 				Moments: []videoGroup{group},
 			})
@@ -931,6 +996,9 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 		if session.EventMetadata == nil {
 			session.EventMetadata = group.EventMetadata
 		}
+		if session.ThumbnailID == "" {
+			session.ThumbnailID = group.ThumbnailID
+		}
 		if group.EndAt.After(session.EndAt) {
 			session.EndAt = group.EndAt
 		}
@@ -939,6 +1007,9 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 		session := &sessions[index]
 		session.Duration = session.EndAt.Sub(session.StartAt).Seconds()
 		session.SegmentCount = len(session.Moments)
+		if session.ThumbnailID != "" {
+			session.ThumbnailURL = "/api/v1/thumbnails/" + session.ThumbnailID
+		}
 		seen := make(map[string]bool, 6)
 		for _, group := range session.Moments {
 			for _, video := range group.Videos {

@@ -31,7 +31,15 @@ $checksumLines = Get-ChildItem -LiteralPath $stage -File | Sort-Object Name | Fo
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
     "$hash  $($_.Name)"
 }
-Set-Content -Encoding Ascii -LiteralPath (Join-Path $stage "SHA256SUMS") -Value $checksumLines
+if (-not $checksumLines) {
+    throw "No packages were found while creating SHA256SUMS."
+}
+$checksumPath = Join-Path $stage "SHA256SUMS"
+# 显式逐行追加 LF，避免 Windows PowerShell 将 CRLF 混入 Linux 文件名。
+Set-Content -Encoding Ascii -NoNewline -LiteralPath $checksumPath -Value ""
+foreach ($checksumLine in $checksumLines) {
+    $null = [IO.File]::AppendAllText($checksumPath, $checksumLine + [char]10, [Text.Encoding]::ASCII)
+}
 
 $archive = Join-Path $output "teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 if (Test-Path -LiteralPath $archive) {
@@ -43,7 +51,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-Set-Content -Encoding Ascii -LiteralPath "$archive.sha256" -Value "$archiveHash  $(Split-Path -Leaf $archive)"
+$archiveChecksum = "$archiveHash  $(Split-Path -Leaf $archive)`n"
+Set-Content -Encoding Ascii -NoNewline -LiteralPath "$archive.sha256" -Value $archiveChecksum
 
 [PSCustomObject]@{
     Archive = $archive

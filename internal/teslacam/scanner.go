@@ -23,6 +23,8 @@ var videoNamePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}
 type Video struct {
 	ID            string         `json:"id"`
 	Path          string         `json:"path"`
+	ThumbnailID   string         `json:"-"`
+	ThumbnailPath string         `json:"-"`
 	ClipType      string         `json:"clip_type"`
 	Event         string         `json:"event,omitempty"`
 	EventMetadata *EventMetadata `json:"-"`
@@ -55,6 +57,7 @@ func NewScanner() *Scanner {
 func (s *Scanner) Scan(root string) ([]Video, error) {
 	videos := make([]Video, 0, 256)
 	events := make(map[string]*EventMetadata)
+	thumbnails := make(map[string]string)
 	for _, directory := range []string{"TeslaCam", "TeslaTrackMode"} {
 		base := filepath.Join(root, directory)
 		if _, err := os.Stat(base); err != nil {
@@ -78,6 +81,14 @@ func (s *Scanner) Scan(root string) ([]Video, error) {
 				}
 				return nil
 			}
+			if strings.EqualFold(entry.Name(), "thumb.png") {
+				relative, err := filepath.Rel(root, path)
+				if err != nil {
+					return fmt.Errorf("计算缩略图相对路径: %w", err)
+				}
+				thumbnails[filepath.Clean(filepath.Dir(path))] = filepath.ToSlash(relative)
+				return nil
+			}
 			if !strings.EqualFold(filepath.Ext(entry.Name()), ".mp4") {
 				return nil
 			}
@@ -96,13 +107,23 @@ func (s *Scanner) Scan(root string) ([]Video, error) {
 	}
 	for index := range videos {
 		videoPath := filepath.Join(root, filepath.FromSlash(videos[index].Path))
-		videos[index].EventMetadata = events[filepath.Clean(filepath.Dir(videoPath))]
+		directory := filepath.Clean(filepath.Dir(videoPath))
+		videos[index].EventMetadata = events[directory]
+		videos[index].ThumbnailPath = thumbnails[directory]
+		if videos[index].ThumbnailPath != "" {
+			videos[index].ThumbnailID = thumbnailID(videos[index].ThumbnailPath)
+		}
 	}
 
 	slices.SortFunc(videos, func(a, b Video) int {
 		return b.RecordedAt.Compare(a.RecordedAt)
 	})
 	return videos, nil
+}
+
+func thumbnailID(relative string) string {
+	digest := sha256.Sum256([]byte(filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))))
+	return hex.EncodeToString(digest[:8])
 }
 
 func readEventMetadata(path string) (*EventMetadata, error) {
