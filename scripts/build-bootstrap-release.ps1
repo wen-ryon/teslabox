@@ -156,7 +156,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
 $archiveChecksum = "$archiveHash  $(Split-Path -Leaf $archive)`n"
-Set-Content -Encoding Ascii -NoNewline -LiteralPath "$archive.sha256" -Value $archiveChecksum
+[IO.File]::WriteAllText("$archive.sha256", $archiveChecksum, [Text.Encoding]::ASCII)
 
 [PSCustomObject]@{
     Version = $Version
