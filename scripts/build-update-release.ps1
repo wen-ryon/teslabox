@@ -74,7 +74,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
-Set-Content -Encoding Ascii -Path "$binary.sha256" -Value "$binaryHash  $(Split-Path -Leaf $binary)"
-Set-Content -Encoding Ascii -Path "$helper.sha256" -Value "$helperHash  $(Split-Path -Leaf $helper)"
+# 发布校验文件固定使用 LF；Windows PowerShell 的 Set-Content 默认会写入 CRLF。
+[IO.File]::WriteAllText("$binary.sha256", "$binaryHash  $(Split-Path -Leaf $binary)`n", [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText("$helper.sha256", "$helperHash  $(Split-Path -Leaf $helper)`n", [Text.Encoding]::ASCII)
 
 Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest | Format-Table Path, Hash
