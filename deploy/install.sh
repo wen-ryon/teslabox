@@ -4,7 +4,7 @@ set -eu
 INSTALLER_VERSION="0.1.5"
 RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.5"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256=""
+BOOTSTRAP_SHA256="f6cf4fa8bb72284eca81eec5605ba1b48eb9360a237e6be0017c4c8f94976226"
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
