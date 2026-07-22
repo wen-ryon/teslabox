@@ -11,11 +11,12 @@ const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
+const initialPage = window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
 const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
-  page: window.location.pathname === "/settings" ? "settings" : "dashboard", mustChangePassword: false,
+  page: initialPage, mustChangePassword: false,
   wifi: null, ap: null, storage: null, update: null, uiFont: savedUIFont,
 };
 const $ = (id) => document.getElementById(id);
@@ -58,6 +59,8 @@ let exportTask = null;
 let exportPollTimer = 0;
 let passwordChangeForced = false;
 let updatePollTimer = 0;
+let logsRefreshTimer = 0;
+let activeLogSource = "usb";
 const observedMediaEntries = new Set();
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
@@ -108,6 +111,7 @@ async function initialize() {
     }
     await refreshAll();
     if (state.page === "settings") await loadSettings();
+    if (state.page === "logs") await loadLogs();
   } catch (error) {
     showApp();
     setNotice(`无法连接 TeslaBox：${error.message}`, true);
@@ -164,6 +168,15 @@ document.querySelectorAll("[data-page-link]").forEach((element) => element.addEv
 }));
 $("refresh-button").addEventListener("click", refreshAll);
 $("settings-refresh").addEventListener("click", loadSettings);
+$("logs-refresh").addEventListener("click", loadLogs);
+$("logs-lines").addEventListener("change", loadLogs);
+$("logs-auto-refresh").addEventListener("change", scheduleLogsRefresh);
+$("logs-copy").addEventListener("click", copyLogs);
+document.querySelectorAll("[data-log-source]").forEach((button) => button.addEventListener("click", () => {
+  activeLogSource = button.dataset.logSource;
+  document.querySelectorAll("[data-log-source]").forEach((item) => item.classList.toggle("active", item === button));
+  loadLogs();
+}));
 $("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
 $("wifi-scan").addEventListener("click", scanWiFi);
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
@@ -290,6 +303,7 @@ async function changeManagementPassword(event) {
     closePasswordModal(true);
     await refreshAll();
     if (state.page === "settings") await loadSettings();
+    if (state.page === "logs") await loadLogs();
   } catch (error) {
     errorElement.textContent = error.message;
   } finally {
@@ -310,18 +324,114 @@ function closeAppearanceMenu() {
 }
 
 function showPage(page, updateHistory) {
-  state.page = page === "settings" ? "settings" : "dashboard";
+  state.page = ["settings", "logs"].includes(page) ? page : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
   $("settings-page").hidden = state.page !== "settings";
+  $("logs-page").hidden = state.page !== "logs";
   document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
   closeNavigation();
   closeAppearanceMenu();
-  if (updateHistory) window.history.pushState({page:state.page}, "", state.page === "settings" ? "/settings" : "/");
+  const pagePath = state.page === "settings" ? "/settings" : state.page === "logs" ? "/logs" : "/";
+  if (updateHistory) window.history.pushState({page:state.page}, "", pagePath);
   if (state.page === "settings" && !appView.hidden) loadSettings();
+  if (state.page === "logs" && !appView.hidden) loadLogs();
+  scheduleLogsRefresh();
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
-window.addEventListener("popstate", () => showPage(window.location.pathname === "/settings" ? "settings" : "dashboard", false));
+window.addEventListener("popstate", () => {
+  const page = window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
+  showPage(page, false);
+});
+
+async function loadLogs() {
+  if (state.page !== "logs" || appView.hidden) return;
+  $("logs-refresh").disabled = true;
+  $("logs-notice").textContent = "";
+  $("logs-notice").classList.remove("error");
+  try {
+    const lineCount = Number($("logs-lines").value) || 200;
+    const [report, storage] = await Promise.all([
+      request(`/api/v1/logs?source=${encodeURIComponent(activeLogSource)}&lines=${lineCount}`),
+      request("/api/v1/storage"),
+    ]);
+    renderLogDiagnostics(storage);
+    renderLogs(report);
+  } catch (error) {
+    $("logs-notice").textContent = error.message;
+    $("logs-notice").classList.add("error");
+  } finally {
+    $("logs-refresh").disabled = false;
+    scheduleLogsRefresh();
+  }
+}
+
+function renderLogDiagnostics(storage) {
+  const gadget = storage.gadget_status || {};
+  const badge = $("logs-usb-status");
+  const warning = $("logs-usb-warning");
+  badge.className = "badge";
+  warning.hidden = true;
+  warning.textContent = "";
+  if (gadget.host_connected) {
+    badge.textContent = "枚举完成";
+    badge.classList.add("ok");
+  } else if (gadget.host_detected) {
+    badge.textContent = "枚举未完成";
+    badge.classList.add("error");
+    warning.hidden = false;
+    warning.textContent = `已检测到 USB 主机，但状态停留在 ${gadget.udc_state || "未知阶段"}，车机或电脑尚未完成设备描述符与配置枚举。请立即刷新 USB 枚举日志后再断线或重启。`;
+  } else if (gadget.bound) {
+    badge.textContent = "等待主机";
+  } else {
+    badge.textContent = "Gadget 未就绪";
+    badge.classList.add("error");
+  }
+  $("logs-usb-state").textContent = gadget.udc_state || "not attached";
+  $("logs-usb-speed").textContent = gadget.current_speed || "—";
+  $("logs-udc").textContent = gadget.udc || gadget.selected_udc || "—";
+  $("logs-backing").textContent = gadget.image_path || "未绑定";
+}
+
+function renderLogs(report) {
+  const labels = {usb:"USB 枚举", application:"TeslaBox 服务", network:"网络与热点"};
+  const lines = Array.isArray(report.lines) ? report.lines : [];
+  $("logs-output").textContent = lines.length ? lines.join("\n") : "当前来源暂无日志。";
+  const details = [`${labels[report.source] || report.source || "系统"} · ${lines.length} 行`, `生成于 ${formatDate(report.generated_at)}`];
+  if (report.limited) details.push("仅显示最新日志");
+  if (report.redacted) details.push(`已脱敏 ${report.redacted} 行`);
+  $("logs-meta").textContent = details.join(" · ");
+}
+
+function scheduleLogsRefresh() {
+  window.clearTimeout(logsRefreshTimer);
+  logsRefreshTimer = 0;
+  if (state.page !== "logs" || appView.hidden || !$("logs-auto-refresh").checked) return;
+  logsRefreshTimer = window.setTimeout(loadLogs, 10000);
+}
+
+async function copyLogs() {
+  const value = $("logs-output").textContent || "";
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    $("logs-notice").classList.remove("error");
+    $("logs-notice").textContent = "日志已复制。";
+  } catch (_) {
+    $("logs-notice").classList.add("error");
+    $("logs-notice").textContent = "浏览器不允许自动复制，请选中日志内容后手动复制。";
+  }
+}
 
 async function postJSON(path, body) {
   return request(path, {
@@ -970,6 +1080,10 @@ function renderStatus(storage) {
     badge.textContent = "车机已连接";
     badge.classList.add("ok");
     $("usb-title").textContent = gadget.current_speed || "USB 已连接";
+  } else if (gadget.host_detected) {
+    badge.textContent = "枚举未完成";
+    badge.classList.add("error");
+    $("usb-title").textContent = "USB 主机尚未完成识别";
   } else if (gadget.bound) {
     badge.textContent = "等待车机";
     $("usb-title").textContent = "Gadget 已就绪";

@@ -51,12 +51,37 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "app.js?v=20260721-1",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "logs-page", "logs-output", "data-log-source=\"usb\"", "app.js?v=20260722-1",
 		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
 		}
+	}
+}
+
+func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "http://teslabox.local/logs", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "日志中心") {
+		t.Fatalf("page status = %d, body = %s", page.Code, page.Body.String())
+	}
+
+	script := httptest.NewRecorder()
+	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "scheduleLogsRefresh"} {
+		if !strings.Contains(script.Body.String(), marker) {
+			t.Errorf("日志中心脚本缺少标记 %q", marker)
+		}
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "http://teslabox.local/api/v1/logs?source=usb", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
 	}
 }
 

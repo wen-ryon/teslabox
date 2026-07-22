@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
+	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
@@ -78,6 +79,11 @@ type UpdateAdmin interface {
 	Install(context.Context) (updater.Status, error)
 }
 
+// Diagnostics 定义日志中心只能读取预设诊断来源的能力边界。
+type Diagnostics interface {
+	Logs(context.Context, string, int) (diagnostics.Report, error)
+}
+
 type handlerOptions struct {
 	deviceAdmin     DeviceAdmin
 	storageAdmin    StorageAdmin
@@ -85,6 +91,7 @@ type handlerOptions struct {
 	mediaCompositor MediaCompositor
 	exportAdmin     ExportAdmin
 	updateAdmin     UpdateAdmin
+	diagnostics     Diagnostics
 }
 
 // Option 配置可选的 API 能力。
@@ -118,6 +125,11 @@ func WithExportAdmin(admin ExportAdmin) Option {
 // WithUpdateAdmin 启用受保护的在线更新接口。
 func WithUpdateAdmin(admin UpdateAdmin) Option {
 	return func(options *handlerOptions) { options.updateAdmin = admin }
+}
+
+// WithDiagnostics 启用受限、脱敏的日志中心接口。
+func WithDiagnostics(manager Diagnostics) Option {
+	return func(options *handlerOptions) { options.diagnostics = manager }
 }
 
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
@@ -201,7 +213,31 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.updateAdmin != nil {
 		registerUpdateRoutes(mux, settings.updateAdmin, logger)
 	}
+	if settings.diagnostics != nil {
+		registerDiagnosticsRoutes(mux, settings.diagnostics, logger)
+	}
 	return requestLogger(mux, logger)
+}
+
+func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		if source == "" {
+			source = diagnostics.SourceUSB
+		}
+		if !diagnostics.ValidSource(source) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的日志来源"})
+			return
+		}
+		limit := boundedInt(r.URL.Query().Get("lines"), 200, 1, 500)
+		report, err := manager.Logs(r.Context(), source, limit)
+		if err != nil {
+			logger.Warn("读取诊断日志失败", "source", source, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取系统日志"})
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	})
 }
 
 func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, logger *slog.Logger) {

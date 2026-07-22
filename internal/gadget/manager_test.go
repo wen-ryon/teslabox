@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func testManager(t *testing.T) (*Manager, string) {
@@ -37,6 +38,7 @@ func testManager(t *testing.T) (*Manager, string) {
 	manager.symlink = func(oldname, newname string) error {
 		return os.WriteFile(newname, []byte(oldname), 0o644)
 	}
+	manager.sleep = func(time.Duration) {}
 	return manager, imagePath
 }
 
@@ -49,7 +51,7 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	if !status.Exists || !status.Bound || status.UDC != "fcc00000.dwc3" {
 		t.Fatalf("status = %#v", status)
 	}
-	if status.UDCState != "configured" || status.CurrentSpeed != "high-speed" || !status.HostConnected {
+	if status.UDCState != "configured" || status.CurrentSpeed != "high-speed" || !status.HostDetected || !status.HostConnected {
 		t.Fatalf("UDC status = %#v", status)
 	}
 	if !samePath(status.ImagePath, imagePath) {
@@ -57,6 +59,38 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(manager.gadgetPath(), "configs", "c.1", "mass_storage.0")); err != nil {
 		t.Fatalf("mass storage link: %v", err)
+	}
+}
+
+func TestManagerOnlyReportsConfiguredHostAsConnected(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		state         string
+		wantDetected  bool
+		wantConnected bool
+	}{
+		{name: "not attached", state: "not attached", wantDetected: false, wantConnected: false},
+		{name: "powered", state: "powered", wantDetected: true, wantConnected: false},
+		{name: "addressed", state: "addressed", wantDetected: true, wantConnected: false},
+		{name: "configured", state: "configured", wantDetected: true, wantConnected: true},
+		{name: "suspended after configured", state: "suspended", wantDetected: true, wantConnected: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, _ := testManager(t)
+			statePath := filepath.Join(manager.config.UDCPath, "fcc00000.dwc3", "state")
+			if err := os.WriteFile(statePath, []byte(test.state+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			status, err := manager.Inspect()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.HostDetected != test.wantDetected || status.HostConnected != test.wantConnected {
+				t.Fatalf("status = %#v", status)
+			}
+		})
 	}
 }
 
@@ -143,6 +177,8 @@ func TestManagerRejectsOtherBinding(t *testing.T) {
 func TestManagerExplicitlyReleasesButPreservesAllowedGadget(t *testing.T) {
 	manager, _ := testManager(t)
 	manager.config.ReleaseGadget = "radxa-otgutils"
+	var settledFor time.Duration
+	manager.sleep = func(duration time.Duration) { settledFor = duration }
 	other := filepath.Join(manager.config.ConfigFSPath, "radxa-otgutils")
 	if err := os.MkdirAll(other, 0o755); err != nil {
 		t.Fatal(err)
@@ -160,6 +196,39 @@ func TestManagerExplicitlyReleasesButPreservesAllowedGadget(t *testing.T) {
 	value, err := os.ReadFile(filepath.Join(other, "UDC"))
 	if err != nil {
 		t.Fatalf("allowed gadget was removed: %v", err)
+	}
+	if string(value) != "\n" {
+		t.Fatalf("allowed gadget UDC = %q, want unbound", value)
+	}
+	if settledFor != hostDisconnectSettleTime {
+		t.Fatalf("settle delay = %s, want %s", settledFor, hostDisconnectSettleTime)
+	}
+}
+
+func TestManagerReleasesAllowedBindingBeforeBackingStoreInitialization(t *testing.T) {
+	manager, imagePath := testManager(t)
+	manager.config.ReleaseGadget = "radxa-otgutils"
+	if err := os.Remove(imagePath); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(manager.config.ConfigFSPath, "radxa-otgutils")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "UDC"), []byte("fcc00000.dwc3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	released, err := manager.ReleaseAllowedBinding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !released {
+		t.Fatal("released = false")
+	}
+	value, err := os.ReadFile(filepath.Join(other, "UDC"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if string(value) != "\n" {
 		t.Fatalf("allowed gadget UDC = %q, want unbound", value)

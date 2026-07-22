@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260720-5">
-  <script src="/app.js?v=20260721-1" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260722-1">
+  <script src="/app.js?v=20260722-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -50,6 +50,7 @@
       <nav class="drawer-nav">
         <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
         <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
+        <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、服务与网络诊断</small></button>
       </nav>
       <p class="drawer-foot">TeslaBox 本地管理中心</p>
     </aside>
@@ -216,6 +217,46 @@
           <div><h3>设备电源</h3><p>重启或关机会停止 TeslaBox 服务并断开车机 USB。关机后需要重新断电上电才能启动。</p></div>
           <div class="power-actions"><button id="reboot-button" class="secondary" type="button">重启设备</button><button id="shutdown-button" class="danger-button" type="button">关闭设备</button></div>
         </article>
+      </section>
+    </div>
+
+    <div id="logs-page" class="page logs-page app-page" hidden>
+      <section class="settings-hero logs-hero">
+        <div><p class="eyebrow">DIAGNOSTICS</p><h1>日志中心</h1><p class="hero-copy">查看 USB 枚举、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
+        <button id="logs-refresh" class="secondary" type="button">刷新日志</button>
+      </section>
+      <div id="logs-notice" class="notice" role="status" aria-live="polite"></div>
+
+      <section class="settings-section" aria-labelledby="usb-diagnostics-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">USB GADGET</p><h2 id="usb-diagnostics-title">USB 识别状态</h2></div><span id="logs-usb-status" class="badge">读取中</span></div>
+        <div class="hardware-overview logs-overview" aria-label="USB Gadget 诊断摘要">
+          <div><span>枚举状态</span><strong id="logs-usb-state">—</strong></div>
+          <div><span>当前速率</span><strong id="logs-usb-speed">—</strong></div>
+          <div><span>UDC 控制器</span><strong id="logs-udc">—</strong></div>
+          <div><span>后端存储</span><strong id="logs-backing">—</strong></div>
+        </div>
+        <div id="logs-usb-warning" class="settings-warning" hidden></div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="system-logs-title">
+        <div class="settings-section-heading logs-heading">
+          <div><p class="eyebrow">SYSTEM JOURNAL</p><h2 id="system-logs-title">系统日志</h2></div>
+          <div class="logs-actions">
+            <label>条数<select id="logs-lines"><option value="100">100</option><option value="200" selected>200</option><option value="500">500</option></select></label>
+            <label class="inline-check"><input id="logs-auto-refresh" type="checkbox"><span>每 10 秒刷新</span></label>
+            <button id="logs-copy" class="secondary compact" type="button">复制日志</button>
+          </div>
+        </div>
+        <div class="segmented logs-source-switch" role="group" aria-label="日志来源">
+          <button type="button" data-log-source="usb" class="active">USB 枚举</button>
+          <button type="button" data-log-source="application">TeslaBox 服务</button>
+          <button type="button" data-log-source="network">网络与热点</button>
+        </div>
+        <article class="settings-card logs-card">
+          <div class="logs-meta" id="logs-meta">尚未读取日志</div>
+          <pre id="logs-output" class="logs-output" tabindex="0">正在读取…</pre>
+        </article>
+        <div class="settings-warning">日志可能包含设备名称、SSID、IP 地址和硬件标识。发送给他人前仍请快速检查；页面不会读取任意文件或执行用户输入的命令。</div>
       </section>
     </div>
   </main>

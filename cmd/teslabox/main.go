@@ -16,6 +16,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/config"
 	"github.com/wen-ryon/teslabox/internal/datamount"
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
+	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/driveinit"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
@@ -34,6 +35,9 @@ import (
 )
 
 func main() {
+	reloadCh, stopReloadSignals := subscribeReloadSignals()
+	defer stopReloadSignals()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
 	if err != nil {
@@ -85,6 +89,11 @@ func main() {
 		SerialNumber:  cfg.GadgetSerial,
 		ReleaseGadget: cfg.ReleaseGadget,
 	})
+	if released, releaseErr := gadgetManager.ReleaseAllowedBinding(); releaseErr != nil {
+		logger.Warn("启动阶段无法提前释放原厂 USB Gadget，将由主状态机继续收敛", "error", releaseErr)
+	} else if released {
+		logger.Info("已提前释放原厂 USB Gadget，等待数据盘就绪后绑定 TeslaBox")
+	}
 	if err := os.MkdirAll(cfg.SnapshotMountPath, 0o750); err != nil {
 		logger.Error("创建快照运行目录失败", "error", err)
 		os.Exit(1)
@@ -145,7 +154,7 @@ func main() {
 		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
 		ResultPath: cfg.UpdateResultPath, MaximumSize: cfg.UpdateMaxBytes, Logger: logger,
 		CanInstall: func() error {
-			if manager.Snapshot().GadgetStatus.HostConnected {
+			if manager.Snapshot().GadgetStatus.HostDetected {
 				return errors.New("车机 USB 当前已连接，请停车并断开 OTG 后再安装更新")
 			}
 			if mediaExporter.Busy() {
@@ -170,6 +179,7 @@ func main() {
 		api.WithMediaCompositor(mediaCompositor),
 		api.WithExportAdmin(mediaExporter),
 		api.WithUpdateAdmin(updateManager),
+		api.WithDiagnostics(diagnostics.New(runner)),
 	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 
@@ -179,7 +189,7 @@ func main() {
 	go manager.Run(ctx)
 	go deviceAdmin.Run(ctx)
 	go mediaExporter.Run(ctx)
-	watchReloadSignal(ctx, manager)
+	watchReloadSignal(ctx, manager, reloadCh)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -217,16 +227,22 @@ func main() {
 	}
 }
 
-func watchReloadSignal(ctx context.Context, manager *service.Manager) {
+func subscribeReloadSignals() (<-chan os.Signal, func()) {
 	signals := platform.ReloadSignals()
 	if len(signals) == 0 {
-		return
+		return nil, func() {}
 	}
 
 	reloadCh := make(chan os.Signal, 1)
 	signal.Notify(reloadCh, signals...)
+	return reloadCh, func() { signal.Stop(reloadCh) }
+}
+
+func watchReloadSignal(ctx context.Context, manager *service.Manager, reloadCh <-chan os.Signal) {
+	if reloadCh == nil {
+		return
+	}
 	go func() {
-		defer signal.Stop(reloadCh)
 		for {
 			select {
 			case <-ctx.Done():

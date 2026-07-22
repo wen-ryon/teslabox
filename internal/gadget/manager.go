@@ -7,9 +7,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
-const languageEnglishUS = "0x409"
+const (
+	languageEnglishUS        = "0x409"
+	hostDisconnectSettleTime = 500 * time.Millisecond
+)
 
 // Config 定义 TeslaBox 专属 USB Mass Storage Gadget 的固定身份和路径。
 type Config struct {
@@ -36,6 +40,7 @@ type Status struct {
 	UDC           string    `json:"udc,omitempty"`
 	UDCState      string    `json:"udc_state,omitempty"`
 	CurrentSpeed  string    `json:"current_speed,omitempty"`
+	HostDetected  bool      `json:"host_detected"`
 	HostConnected bool      `json:"host_connected"`
 	ImagePath     string    `json:"image_path,omitempty"`
 	SelectedUDC   string    `json:"selected_udc,omitempty"`
@@ -46,11 +51,12 @@ type Status struct {
 type Manager struct {
 	config  Config
 	symlink func(oldname, newname string) error
+	sleep   func(time.Duration)
 }
 
 // NewManager 创建 USB Mass Storage Gadget 生命周期管理器。
 func NewManager(config Config) *Manager {
-	return &Manager{config: config, symlink: os.Symlink}
+	return &Manager{config: config, symlink: os.Symlink, sleep: time.Sleep}
 }
 
 // Inspect 只读取 UDC 占用和 TeslaBox Gadget 状态。
@@ -71,7 +77,9 @@ func (m *Manager) Inspect() (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("读取 UDC 速率: %w", err)
 	}
-	status.HostConnected = status.UDCState != "" && status.UDCState != "not attached"
+	normalizedState := strings.ToLower(strings.TrimSpace(status.UDCState))
+	status.HostDetected = normalizedState != "" && normalizedState != "not attached"
+	status.HostConnected = normalizedState == "configured"
 	entries, err := os.ReadDir(m.config.ConfigFSPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("读取 USB Gadget configfs: %w", err)
@@ -122,6 +130,10 @@ func (m *Manager) Start() (status Status, err error) {
 	released, err := m.releaseAllowedBindings(status)
 	if err != nil {
 		return status, err
+	}
+	if len(released) > 0 {
+		// 给主机和 DWC3 控制端点留下完整断线窗口，避免旧 Gadget 的 EP0 请求污染新枚举。
+		m.sleep(hostDisconnectSettleTime)
 	}
 	restoreReleased := len(released) > 0
 	defer func() {
@@ -207,6 +219,24 @@ func (m *Manager) Start() (status Status, err error) {
 	created = false
 	restoreReleased = false
 	return m.Inspect()
+}
+
+// ReleaseAllowedBinding 在完整服务初始化前尽早释放明确允许接管的原厂 Gadget。
+func (m *Manager) ReleaseAllowedBinding() (bool, error) {
+	status, err := m.Inspect()
+	if err != nil {
+		return false, err
+	}
+	released, err := m.releaseAllowedBindings(status)
+	if err != nil {
+		return false, err
+	}
+	if len(released) == 0 {
+		return false, nil
+	}
+	// 启动阶段先形成稳定断线，再由主状态机在数据盘就绪后绑定 TeslaBox。
+	m.sleep(hostDisconnectSettleTime)
+	return true, nil
 }
 
 // PreflightStart 执行与真实启动相同的只读冲突和镜像检查。
