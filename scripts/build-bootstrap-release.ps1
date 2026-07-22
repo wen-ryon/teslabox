@@ -98,20 +98,28 @@ $files = @{
     "deploy\media-toolchain\install.sh" = "scripts\install-media-toolchain.sh"
 }
 foreach ($entry in $files.GetEnumerator()) {
-    Copy-Item -LiteralPath (Join-Path $root $entry.Key) -Destination (Join-Path $stage $entry.Value)
+    $destination = Join-Path $stage $entry.Value
+    Copy-Item -LiteralPath (Join-Path $root $entry.Key) -Destination $destination
+    # UTF-8 多字节序列不会包含 0x0D；按字节清理 CR 可同时覆盖 CRLF 和孤立 CR，并避免 PowerShell 改写编码。
+    $sourceBytes = [IO.File]::ReadAllBytes($destination)
+    $normalizedBytes = New-Object 'System.Collections.Generic.List[byte]' $sourceBytes.Length
+    for ($index = 0; $index -lt $sourceBytes.Length; $index++) {
+        if ($sourceBytes[$index] -eq 13) {
+            continue
+        }
+        if ($index -lt 3 -and $sourceBytes.Length -ge 3 -and $sourceBytes[0] -eq 0xEF -and $sourceBytes[1] -eq 0xBB -and $sourceBytes[2] -eq 0xBF) {
+            continue
+        }
+        $normalizedBytes.Add($sourceBytes[$index])
+    }
+    [IO.File]::WriteAllBytes($destination, $normalizedBytes.ToArray())
+    $verificationBytes = [IO.File]::ReadAllBytes($destination)
+    if ($verificationBytes -contains 13) {
+        throw "Linux text still contains a CR byte: $destination"
+    }
 }
 Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
 Copy-Item -LiteralPath $mediaChecksumPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz.sha256")
-
-# Windows 工作区可能启用 CRLF；发布包内的 Linux 配置必须统一为 LF 且不带 BOM。
-$textFiles = Get-ChildItem -LiteralPath $stage -Recurse -File
-foreach ($file in $textFiles) {
-    if ($file.Extension -notin @(".sh", ".service", ".rules") -and -not $file.Name.EndsWith(".env.example")) {
-        continue
-    }
-    $content = [IO.File]::ReadAllText($file.FullName).Replace("`r`n", "`n")
-    [IO.File]::WriteAllBytes($file.FullName, ([Text.Encoding]::UTF8).GetBytes($content))
-}
 
 $info = @(
     "version=$Version",
