@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultWiFiInterface = "wlan0"
-	apInterfaceName      = "ap0"
+	defaultAPInterface   = "ap0"
 	commandTimeout       = 20 * time.Second
 	recoveryInterval     = 15 * time.Second
 	recoveryTimeout      = 50 * time.Second
@@ -135,21 +135,37 @@ type APUpdate struct {
 
 // Manager 串行执行会改变网络状态的命令，避免多个页面操作互相覆盖。
 type Manager struct {
-	runner        system.Runner
-	logger        *slog.Logger
-	interfaceName string
-	mu            sync.Mutex
-	recoveryMu    sync.RWMutex
-	recovery      RecoveryStatus
-	schedule      func(time.Duration, func())
+	runner                  system.Runner
+	logger                  *slog.Logger
+	configuredWiFiInterface string
+	configuredAPInterface   string
+	mu                      sync.Mutex
+	recoveryMu              sync.RWMutex
+	recovery                RecoveryStatus
+	schedule                func(time.Duration, func())
 }
 
-// New 创建基于 NetworkManager 和 systemd 的设备管理器。
-func New(runner system.Runner, logger *slog.Logger) *Manager {
+// NetworkConfig 允许管理员固定无线接口；客户端接口留空时会根据 NetworkManager 自动发现。
+type NetworkConfig struct {
+	WiFiInterface string
+	APInterface   string
+}
+
+// New 创建基于 NetworkManager 和 systemd 的设备管理器；可选配置用于兼容非标准网卡命名。
+func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *Manager {
+	networkConfig := NetworkConfig{APInterface: defaultAPInterface}
+	if len(configs) > 0 {
+		networkConfig = configs[0]
+		if networkConfig.APInterface == "" {
+			networkConfig.APInterface = defaultAPInterface
+		}
+	}
 	return &Manager{
-		runner: runner, logger: logger, interfaceName: defaultWiFiInterface,
-		recovery: RecoveryStatus{Enabled: true},
-		schedule: func(delay time.Duration, operation func()) { time.AfterFunc(delay, operation) },
+		runner: runner, logger: logger,
+		configuredWiFiInterface: strings.TrimSpace(networkConfig.WiFiInterface),
+		configuredAPInterface:   strings.TrimSpace(networkConfig.APInterface),
+		recovery:                RecoveryStatus{Enabled: true},
+		schedule:                func(delay time.Duration, operation func()) { time.AfterFunc(delay, operation) },
 	}
 }
 
@@ -189,15 +205,16 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 	if err != nil {
 		return WiFiStatus{}, err
 	}
-	status := WiFiStatus{Available: true, Interface: m.interfaceName, SavedNetworks: []SavedNetwork{}}
-	status.MACAddress, status.IPAddress = m.interfaceDetails(ctx, m.interfaceName)
+	wifiInterface, apInterface := m.networkInterfaces(ctx, profiles)
+	status := WiFiStatus{Available: true, Interface: wifiInterface, SavedNetworks: []SavedNetwork{}}
+	status.MACAddress, status.IPAddress = m.interfaceDetails(ctx, wifiInterface)
 	status.Recovery = m.recoveryStatus()
 	apSSIDs := make(map[string]bool)
 	for _, profile := range profiles {
 		if profile.Mode == "ap" {
 			apSSIDs[profile.SSID] = true
 			status.APActive = status.APActive || profile.Active
-			status.ConcurrentMode = status.ConcurrentMode || profile.Active && profile.Device == apInterfaceName
+			status.ConcurrentMode = status.ConcurrentMode || profile.Active && profile.Device == apInterface && apInterface != wifiInterface
 			continue
 		}
 		if profile.Active {
@@ -212,14 +229,14 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		if status.ConcurrentMode {
 			status.SingleRadioNotice = "AP+STA 并发模式已启用；连接不同信道的上游 WiFi 时，热点会短暂切换到相同信道。"
 		} else {
-			status.SingleRadioNotice = "热点正在占用 wlan0；当前系统没有可用的 AP+STA 并发接口，连接上游 WiFi 会被阻止。"
+			status.SingleRadioNotice = fmt.Sprintf("热点正在占用 %s；当前系统没有可用的 AP+STA 并发接口，连接上游 WiFi 会被阻止。", wifiInterface)
 		}
 	}
 	saved := make(map[string]bool, len(status.SavedNetworks))
 	for _, profile := range status.SavedNetworks {
 		saved[profile.SSID] = true
 	}
-	available, _ := m.cachedAccessPoints(ctx, saved)
+	available, _ := m.cachedAccessPoints(ctx, wifiInterface, saved)
 	for _, item := range available {
 		if !apSSIDs[item.SSID] {
 			status.AvailableNetworks = append(status.AvailableNetworks, item)
@@ -239,7 +256,7 @@ func (m *Manager) reconcileAutoConnect(ctx context.Context) (bool, string, error
 		return false, "", nil
 	}
 	if current, found := currentAutoConnectNetwork(status); found {
-		available, listErr := m.cachedAccessPoints(ctx, map[string]bool{})
+		available, listErr := m.cachedAccessPoints(ctx, status.Interface, map[string]bool{})
 		if listErr != nil {
 			return false, current.SSID, listErr
 		}
@@ -257,7 +274,7 @@ func (m *Manager) reconcileAutoConnect(ctx context.Context) (bool, string, error
 			if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", current.UUID, "802-11-wireless.bssid", target.BSSID); err != nil {
 				return false, current.SSID, fmt.Errorf("更新 %s BSSID: %w", current.SSID, err)
 			}
-			if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID, "ifname", m.interfaceName); err != nil {
+			if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID, "ifname", status.Interface); err != nil {
 				return false, current.SSID, fmt.Errorf("恢复 %s: %w", current.SSID, err)
 			}
 			return true, current.SSID, nil
@@ -269,10 +286,10 @@ func (m *Manager) reconcileAutoConnect(ctx context.Context) (bool, string, error
 	if len(candidates) == 0 {
 		return false, "", nil
 	}
-	if _, err := m.run(ctx, "nmcli", "--wait", "12", "device", "wifi", "rescan", "ifname", m.interfaceName); err != nil {
+	if _, err := m.run(ctx, "nmcli", "--wait", "12", "device", "wifi", "rescan", "ifname", status.Interface); err != nil {
 		return false, "", fmt.Errorf("重新扫描上游 WiFi: %w", err)
 	}
-	available, err := m.cachedAccessPoints(ctx, map[string]bool{})
+	available, err := m.cachedAccessPoints(ctx, status.Interface, map[string]bool{})
 	if err != nil {
 		return false, "", err
 	}
@@ -294,7 +311,7 @@ func (m *Manager) reconcileAutoConnect(ctx context.Context) (bool, string, error
 			failures = append(failures, fmt.Errorf("更新 %s BSSID: %w", candidate.network.SSID, err))
 			continue
 		}
-		if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", candidate.network.UUID, "ifname", m.interfaceName); err != nil {
+		if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", candidate.network.UUID, "ifname", status.Interface); err != nil {
 			failures = append(failures, fmt.Errorf("连接 %s: %w", candidate.network.SSID, err))
 			continue
 		}
@@ -394,7 +411,7 @@ func (m *Manager) recoveryDue() bool {
 }
 
 // Scan 手动请求 NetworkManager 扫描，并返回按 SSID 去重后的结果。
-// AP+STA 并发模式下扫描在 wlan0 上执行，不影响 ap0 上的热点。
+// AP+STA 并发模式下扫描在自动识别的客户端接口上执行，不影响热点虚拟接口。
 func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -405,18 +422,18 @@ func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 	if status.APActive && !status.ConcurrentMode {
 		return nil, ErrAPActive
 	}
-	if _, err := m.run(ctx, "nmcli", "--wait", "12", "device", "wifi", "rescan", "ifname", m.interfaceName); err != nil {
+	if _, err := m.run(ctx, "nmcli", "--wait", "12", "device", "wifi", "rescan", "ifname", status.Interface); err != nil {
 		return nil, fmt.Errorf("扫描无线网络: %w", err)
 	}
 	saved := make(map[string]bool, len(status.SavedNetworks))
 	for _, profile := range status.SavedNetworks {
 		saved[profile.SSID] = true
 	}
-	return m.cachedAccessPoints(ctx, saved)
+	return m.cachedAccessPoints(ctx, status.Interface, saved)
 }
 
 // Connect 连接已保存网络或创建 WPA/WPA2、开放网络配置。
-// AP+STA 并发模式下连接在 wlan0 上执行，ap0 上的热点不受影响。
+// AP+STA 并发模式下连接在自动识别的客户端接口上执行，热点虚拟接口不受影响。
 func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -438,7 +455,7 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 		}
 		ssid = network.SSID
 	}
-	target, err := m.resolveAccessPoint(ctx, ssid, request.BSSID, request.Channel)
+	target, err := m.resolveAccessPoint(ctx, status.Interface, ssid, request.BSSID, request.Channel)
 	if err != nil {
 		return err
 	}
@@ -453,7 +470,7 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 				return fmt.Errorf("锁定上游 WiFi 接入点: %w", err)
 			}
 		}
-		_, err = m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", request.UUID, "ifname", m.interfaceName)
+		_, err = m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", request.UUID, "ifname", status.Interface)
 		if err != nil {
 			return fmt.Errorf("连接已保存网络: %w", err)
 		}
@@ -471,7 +488,7 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	if target.BSSID != "" {
 		args = append(args, "bssid", target.BSSID)
 	}
-	args = append(args, "ifname", m.interfaceName, "name", profileName)
+	args = append(args, "ifname", status.Interface, "name", profileName)
 	if security != "open" {
 		if security != "wpa" {
 			return ErrUnsupportedSecurity
@@ -560,13 +577,14 @@ func (m *Manager) APSettings(ctx context.Context) (APSettings, error) {
 		if profile.Mode != "ap" {
 			continue
 		}
+		apInterface := m.apInterface(profiles)
 		return APSettings{
 			Available: true, Enabled: profile.Active, ConnectionName: profile.Name, UUID: profile.UUID,
-			Interface: apInterfaceName,
+			Interface: apInterface,
 			SSID:      profile.SSID, Band: profile.Band, Channel: profile.Channel,
 			Security: profile.Security, Address: profile.Address, AutoConnect: profile.AutoConnect,
 			Sharing: profile.IPv4Method == "shared",
-		}.withInterfaceDetails(m.interfaceDetails(ctx, apInterfaceName)), nil
+		}.withInterfaceDetails(m.interfaceDetails(ctx, apInterface)), nil
 	}
 	return APSettings{Available: false}, nil
 }
@@ -602,6 +620,69 @@ func parseInterfaceDetails(output string) (string, string) {
 		}
 	}
 	return macAddress, ipAddress
+}
+
+type networkDevice struct {
+	Name      string
+	Connected bool
+}
+
+func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (string, string) {
+	apInterface := m.apInterface(profiles)
+	if m.configuredWiFiInterface != "" {
+		return m.configuredWiFiInterface, apInterface
+	}
+	for _, item := range profiles {
+		if item.Mode != "ap" && item.Active && item.Device != "" && item.Device != apInterface {
+			return item.Device, apInterface
+		}
+	}
+	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "DEVICE,TYPE,STATE", "device", "status")
+	if err == nil {
+		devices := parseWiFiDevices(string(output), apInterface)
+		for _, item := range devices {
+			if item.Connected {
+				return item.Name, apInterface
+			}
+		}
+		if len(devices) > 0 {
+			return devices[0].Name, apInterface
+		}
+	}
+	return defaultWiFiInterface, apInterface
+}
+
+func (m *Manager) apInterface(profiles []profile) string {
+	for _, item := range profiles {
+		if item.Mode == "ap" && item.Active && item.Device != "" {
+			return item.Device
+		}
+	}
+	for _, item := range profiles {
+		if item.Mode == "ap" && item.ConfiguredDevice != "" {
+			return item.ConfiguredDevice
+		}
+	}
+	if m.configuredAPInterface != "" {
+		return m.configuredAPInterface
+	}
+	return defaultAPInterface
+}
+
+func parseWiFiDevices(output, apInterface string) []networkDevice {
+	devices := make([]networkDevice, 0)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := splitNMCLI(line)
+		if len(fields) != 3 || fields[0] == "" || fields[1] != "wifi" || fields[0] == apInterface {
+			continue
+		}
+		state := strings.ToLower(fields[2])
+		devices = append(devices, networkDevice{
+			Name:      fields[0],
+			Connected: strings.HasPrefix(state, "connected") || strings.HasPrefix(state, "100"),
+		})
+	}
+	return devices
 }
 
 // UpdateAP 校验并更新现有热点；空密码表示保留原密码。
@@ -646,7 +727,11 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	if update.Enabled {
 		operation = "up"
 	}
-	if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", operation, "uuid", settings.UUID); err != nil {
+	operationArgs := []string{"--wait", "15", "connection", operation, "uuid", settings.UUID}
+	if operation == "up" && settings.Interface != "" {
+		operationArgs = append(operationArgs, "ifname", settings.Interface)
+	}
+	if _, err := m.run(ctx, "nmcli", operationArgs...); err != nil {
 		return fmt.Errorf("应用热点配置: %w", err)
 	}
 	return nil
@@ -675,7 +760,7 @@ func (m *Manager) SchedulePower(action string) error {
 
 type profile struct {
 	Name, UUID, SSID, Mode, Band, Security, Address, IPv4Method string
-	Device                                                      string
+	Device, ConfiguredDevice                                    string
 	Channel                                                     int
 	Active, AutoConnect                                         bool
 }
@@ -695,6 +780,9 @@ func (m *Manager) wirelessProfiles(ctx context.Context) ([]profile, error) {
 		item, err = m.profileDetails(ctx, item)
 		if err != nil {
 			return nil, err
+		}
+		if item.Mode == "ap" {
+			item.ConfiguredDevice = m.profileInterface(ctx, item.UUID)
 		}
 		profiles = append(profiles, item)
 	}
@@ -720,22 +808,30 @@ func (m *Manager) profileDetails(ctx context.Context, item profile) (profile, er
 	return item, nil
 }
 
-func (m *Manager) cachedAccessPoints(ctx context.Context, saved map[string]bool) ([]AccessPoint, error) {
-	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY", "device", "wifi", "list", "ifname", m.interfaceName, "--rescan", "no")
+func (m *Manager) profileInterface(ctx context.Context, uuid string) string {
+	output, err := m.run(ctx, "nmcli", "-g", "connection.interface-name", "connection", "show", "uuid", uuid)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func (m *Manager) cachedAccessPoints(ctx context.Context, interfaceName string, saved map[string]bool) ([]AccessPoint, error) {
+	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY", "device", "wifi", "list", "ifname", interfaceName, "--rescan", "no")
 	if err != nil {
 		return nil, fmt.Errorf("读取无线网络: %w", err)
 	}
 	return parseAccessPoints(string(output), saved), nil
 }
 
-func (m *Manager) resolveAccessPoint(ctx context.Context, ssid, bssid string, channel int) (AccessPoint, error) {
+func (m *Manager) resolveAccessPoint(ctx context.Context, interfaceName, ssid, bssid string, channel int) (AccessPoint, error) {
 	if err := validateSSID(ssid); err != nil {
 		return AccessPoint{}, err
 	}
 	if bssid != "" && !validBSSID(bssid) {
 		return AccessPoint{}, invalidInput("WiFi BSSID 无效")
 	}
-	items, err := m.cachedAccessPoints(ctx, map[string]bool{})
+	items, err := m.cachedAccessPoints(ctx, interfaceName, map[string]bool{})
 	if err != nil {
 		return AccessPoint{}, err
 	}
@@ -767,7 +863,7 @@ func (m *Manager) alignAPChannel(ctx context.Context, status WiFiStatus, channel
 		return nil
 	}
 	if status.CurrentConnection != "" {
-		if _, err := m.run(ctx, "nmcli", "device", "disconnect", m.interfaceName); err != nil {
+		if _, err := m.run(ctx, "nmcli", "device", "disconnect", status.Interface); err != nil {
 			if !isNMDeviceInactive(err) {
 				return fmt.Errorf("断开原上游 WiFi: %w", err)
 			}
@@ -782,7 +878,7 @@ func (m *Manager) alignAPChannel(ctx context.Context, status WiFiStatus, channel
 	); err != nil {
 		return fmt.Errorf("同步热点信道: %w", err)
 	}
-	if _, err := m.run(ctx, "nmcli", "--wait", "20", "connection", "up", "uuid", settings.UUID, "ifname", apInterfaceName); err != nil {
+	if _, err := m.run(ctx, "nmcli", "--wait", "20", "connection", "up", "uuid", settings.UUID, "ifname", settings.Interface); err != nil {
 		return fmt.Errorf("在上游 WiFi 信道重启热点: %w", err)
 	}
 	return nil

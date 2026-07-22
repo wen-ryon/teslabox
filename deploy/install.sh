@@ -172,17 +172,60 @@ install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-ap.service" /etc/systemd/system
 install -m 0644 "${PAYLOAD_DIR}/udev/99-teslabox.rules" /etc/udev/rules.d/99-teslabox.rules
 install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-ap-setup.sh" /usr/local/libexec/teslabox-ap-setup.sh
 
+log "停用 Radxa 原厂 USB Gadget 服务"
+for GADGET_SERVICE in radxa-adbd.service radxa-usbnet.service; do
+    GADGET_SERVICE_STATE="$(systemctl is-enabled "${GADGET_SERVICE}" 2>/dev/null || true)"
+    case "${GADGET_SERVICE_STATE}" in
+        ""|not-found) continue ;;
+        masked|masked-runtime) ;;
+        *)
+            systemctl disable --now "${GADGET_SERVICE}"
+            systemctl mask "${GADGET_SERVICE}"
+            ;;
+    esac
+done
+
 systemctl disable --now teslabox-gadget.service >/dev/null 2>&1 || true
 systemctl daemon-reload
 udevadm control --reload-rules
 systemctl enable avahi-daemon.service teslabox.service >/dev/null
+
+network_env_value() {
+    sed -n "s/^$1=//p" /etc/teslabox/teslabox.env | sed -n '1p'
+}
+
+AP_PROFILE_INTERFACE="$(network_env_value TESLABOX_AP_INTERFACE)"
+if [ -z "${AP_PROFILE_INTERFACE}" ]; then
+    AP_PROFILE_INTERFACE="$(nmcli -g connection.interface-name connection show id TeslaBox-5G 2>/dev/null | sed -n '1p' || true)"
+fi
+if [ -z "${AP_PROFILE_INTERFACE}" ]; then
+    for CANDIDATE in ap0 ap1 ap2 teslabox-ap; do
+        if [ ! -e "/sys/class/net/${CANDIDATE}" ]; then
+            AP_PROFILE_INTERFACE="${CANDIDATE}"
+            break
+        fi
+    done
+fi
+AP_PROFILE_INTERFACE="${AP_PROFILE_INTERFACE:-teslabox-ap}"
+
+detect_wifi_interface() {
+    CONFIGURED_WIFI_INTERFACE="$(network_env_value TESLABOX_WIFI_INTERFACE)"
+    if [ -n "${CONFIGURED_WIFI_INTERFACE}" ]; then
+        if [ -e "/sys/class/net/${CONFIGURED_WIFI_INTERFACE}" ]; then
+            printf '%s\n' "${CONFIGURED_WIFI_INTERFACE}"
+        fi
+        return
+    fi
+    nmcli -t --escape no -f DEVICE,TYPE device status 2>/dev/null |
+        awk -F: -v ap="${AP_PROFILE_INTERFACE}" '$2 == "wifi" && $1 != ap { print $1; exit }'
+}
 
 setup_ap_profile() {
     systemctl enable NetworkManager.service >/dev/null || return 1
     systemctl start NetworkManager.service || return 1
     if ! nmcli -t -f NAME connection show | sed 's/\\:/:/g' | sed -n '/^TeslaBox-5G$/p' | read -r _; then
         AP_INITIAL_PASSWORD="tb$(od -An -N 6 -tx1 /dev/urandom | tr -d ' \n')"
-        nmcli connection add type wifi ifname ap0 con-name TeslaBox-5G ssid TeslaBox-5G || return 1
+        nmcli connection add type wifi ifname "${AP_PROFILE_INTERFACE}" con-name TeslaBox-5G ssid TeslaBox-5G || return 1
         nmcli connection modify TeslaBox-5G \
             802-11-wireless.mode ap \
             802-11-wireless.band a \
@@ -205,12 +248,13 @@ else
     warn "未找到 nmcli，暂不创建 AP 配置。"
 fi
 
-if [ -e /sys/class/net/wlan0 ]; then
+WIFI_INTERFACE="$(detect_wifi_interface)"
+if [ -n "${WIFI_INTERFACE}" ]; then
     systemctl enable teslabox-ap.service >/dev/null || warn "teslabox-ap.service 无法设为开机启动。"
     systemctl restart teslabox-ap.service || warn "AP 热点启动失败；请保留网线并在设置中心检查无线网卡。"
 else
     systemctl disable teslabox-ap.service >/dev/null 2>&1 || true
-    warn "当前没有 wlan0，暂不启动 AP；基础功能仍可通过网线使用。"
+    warn "当前没有检测到无线客户端接口，暂不启动 AP；基础功能仍可通过网线使用。"
 fi
 
 log "启动 TeslaBox"

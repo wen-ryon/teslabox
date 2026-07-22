@@ -401,6 +401,26 @@ function renderLogs(report) {
   if (report.limited) details.push("仅显示最新日志");
   if (report.redacted) details.push(`已脱敏 ${report.redacted} 行`);
   $("logs-meta").textContent = details.join(" · ");
+  if (Array.isArray(report.service_states)) renderGadgetServiceStates(report.service_states);
+}
+
+function renderGadgetServiceStates(services) {
+  const states = new Map(services.map((service) => [service.name, service]));
+  renderGadgetServiceState("logs-radxa-adbd", states.get("radxa-adbd.service"));
+  renderGadgetServiceState("logs-radxa-usbnet", states.get("radxa-usbnet.service"));
+}
+
+function renderGadgetServiceState(elementID, service) {
+  const element = $(elementID);
+  if (!service || service.load_state === "not-found" || service.load_state === "unknown") {
+    element.textContent = "未安装";
+    return;
+  }
+  if (String(service.unit_file_state || "").startsWith("masked") && service.active_state === "inactive") {
+    element.textContent = "已屏蔽 · 未运行";
+    return;
+  }
+  element.textContent = `${service.unit_file_state || "状态未知"} · ${service.active_state || "未知"}`;
 }
 
 function scheduleLogsRefresh() {

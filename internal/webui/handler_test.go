@@ -51,7 +51,7 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "logs-page", "logs-output", "data-log-source=\"usb\"", "app.js?v=20260722-1",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "app.js?v=20260722-2",
 		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
@@ -72,7 +72,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "scheduleLogsRefresh"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "scheduleLogsRefresh", "renderGadgetServiceStates", "radxa-adbd.service"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}

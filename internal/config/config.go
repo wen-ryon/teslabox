@@ -30,6 +30,7 @@ const (
 	defaultGadgetName      = "teslabox"
 	defaultGadgetSerial    = "TESLABOX-071C4AAFBA8BEB80"
 	defaultReleaseGadget   = "radxa-otgutils"
+	defaultAPInterface     = "ap0"
 	defaultScanInterval    = 30 * time.Second
 	defaultPollInterval    = 3 * time.Second
 	defaultOperationLimit  = 15 * time.Second
@@ -73,6 +74,8 @@ type Config struct {
 	GadgetName        string
 	GadgetSerial      string
 	ReleaseGadget     string
+	WiFiInterface     string
+	APInterface       string
 	ScanInterval      time.Duration
 	PollInterval      time.Duration
 	OperationTimeout  time.Duration
@@ -169,6 +172,8 @@ func Load() (Config, error) {
 		GadgetName:        envString("TESLABOX_GADGET_NAME", defaultGadgetName),
 		GadgetSerial:      envString("TESLABOX_GADGET_SERIAL", defaultGadgetSerial),
 		ReleaseGadget:     envString("TESLABOX_RELEASE_GADGET", defaultReleaseGadget),
+		WiFiInterface:     strings.TrimSpace(os.Getenv("TESLABOX_WIFI_INTERFACE")),
+		APInterface:       envString("TESLABOX_AP_INTERFACE", defaultAPInterface),
 		ScanInterval:      scanInterval,
 		PollInterval:      pollInterval,
 		OperationTimeout:  operationTimeout,
@@ -214,6 +219,15 @@ func (c Config) Validate() error {
 		if !isSafeRelativePath(value) {
 			return fmt.Errorf("%s 必须是数据盘内的安全相对路径", name)
 		}
+	}
+	if c.WiFiInterface != "" && !isSafeInterfaceName(c.WiFiInterface) {
+		return fmt.Errorf("TESLABOX_WIFI_INTERFACE 不是有效的网络接口名")
+	}
+	if !isSafeInterfaceName(c.APInterface) {
+		return fmt.Errorf("TESLABOX_AP_INTERFACE 不是有效的网络接口名")
+	}
+	if c.WiFiInterface != "" && c.WiFiInterface == c.APInterface {
+		return fmt.Errorf("TESLABOX_WIFI_INTERFACE 和 TESLABOX_AP_INTERFACE 不能相同")
 	}
 	if !isSafeAbsolutePath(c.ConfigFSPath) || !isSafeAbsolutePath(c.UDCPath) {
 		return fmt.Errorf("configfs 和 UDC 路径必须是非根目录的绝对路径")
@@ -284,6 +298,19 @@ func (c Config) Validate() error {
 		return fmt.Errorf("TESLABOX_WEB_SESSION_TTL 必须大于零且不超过 365 天")
 	}
 	return nil
+}
+
+func isSafeInterfaceName(value string) bool {
+	if len(value) == 0 || len(value) > 15 {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("._-", char) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func isHexBytes(value string, minimumBytes int) bool {

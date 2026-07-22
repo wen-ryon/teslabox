@@ -51,6 +51,19 @@ cp -a "${TARGET}" "${BACKUP}"
 install -m 0755 "${SOURCE}" "${TARGET}.new"
 mv "${TARGET}.new" "${TARGET}"
 
+# 旧版首装没有屏蔽 Radxa Gadget 服务，重启主程序前先消除同一 UDC 的异步争用。
+for GADGET_SERVICE in radxa-adbd.service radxa-usbnet.service; do
+    GADGET_SERVICE_STATE="$(systemctl is-enabled "${GADGET_SERVICE}" 2>/dev/null || true)"
+    case "${GADGET_SERVICE_STATE}" in
+        ""|not-found) continue ;;
+        masked|masked-runtime) ;;
+        *)
+            systemctl disable --now "${GADGET_SERVICE}"
+            systemctl mask "${GADGET_SERVICE}"
+            ;;
+    esac
+done
+
 # 用户显式运行本脚本即表示允许本次重启；脚本不会启用或关闭开机自启。
 if ! systemctl restart "${SERVICE}" || ! systemctl is-active --quiet "${SERVICE}"; then
     echo "新版启动失败，正在恢复 ${BACKUP}" >&2

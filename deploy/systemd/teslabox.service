@@ -1,6 +1,8 @@
 [Unit]
 Description=TeslaBox edge service
 After=local-fs.target
+Conflicts=radxa-adbd.service radxa-usbnet.service
+Before=radxa-adbd.service radxa-usbnet.service
 
 [Service]
 Type=simple

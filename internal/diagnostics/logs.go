@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -33,11 +34,12 @@ var (
 
 // Report 是日志中心可以安全展示的有界日志结果。
 type Report struct {
-	Source      string    `json:"source"`
-	GeneratedAt time.Time `json:"generated_at"`
-	Lines       []string  `json:"lines"`
-	Limited     bool      `json:"limited"`
-	Redacted    int       `json:"redacted"`
+	Source        string                `json:"source"`
+	GeneratedAt   time.Time             `json:"generated_at"`
+	Lines         []string              `json:"lines"`
+	Limited       bool                  `json:"limited"`
+	Redacted      int                   `json:"redacted"`
+	ServiceStates []gadget.ServiceState `json:"service_states,omitempty"`
 }
 
 // Manager 只允许读取预定义的 journalctl 日志集合，避免页面成为任意命令入口。
@@ -84,10 +86,17 @@ func (m *Manager) Logs(ctx context.Context, source string, limit int) (Report, e
 	if limited {
 		lines = lines[len(lines)-limit:]
 	}
-	return Report{
+	report := Report{
 		Source: source, GeneratedAt: time.Now(), Lines: lines,
 		Limited: limited, Redacted: redacted,
-	}, nil
+	}
+	if source == SourceUSB {
+		states, stateErr := gadget.InspectConflictingServices(ctx, m.runner)
+		if stateErr == nil {
+			report.ServiceStates = states
+		}
+	}
+	return report, nil
 }
 
 // ValidSource 判断页面请求是否属于固定的安全日志来源。

@@ -42,6 +42,9 @@ func TestLoad(t *testing.T) {
 	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {
 		t.Errorf("WebAuthStatePath = %q", cfg.WebAuthStatePath)
 	}
+	if cfg.WiFiInterface != "" || cfg.APInterface != "ap0" {
+		t.Errorf("network interfaces = %q, %q", cfg.WiFiInterface, cfg.APInterface)
+	}
 }
 
 func TestLoadUsesDefaultHTTPAddr(t *testing.T) {
@@ -70,6 +73,13 @@ func TestLoadRejectsInvalidFreeSpaceThreshold(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidNetworkInterfaces(t *testing.T) {
+	t.Setenv("TESLABOX_WIFI_INTERFACE", "wlan0;reboot")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid interface error")
+	}
+}
+
 func TestConfigValidate(t *testing.T) {
 	valid := Config{
 		HTTPAddr:          ":80",
@@ -94,6 +104,7 @@ func TestConfigValidate(t *testing.T) {
 		GadgetName:        "teslabox",
 		GadgetSerial:      "TESLABOX-TEST",
 		ReleaseGadget:     "radxa-otgutils",
+		APInterface:       "ap0",
 		ScanInterval:      time.Second,
 		PollInterval:      time.Second,
 		OperationTimeout:  time.Second,
@@ -129,6 +140,8 @@ func TestConfigValidate(t *testing.T) {
 		{name: "excessive export queue", mutate: func(cfg *Config) { cfg.ExportQueueSize = 17 }, wantErr: true},
 		{name: "missing selector", mutate: func(cfg *Config) { cfg.DataLabel = "" }, wantErr: true},
 		{name: "unsafe gadget name", mutate: func(cfg *Config) { cfg.GadgetName = "../gadget" }, wantErr: true},
+		{name: "unsafe wifi interface", mutate: func(cfg *Config) { cfg.WiFiInterface = "wlan0;reboot" }, wantErr: true},
+		{name: "same network interfaces", mutate: func(cfg *Config) { cfg.WiFiInterface = "ap0" }, wantErr: true},
 		{name: "zero minimum free bytes", mutate: func(cfg *Config) { cfg.MinFreeBytes = 0 }, wantErr: true},
 		{name: "invalid minimum free percent", mutate: func(cfg *Config) { cfg.MinFreePercent = 100 }, wantErr: true},
 		{name: "password without session secret", mutate: func(cfg *Config) { cfg.WebPasswordSHA256 = strings.Repeat("a", 64) }, wantErr: true},

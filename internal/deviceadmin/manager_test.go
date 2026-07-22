@@ -82,6 +82,35 @@ func TestAPSettingsIncludesInterfaceDetails(t *testing.T) {
 	}
 }
 
+func TestManagerDiscoversNonstandardWiFiAndAPInterfaces(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless::yes\nHome:22222222-2222-2222-2222-222222222222:802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -g connection.interface-name connection show uuid 11111111-1111-1111-1111-111111111111":                                                                                                                           "hotspot7\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                   "hotspot7:wifi:disconnected\nwlp2s0:wifi:connected\neth0:ethernet:connected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlp2s0 --rescan no": ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:70:161:WPA2\n",
+		"nmcli --escape no -g GENERAL.HWADDR,IP4.ADDRESS device show wlp2s0":                                         "AA:BB:CC:DD:EE:10\n192.0.2.28/24\n",
+		"nmcli --escape no -g GENERAL.HWADDR,IP4.ADDRESS device show hotspot7":                                       "AA:BB:CC:DD:EE:20\n192.168.88.1/24\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Interface != "wlp2s0" || status.MACAddress != "AA:BB:CC:DD:EE:10" {
+		t.Fatalf("status = %#v", status)
+	}
+	settings, err := manager.APSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Interface != "hotspot7" || settings.MACAddress != "AA:BB:CC:DD:EE:20" {
+		t.Fatalf("settings = %#v", settings)
+	}
+}
+
 func TestParseInterfaceDetails(t *testing.T) {
 	t.Parallel()
 	macAddress, ipAddress := parseInterfaceDetails("AA:bb:CC:dd:EE:ff\nfe80::1/64\n192.168.8.2/24\n")

@@ -41,10 +41,15 @@ sudo ./teslabox-install.sh
 5. 安装 Rockchip 专用 FFmpeg、MPP 和 RGA 到 `/opt/teslabox/media`，不覆盖系统自带的 `ffmpeg`。
 6. 安装 `teslabox.service`、按需启动的 `teslabox-update.service`、udev 规则和 AP 恢复组件。
 7. 配置 Gitee 稳定通道和 Ed25519 公钥，后续只接受签名匹配的 ARM64 主程序。
-8. 禁用已经退役的常驻 `teslabox-gadget.service`，由 Go 主服务单独管理 UDC。
-9. 启动服务并等待 `/healthz` 通过；失败时恢复安装前的主程序。
+8. 停用并屏蔽 Radxa 原厂 `radxa-adbd.service`、`radxa-usbnet.service`，避免它们延迟启动后争用 DWC3 的 EP0 控制端点。
+9. 禁用已经退役的常驻 `teslabox-gadget.service`，由 Go 主服务单独管理 UDC。
+10. 启动服务并等待 `/healthz` 通过；失败时恢复安装前的主程序。
 
-如果安装时已经存在 `wlan0`，脚本会创建 `TeslaBox-5G` AP 配置并尝试启用热点。初始热点密码随机生成，只在安装结束时显示；请记录并在设置中心修改。如果没有 `wlan0`，脚本保持有线管理可用，不会让 AP 失败阻断 TeslaUSB 基础安装。
+如果安装时 NetworkManager 已识别到无线客户端接口，脚本会自动发现它，不要求名称必须是 `wlan0`，随后创建 `TeslaBox-5G` AP 配置并尝试启用热点。初始热点密码随机生成，只在安装结束时显示；请记录并在设置中心修改。如果没有识别到无线接口，脚本保持有线管理可用，不会让 AP 失败阻断 TeslaUSB 基础安装。
+
+`radxa-usbnet.service` 只会让 OTG Device 口模拟 `ecm.usb0` USB 有线网卡，不负责 USB Host 口上的无线网卡，也不管理 NetworkManager 或 MT7922。TeslaBox 屏蔽它不会影响上游 WiFi 或 AP 热点。
+
+无线接口默认自动识别，热点接口优先读取 `TeslaBox-5G` 连接配置，未配置时才回退到 `ap0`。只有自动识别错误或接口名冲突时，才需要在 `/etc/teslabox/teslabox.env` 中设置 `TESLABOX_WIFI_INTERFACE` 或 `TESLABOX_AP_INTERFACE`；Linux 接口名最长 15 个字符。
 
 ## MT7922 是可选测试内核
 
@@ -97,6 +102,8 @@ teslabox
 systemctl is-active teslabox.service
 systemctl is-enabled teslabox.service
 systemctl is-enabled teslabox-update.service
+systemctl is-enabled radxa-adbd.service
+systemctl is-enabled radxa-usbnet.service
 curl -fsS http://127.0.0.1/healthz
 /opt/teslabox/media/bin/ffmpeg -hide_banner -hwaccels
 /opt/teslabox/media/bin/ffmpeg -hide_banner -decoders | sed -n '/_rkmpp/p'
@@ -106,6 +113,7 @@ curl -fsS http://127.0.0.1/healthz
 
 - `teslabox.service` 为 `active`、`enabled`。
 - `teslabox-update.service` 为 `static`；它只在页面确认安装时临时运行。
+- 两个 Radxa 原厂 Gadget 服务为 `masked`，不能在 TeslaBox 之后异步接管同一个 UDC。
 - 健康接口返回 `{"status":"ok"}`。
 - FFmpeg 能列出 Rockchip 硬件能力和 `_rkmpp` 解码器。
 
@@ -113,7 +121,7 @@ curl -fsS http://127.0.0.1/healthz
 
 进入“设置中心 → 系统更新”执行检查、下载和安装。设备会校验 Ed25519 签名、板型、架构、文件大小和 SHA-256，安装健康检查失败时自动恢复旧主程序。
 
-当前在线升级只替换 `/usr/local/bin/teslabox`。内核、MT7922 backports、FFmpeg/MPP/RGA、systemd unit 和首装脚本仍属于人工基础设施升级，不会被主程序更新通道静默修改。
+当前在线升级只替换 `/usr/local/bin/teslabox`。新主程序会在绑定 UDC 前检查并屏蔽固定的 Radxa Gadget 冲突服务；内核、MT7922 backports、FFmpeg/MPP/RGA、systemd unit 和首装脚本仍属于人工基础设施升级，不会被主程序更新通道静默修改。
 
 ## 常见问题
 
@@ -130,12 +138,12 @@ sudo ss -ltnp '( sport = :80 )'
 先保留网线并检查：
 
 ```sh
-ip link show wlan0
+nmcli -t -f DEVICE,TYPE,STATE device status
 systemctl status teslabox-ap.service --no-pager
 nmcli connection show TeslaBox-5G
 ```
 
-没有 `wlan0` 通常表示当前内核没有对应无线驱动，或无线硬件未枚举。不要仅因热点未出现就盲目安装 MT7922 测试内核；先用 `lspci -nn` 确认设备是否为 `14c3:0616`。
+如果输出中没有 `wifi` 类型设备，通常表示当前内核没有对应无线驱动，或无线硬件未枚举。不要仅因热点未出现就盲目安装 MT7922 测试内核；先用 `lspci -nn` 或 `lsusb` 确认实际无线硬件。
 
 ### 服务启动失败
 

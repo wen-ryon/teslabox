@@ -46,6 +46,16 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
+	guardCtx, guardCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	protectedServices, guardErr := gadget.DisableConflictingServices(guardCtx, runner)
+	guardCancel()
+	if guardErr != nil {
+		logger.Error("无法停用原厂 USB Gadget 服务", "error", guardErr)
+		os.Exit(1)
+	}
+	if len(protectedServices) > 0 {
+		logger.Info("已停用并屏蔽原厂 USB Gadget 服务", "services", protectedServices)
+	}
 	registry := storage.NewFileRegistry(cfg.RegistryPath)
 	if err := registry.EnsureLegacy(cfg.DataUUID, cfg.DataLabel); err != nil {
 		logger.Error("初始化存储设备登记册失败", "error", err)
@@ -123,7 +133,10 @@ func main() {
 		logger.Error("初始化 Web 管理认证失败", "error", err)
 		os.Exit(1)
 	}
-	deviceAdmin := deviceadmin.New(runner, logger)
+	deviceAdmin := deviceadmin.New(runner, logger, deviceadmin.NetworkConfig{
+		WiFiInterface: cfg.WiFiInterface,
+		APInterface:   cfg.APInterface,
+	})
 	mediaInspector, err := media.NewInspector(runner, media.Config{
 		FFmpegPath: cfg.FFmpegPath, FFprobePath: cfg.FFprobePath, Timeout: cfg.MediaProbeTimeout,
 	})
