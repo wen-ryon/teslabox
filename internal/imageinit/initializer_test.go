@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +74,83 @@ func TestRunDryRunDoesNotExecute(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.Commands[2], partition) {
 		t.Fatalf("partition command = %#v, want %#v", result.Commands[2], partition)
+	}
+}
+
+func TestRunDryRunPlansMusicPartition(t *testing.T) {
+	options := validOptions()
+	options.SizeBytes = 475_000_000_000
+	options.MusicEnabled = true
+	options.TeslaCamPercent = 80
+	options.MusicLabel = "MUSIC"
+	runner := &fakeRunner{}
+	environment := validEnvironment()
+	environment.TotalBytes = 500_000_000_000
+	environment.FreeBytes = 500_000_000_000
+
+	result, err := New(fakeInspector{environment: environment}, runner).Run(t.Context(), options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("dry-run executed %d commands", len(runner.commands))
+	}
+	if result.Layout.TeslaCamBytes <= result.Layout.MusicBytes || result.Layout.MusicBytes < minimumMusicPartition {
+		t.Fatalf("layout = %#v", result.Layout)
+	}
+	names := make([]string, 0, len(result.Commands))
+	for _, command := range result.Commands {
+		names = append(names, command.Name)
+	}
+	if !slices.Contains(names, "mkfs.exfat") || !slices.Contains(names, "mkfs.vfat") {
+		t.Fatalf("commands = %#v", result.Commands)
+	}
+	if got := result.Commands[3]; got.Name != "parted" || !slices.Contains(got.Args, "fat32") || !slices.Contains(got.Args, "100%") {
+		t.Fatalf("music partition command = %#v", got)
+	}
+}
+
+func TestRunRejectsMissingMusicFormatterBeforeCreatingImage(t *testing.T) {
+	options := validOptions()
+	options.Execute = true
+	options.MusicEnabled = true
+	options.TeslaCamPercent = 80
+	options.MusicLabel = "MUSIC"
+	runner := &fakeRunner{}
+	initializer := New(fakeInspector{environment: validEnvironment()}, runner)
+	initializer.lookPath = func(name string) (string, error) {
+		if strings.HasSuffix(name, "mkfs.vfat") {
+			return "", errors.New("not found")
+		}
+		return name, nil
+	}
+	_, err := initializer.Run(t.Context(), options)
+	if err == nil || !strings.Contains(err.Error(), "dosfstools") {
+		t.Fatalf("Run() error = %v, want dosfstools guidance", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("missing formatter must fail before disk commands: %#v", runner.commands)
+	}
+}
+
+func TestPlanLayout(t *testing.T) {
+	t.Parallel()
+	layout, err := PlanLayout(475_000_000_000, true, 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.TeslaCamBytes%bytesPerMiB != 0 || layout.MusicBytes%bytesPerMiB != 0 {
+		t.Fatalf("layout is not MiB aligned: %#v", layout)
+	}
+	usable := int64(475_000_000_000/bytesPerMiB-1) * bytesPerMiB
+	if layout.TeslaCamBytes+layout.MusicBytes != usable {
+		t.Fatalf("layout total = %d, want %d", layout.TeslaCamBytes+layout.MusicBytes, usable)
+	}
+	if _, err := PlanLayout(40_000_000_000, true, 10); err == nil {
+		t.Fatal("PlanLayout() error = nil, want TeslaCam minimum error")
+	}
+	if _, err := PlanLayout(475_000_000_000, true, 96); err == nil {
+		t.Fatal("PlanLayout() error = nil, want percentage error")
 	}
 }
 

@@ -327,11 +327,14 @@ func TestStorageStatusIncludesTeslaUSBPhase(t *testing.T) {
 	controller := fakeController{state: service.Snapshot{
 		Phase: service.PhaseGadgetActive,
 		GadgetStatus: gadget.Status{
-			Bound:         true,
-			UDC:           "fcc00000.dwc3",
-			UDCState:      "configured",
-			CurrentSpeed:  "high-speed",
-			HostConnected: true,
+			Bound:               true,
+			UDC:                 "fcc00000.dwc3",
+			UDCState:            "configured",
+			CurrentSpeed:        "high-speed",
+			HostConnected:       true,
+			EnumerationComplete: true,
+			BusSuspendKnown:     true,
+			BusSuspended:        true,
 		},
 	}}
 	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -350,7 +353,7 @@ func TestStorageStatusIncludesTeslaUSBPhase(t *testing.T) {
 	if payload.Phase != service.PhaseGadgetActive {
 		t.Fatalf("Phase = %q", payload.Phase)
 	}
-	if !payload.GadgetStatus.Bound || !payload.GadgetStatus.HostConnected || payload.GadgetStatus.UDCState != "configured" || payload.GadgetStatus.CurrentSpeed != "high-speed" {
+	if !payload.GadgetStatus.Bound || !payload.GadgetStatus.HostConnected || !payload.GadgetStatus.EnumerationComplete || !payload.GadgetStatus.BusSuspendKnown || !payload.GadgetStatus.BusSuspended || payload.GadgetStatus.UDCState != "configured" || payload.GadgetStatus.CurrentSpeed != "high-speed" {
 		t.Fatalf("GadgetStatus = %#v", payload.GadgetStatus)
 	}
 }

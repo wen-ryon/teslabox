@@ -42,6 +42,9 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 	if bytes.Contains(body, []byte(`value="track"`)) || bytes.Contains(body, []byte(`data-display=`)) {
 		t.Error("页面不应显示无数据的赛道筛选或独立播放模式切换")
 	}
+	if logsPosition, settingsPosition := bytes.Index(body, []byte(`data-page-link="logs"`)), bytes.Index(body, []byte(`data-page-link="settings"`)); logsPosition < 0 || settingsPosition < 0 || logsPosition > settingsPosition {
+		t.Error("侧边导航应将日志中心置于设置中心之前")
+	}
 	for _, marker := range []string{
 		"theme-select", `value="red"`, `data-view="multi"`, `data-period="month"`,
 		"session-player-view", "composite-grid", "camera-switcher", "session-timeline",
@@ -50,8 +53,10 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"ap-form", "storage-device-list", "shutdown-button", "appearance-toggle", "appearance-menu",
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
-		"export-open", "export-progress", "password-change-open",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "app.js?v=20260722-2",
+		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
+		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-confirm-otg-disconnected", "app.js?v=20260722-9",
+		"toast-region",
 		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
@@ -72,7 +77,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "scheduleLogsRefresh", "renderGadgetServiceStates", "radxa-adbd.service"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "applyMediaAssets"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}
@@ -82,6 +87,31 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "http://teslabox.local/api/v1/logs?source=usb", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+}
+
+func TestUpdateFailureNeverReconnectsGadgetAutomatically(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
+	script := recorder.Body.String()
+	start := strings.Index(script, "async function installUpdate()")
+	if start < 0 {
+		t.Fatal("找不到在线更新函数起点")
+	}
+	end := strings.Index(script[start:], "async function refreshUpdateStatus()")
+	if end < 0 {
+		t.Fatal("找不到在线更新函数边界")
+	}
+	installScript := script[start : start+end]
+	if strings.Contains(installScript, "/api/v1/gadget/reconnect") {
+		t.Fatal("更新失败路径不得在 OTG 已拔出时自动恢复 Gadget")
+	}
+	for _, marker := range []string{"setUpdateNotice", "/api/v1/gadget/disconnect", "USB Gadget 会继续保持安全断开"} {
+		if !strings.Contains(installScript, marker) {
+			t.Errorf("在线更新流程缺少安全标记 %q", marker)
+		}
 	}
 }
 

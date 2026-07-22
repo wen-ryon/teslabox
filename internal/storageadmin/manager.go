@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	minimumDeviceSize = 32 * 1000 * 1000 * 1000
-	maximumImageSize  = 96 * 1000 * 1000 * 1000
-	reservedBytes     = 20 * 1000 * 1000 * 1000
+	minimumDeviceSize       = 32 * 1000 * 1000 * 1000
+	minimumReservedBytes    = 20 * 1000 * 1000 * 1000
+	maximumMBRImageSize     = 2 * 1000 * 1000 * 1000 * 1000
+	reservedCapacityDivisor = 20
+	defaultTeslaCamPercent  = 80
 )
 
 var (
@@ -38,20 +40,22 @@ func (e *InputError) Error() string { return e.Message }
 
 // Candidate 是设置页面展示的 USB 存储整盘状态。
 type Candidate struct {
-	StablePath    string `json:"stable_path"`
-	DevicePath    string `json:"device_path"`
-	Model         string `json:"model,omitempty"`
-	Serial        string `json:"serial,omitempty"`
-	SizeBytes     int64  `json:"size_bytes"`
-	Transport     string `json:"transport"`
-	State         string `json:"state"`
-	Initialized   bool   `json:"initialized"`
-	Active        bool   `json:"active"`
-	CanInitialize bool   `json:"can_initialize"`
-	CanResume     bool   `json:"can_resume"`
-	CanCancel     bool   `json:"can_cancel"`
-	Reason        string `json:"reason,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	StablePath            string `json:"stable_path"`
+	DevicePath            string `json:"device_path"`
+	Model                 string `json:"model,omitempty"`
+	Serial                string `json:"serial,omitempty"`
+	SizeBytes             int64  `json:"size_bytes"`
+	Transport             string `json:"transport"`
+	State                 string `json:"state"`
+	Initialized           bool   `json:"initialized"`
+	Active                bool   `json:"active"`
+	CanInitialize         bool   `json:"can_initialize"`
+	CanReinitialize       bool   `json:"can_reinitialize"`
+	CanResume             bool   `json:"can_resume"`
+	CanCancel             bool   `json:"can_cancel"`
+	PlannedImageSizeBytes int64  `json:"planned_image_size_bytes,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
 }
 
 // Status 是设备登记册和当前可初始化整盘的一致性视图。
@@ -62,9 +66,13 @@ type Status struct {
 
 // InitializeRequest 要求序列号和擦除确认同时匹配，避免误点直接清盘。
 type InitializeRequest struct {
-	StablePath    string `json:"stable_path"`
-	ConfirmSerial string `json:"confirm_serial"`
-	ConfirmErase  bool   `json:"confirm_erase"`
+	StablePath             string `json:"stable_path"`
+	ConfirmSerial          string `json:"confirm_serial"`
+	ConfirmErase           bool   `json:"confirm_erase"`
+	ConfirmOTGDisconnected bool   `json:"confirm_otg_disconnected"`
+	Reinitialize           bool   `json:"reinitialize"`
+	MusicEnabled           bool   `json:"music_enabled"`
+	TeslaCamPercent        int    `json:"teslacam_percent"`
 }
 
 // CancelRequest 用序列号确认放弃未完成初始化并恢复原活动设备。
@@ -77,6 +85,7 @@ type CancelRequest struct {
 type Controller interface {
 	Snapshot() service.Snapshot
 	TriggerRefresh()
+	BeginStorageMaintenance(context.Context) (func(), error)
 }
 
 // DeviceLister 只列出有稳定 by-id 路径的 USB 整盘。
@@ -161,12 +170,11 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	if !request.ConfirmErase {
 		return Candidate{}, &InputError{Message: "必须明确确认将擦除目标存储设备"}
 	}
+	if !request.ConfirmOTGDisconnected {
+		return Candidate{}, &InputError{Message: "必须先物理拔掉车机或电脑 OTG 线"}
+	}
 	if !strings.HasPrefix(request.StablePath, "/dev/disk/by-id/usb-") || strings.Contains(request.StablePath, "-part") {
 		return Candidate{}, &InputError{Message: "目标必须是 USB 整盘稳定路径"}
-	}
-	state := m.controller.Snapshot()
-	if state.GadgetStatus.Bound || state.DataDrive != nil {
-		return Candidate{}, ErrUnsafeState
 	}
 	status, err := m.Status(ctx)
 	if err != nil {
@@ -179,12 +187,31 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	if candidate.Serial == "" || candidate.Serial != request.ConfirmSerial {
 		return Candidate{}, &InputError{Message: "输入的设备序列号不匹配"}
 	}
-	if candidate.Active || candidate.Initialized && !candidate.CanResume {
+	if candidate.Initialized && !request.Reinitialize && !candidate.CanResume {
 		return Candidate{}, &InputError{Message: "目标设备已经完成初始化"}
 	}
-	if !candidate.CanInitialize && !candidate.CanResume {
+	if request.Reinitialize && !candidate.CanReinitialize {
+		return Candidate{}, &InputError{Message: "当前设备无法安全重新初始化，请先停止使用并重新扫描"}
+	}
+	if !request.Reinitialize && !candidate.CanInitialize && !candidate.CanResume {
 		return Candidate{}, &InputError{Message: candidate.Reason}
 	}
+	imageSize, err := chooseImageSize(candidate.SizeBytes)
+	if err != nil {
+		return Candidate{}, err
+	}
+	teslaCamPercent := request.TeslaCamPercent
+	if teslaCamPercent == 0 {
+		teslaCamPercent = defaultTeslaCamPercent
+	}
+	if _, err := imageinit.PlanLayout(imageSize, request.MusicEnabled, teslaCamPercent); err != nil {
+		return Candidate{}, &InputError{Message: err.Error()}
+	}
+	endMaintenance, err := m.controller.BeginStorageMaintenance(ctx)
+	if err != nil {
+		return Candidate{}, errors.Join(ErrUnsafeState, err)
+	}
+	defer endMaintenance()
 
 	record := storage.DeviceRecord{
 		StablePath: candidate.StablePath, Serial: candidate.Serial, Model: candidate.Model,
@@ -240,13 +267,11 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 			return Candidate{}, err
 		}
 	} else {
-		imageSize, err := chooseImageSize(candidate.SizeBytes)
-		if err != nil {
-			return Candidate{}, err
-		}
 		_, err = m.imageInit.Run(ctx, imageinit.Options{
 			DataRoot: m.config.DataRoot, ImagePath: m.config.ImagePath,
-			SizeBytes: imageSize, Label: m.config.ImageLabel, Execute: true,
+			SizeBytes: imageSize, Label: m.config.ImageLabel,
+			MusicEnabled: request.MusicEnabled, TeslaCamPercent: teslaCamPercent, MusicLabel: "MUSIC",
+			Execute: true,
 		})
 		if err != nil {
 			return Candidate{}, fmt.Errorf("创建 TeslaCam 虚拟磁盘: %w", err)
@@ -263,9 +288,11 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	result.Initialized = true
 	result.Active = true
 	result.CanInitialize = false
+	result.CanReinitialize = true
 	result.CanResume = false
 	result.State = "ready"
-	result.Reason = "初始化完成，TeslaUSB 状态机正在接管"
+	result.PlannedImageSizeBytes = imageSize
+	result.Reason = "初始化完成；请保持 OTG 已插入并执行温重启恢复"
 	return result, nil
 }
 
@@ -404,9 +431,13 @@ func (m *Manager) verifyExistingImage(ctx context.Context) (resultErr error) {
 }
 
 func chooseImageSize(deviceSize int64) (int64, error) {
-	available := deviceSize - reservedBytes
-	if available > maximumImageSize {
-		available = maximumImageSize
+	reserve := deviceSize / reservedCapacityDivisor
+	if reserve < minimumReservedBytes {
+		reserve = minimumReservedBytes
+	}
+	available := deviceSize - reserve
+	if available > maximumMBRImageSize {
+		available = maximumMBRImageSize
 	}
 	available = available / 1_000_000_000 * 1_000_000_000
 	if available < minimumDeviceSize {
@@ -419,6 +450,9 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 	candidate := Candidate{
 		StablePath: device.RequestedPath, DevicePath: device.ResolvedPath, Model: device.Model,
 		Serial: device.Serial, SizeBytes: device.Size, Transport: device.Transport, State: "uninitialized",
+	}
+	if planned, err := chooseImageSize(device.Size); err == nil {
+		candidate.PlannedImageSizeBytes = planned
 	}
 	record, registered := matchingRecord(device, records)
 	if registered {
@@ -435,6 +469,7 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 		}
 		candidate.State = "ready"
 		candidate.Reason = "设备已完成 TeslaBox 初始化"
+		candidate.CanReinitialize = safeForManagedReinitialize(device, dataRoot, dataLabel)
 		return candidate
 	}
 	if device.Transport != "usb" {
@@ -447,7 +482,7 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 		candidate.Reason = "设备没有稳定序列号，无法防止误认盘"
 		return candidate
 	}
-	if device.Size < minimumDeviceSize+reservedBytes {
+	if device.Size < minimumDeviceSize+minimumReservedBytes {
 		candidate.State = "unsupported"
 		candidate.Reason = "设备容量不足 52GB，无法同时保留录像镜像和快照空间"
 		return candidate
@@ -460,6 +495,25 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 	candidate.CanInitialize = true
 	candidate.Reason = "尚未初始化；继续操作会擦除整块设备"
 	return candidate
+}
+
+func safeForManagedReinitialize(device driveinit.Device, dataRoot, dataLabel string) bool {
+	if device.MountPoint != "" || strings.EqualFold(device.FileSystem, "swap") {
+		return false
+	}
+	for _, child := range device.Children {
+		if strings.EqualFold(child.FileSystem, "swap") {
+			return false
+		}
+		if child.MountPoint == "" {
+			continue
+		}
+		if !strings.EqualFold(child.FileSystem, "xfs") || !strings.EqualFold(child.Label, dataLabel) ||
+			filepath.Clean(child.MountPoint) != filepath.Clean(dataRoot) {
+			return false
+		}
+	}
+	return true
 }
 
 func matchingRecord(device driveinit.Device, records []storage.DeviceRecord) (storage.DeviceRecord, bool) {

@@ -25,6 +25,8 @@ const (
 	defaultUpdateDir       = "/var/lib/teslabox-system/updates"
 	defaultUpdateRequest   = "/var/lib/teslabox-system/update-request.json"
 	defaultUpdateResult    = "/var/lib/teslabox-system/update-result.json"
+	defaultGadgetPausePath = "/var/lib/teslabox-system/gadget-paused"
+	defaultBootIDPath      = "/proc/sys/kernel/random/boot_id"
 	defaultConfigFSPath    = "/sys/kernel/config/usb_gadget"
 	defaultUDCPath         = "/sys/class/udc"
 	defaultGadgetName      = "teslabox"
@@ -48,50 +50,52 @@ const (
 
 // Config 集中保存运行参数，避免系统路径和策略散落在业务代码中。
 type Config struct {
-	HTTPAddr          string
-	DataUUID          string
-	DataLabel         string
-	DataMountPath     string
-	ImagePath         string
-	SnapshotPath      string
-	SnapshotMountPath string
-	IndexPath         string
-	StatePath         string
-	ExportPath        string
-	RegistryPath      string
-	WebAuthStatePath  string
-	UpdateManifestURL string
-	UpdatePublicKey   string
-	UpdateChannel     string
-	UpdateBoard       string
-	UpdateDownloadDir string
-	UpdateRequestPath string
-	UpdateResultPath  string
-	UpdateMaxBytes    int64
-	ConfigFSPath      string
-	UDCPath           string
-	UDCName           string
-	GadgetName        string
-	GadgetSerial      string
-	ReleaseGadget     string
-	WiFiInterface     string
-	APInterface       string
-	ScanInterval      time.Duration
-	PollInterval      time.Duration
-	OperationTimeout  time.Duration
-	SnapshotTimeout   time.Duration
-	SnapshotRetryMax  time.Duration
-	MediaProbeTimeout time.Duration
-	ExportMaxDuration time.Duration
-	ExportQueueSize   int
-	ShutdownTimeout   time.Duration
-	MinFreeBytes      uint64
-	MinFreePercent    uint64
-	WebPasswordSHA256 string
-	WebSessionSecret  string
-	WebSessionTTL     time.Duration
-	FFmpegPath        string
-	FFprobePath       string
+	HTTPAddr             string
+	DataUUID             string
+	DataLabel            string
+	DataMountPath        string
+	ImagePath            string
+	SnapshotPath         string
+	SnapshotMountPath    string
+	IndexPath            string
+	StatePath            string
+	ExportPath           string
+	RegistryPath         string
+	WebAuthStatePath     string
+	UpdateManifestURL    string
+	UpdatePublicKey      string
+	UpdateChannel        string
+	UpdateBoard          string
+	UpdateDownloadDir    string
+	UpdateRequestPath    string
+	UpdateResultPath     string
+	UpdateMaxBytes       int64
+	GadgetPauseStatePath string
+	BootIDPath           string
+	ConfigFSPath         string
+	UDCPath              string
+	UDCName              string
+	GadgetName           string
+	GadgetSerial         string
+	ReleaseGadget        string
+	WiFiInterface        string
+	APInterface          string
+	ScanInterval         time.Duration
+	PollInterval         time.Duration
+	OperationTimeout     time.Duration
+	SnapshotTimeout      time.Duration
+	SnapshotRetryMax     time.Duration
+	MediaProbeTimeout    time.Duration
+	ExportMaxDuration    time.Duration
+	ExportQueueSize      int
+	ShutdownTimeout      time.Duration
+	MinFreeBytes         uint64
+	MinFreePercent       uint64
+	WebPasswordSHA256    string
+	WebSessionSecret     string
+	WebSessionTTL        time.Duration
+	FFmpegPath           string
+	FFprobePath          string
 }
 
 // Load 从环境变量加载并校验配置，保证错误在启动阶段暴露。
@@ -146,50 +150,52 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		HTTPAddr:          envString("TESLABOX_HTTP_ADDR", defaultHTTPAddr),
-		DataUUID:          strings.TrimSpace(os.Getenv("TESLABOX_DATA_UUID")),
-		DataLabel:         envString("TESLABOX_DATA_LABEL", defaultDataLabel),
-		DataMountPath:     envString("TESLABOX_DATA_MOUNT_PATH", defaultDataMountPath),
-		ImagePath:         envString("TESLABOX_IMAGE_PATH", defaultImagePath),
-		SnapshotPath:      envString("TESLABOX_SNAPSHOT_PATH", defaultSnapshotPath),
-		SnapshotMountPath: envString("TESLABOX_SNAPSHOT_MOUNT_PATH", defaultSnapshotMount),
-		IndexPath:         envString("TESLABOX_INDEX_PATH", defaultIndexPath),
-		StatePath:         envString("TESLABOX_STATE_PATH", defaultStatePath),
-		ExportPath:        envString("TESLABOX_EXPORT_PATH", defaultExportPath),
-		RegistryPath:      envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
-		WebAuthStatePath:  envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
-		UpdateManifestURL: strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_MANIFEST_URL")),
-		UpdatePublicKey:   strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_PUBLIC_KEY")),
-		UpdateChannel:     envString("TESLABOX_UPDATE_CHANNEL", "stable"),
-		UpdateBoard:       envString("TESLABOX_UPDATE_BOARD", "radxa-rock-3a"),
-		UpdateDownloadDir: defaultUpdateDir,
-		UpdateRequestPath: defaultUpdateRequest,
-		UpdateResultPath:  defaultUpdateResult,
-		UpdateMaxBytes:    defaultUpdateMaxBytes,
-		ConfigFSPath:      envString("TESLABOX_CONFIGFS_PATH", defaultConfigFSPath),
-		UDCPath:           envString("TESLABOX_UDC_PATH", defaultUDCPath),
-		UDCName:           strings.TrimSpace(os.Getenv("TESLABOX_UDC_NAME")),
-		GadgetName:        envString("TESLABOX_GADGET_NAME", defaultGadgetName),
-		GadgetSerial:      envString("TESLABOX_GADGET_SERIAL", defaultGadgetSerial),
-		ReleaseGadget:     envString("TESLABOX_RELEASE_GADGET", defaultReleaseGadget),
-		WiFiInterface:     strings.TrimSpace(os.Getenv("TESLABOX_WIFI_INTERFACE")),
-		APInterface:       envString("TESLABOX_AP_INTERFACE", defaultAPInterface),
-		ScanInterval:      scanInterval,
-		PollInterval:      pollInterval,
-		OperationTimeout:  operationTimeout,
-		SnapshotTimeout:   snapshotTimeout,
-		SnapshotRetryMax:  snapshotRetryMax,
-		MediaProbeTimeout: mediaProbeTimeout,
-		ExportMaxDuration: exportMaxDuration,
-		ExportQueueSize:   exportQueueSize,
-		ShutdownTimeout:   shutdownTimeout,
-		MinFreeBytes:      minFreeBytes,
-		MinFreePercent:    minFreePercent,
-		WebPasswordSHA256: strings.ToLower(strings.TrimSpace(os.Getenv("TESLABOX_WEB_PASSWORD_SHA256"))),
-		WebSessionSecret:  strings.ToLower(strings.TrimSpace(os.Getenv("TESLABOX_WEB_SESSION_SECRET"))),
-		WebSessionTTL:     webSessionTTL,
-		FFmpegPath:        envString("TESLABOX_FFMPEG_PATH", "/opt/teslabox/media/bin/ffmpeg"),
-		FFprobePath:       envString("TESLABOX_FFPROBE_PATH", "/opt/teslabox/media/bin/ffprobe"),
+		HTTPAddr:             envString("TESLABOX_HTTP_ADDR", defaultHTTPAddr),
+		DataUUID:             strings.TrimSpace(os.Getenv("TESLABOX_DATA_UUID")),
+		DataLabel:            envString("TESLABOX_DATA_LABEL", defaultDataLabel),
+		DataMountPath:        envString("TESLABOX_DATA_MOUNT_PATH", defaultDataMountPath),
+		ImagePath:            envString("TESLABOX_IMAGE_PATH", defaultImagePath),
+		SnapshotPath:         envString("TESLABOX_SNAPSHOT_PATH", defaultSnapshotPath),
+		SnapshotMountPath:    envString("TESLABOX_SNAPSHOT_MOUNT_PATH", defaultSnapshotMount),
+		IndexPath:            envString("TESLABOX_INDEX_PATH", defaultIndexPath),
+		StatePath:            envString("TESLABOX_STATE_PATH", defaultStatePath),
+		ExportPath:           envString("TESLABOX_EXPORT_PATH", defaultExportPath),
+		RegistryPath:         envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
+		WebAuthStatePath:     envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
+		UpdateManifestURL:    strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_MANIFEST_URL")),
+		UpdatePublicKey:      strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_PUBLIC_KEY")),
+		UpdateChannel:        envString("TESLABOX_UPDATE_CHANNEL", "stable"),
+		UpdateBoard:          envString("TESLABOX_UPDATE_BOARD", "radxa-rock-3a"),
+		UpdateDownloadDir:    defaultUpdateDir,
+		UpdateRequestPath:    defaultUpdateRequest,
+		UpdateResultPath:     defaultUpdateResult,
+		UpdateMaxBytes:       defaultUpdateMaxBytes,
+		GadgetPauseStatePath: envString("TESLABOX_GADGET_PAUSE_STATE", defaultGadgetPausePath),
+		BootIDPath:           envString("TESLABOX_BOOT_ID_PATH", defaultBootIDPath),
+		ConfigFSPath:         envString("TESLABOX_CONFIGFS_PATH", defaultConfigFSPath),
+		UDCPath:              envString("TESLABOX_UDC_PATH", defaultUDCPath),
+		UDCName:              strings.TrimSpace(os.Getenv("TESLABOX_UDC_NAME")),
+		GadgetName:           envString("TESLABOX_GADGET_NAME", defaultGadgetName),
+		GadgetSerial:         envString("TESLABOX_GADGET_SERIAL", defaultGadgetSerial),
+		ReleaseGadget:        envString("TESLABOX_RELEASE_GADGET", defaultReleaseGadget),
+		WiFiInterface:        strings.TrimSpace(os.Getenv("TESLABOX_WIFI_INTERFACE")),
+		APInterface:          envString("TESLABOX_AP_INTERFACE", defaultAPInterface),
+		ScanInterval:         scanInterval,
+		PollInterval:         pollInterval,
+		OperationTimeout:     operationTimeout,
+		SnapshotTimeout:      snapshotTimeout,
+		SnapshotRetryMax:     snapshotRetryMax,
+		MediaProbeTimeout:    mediaProbeTimeout,
+		ExportMaxDuration:    exportMaxDuration,
+		ExportQueueSize:      exportQueueSize,
+		ShutdownTimeout:      shutdownTimeout,
+		MinFreeBytes:         minFreeBytes,
+		MinFreePercent:       minFreePercent,
+		WebPasswordSHA256:    strings.ToLower(strings.TrimSpace(os.Getenv("TESLABOX_WEB_PASSWORD_SHA256"))),
+		WebSessionSecret:     strings.ToLower(strings.TrimSpace(os.Getenv("TESLABOX_WEB_SESSION_SECRET"))),
+		WebSessionTTL:        webSessionTTL,
+		FFmpegPath:           envString("TESLABOX_FFMPEG_PATH", "/opt/teslabox/media/bin/ffmpeg"),
+		FFprobePath:          envString("TESLABOX_FFPROBE_PATH", "/opt/teslabox/media/bin/ffprobe"),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -245,6 +251,8 @@ func (c Config) Validate() error {
 		"TESLABOX_UPDATE_DOWNLOAD_DIR": c.UpdateDownloadDir,
 		"TESLABOX_UPDATE_REQUEST_PATH": c.UpdateRequestPath,
 		"TESLABOX_UPDATE_RESULT_PATH":  c.UpdateResultPath,
+		"TESLABOX_GADGET_PAUSE_STATE":  c.GadgetPauseStatePath,
+		"TESLABOX_BOOT_ID_PATH":        c.BootIDPath,
 	} {
 		if !isSafeAbsolutePath(value) {
 			return fmt.Errorf("%s 必须是非根目录的绝对路径", name)

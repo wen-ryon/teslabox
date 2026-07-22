@@ -36,9 +36,9 @@ func TestStorageAdminRoutes(t *testing.T) {
 	}
 
 	initialize := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/storage/initialize", strings.NewReader(`{"stable_path":"/dev/disk/by-id/usb-test","confirm_serial":"SERIAL","confirm_erase":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/storage/initialize", strings.NewReader(`{"stable_path":"/dev/disk/by-id/usb-test","confirm_serial":"SERIAL","confirm_erase":true,"confirm_otg_disconnected":true,"reinitialize":true,"music_enabled":true,"teslacam_percent":80}`))
 	handler.ServeHTTP(initialize, request)
-	if initialize.Code != http.StatusOK || admin.request.ConfirmSerial != "SERIAL" || !admin.request.ConfirmErase {
+	if initialize.Code != http.StatusOK || admin.request.ConfirmSerial != "SERIAL" || !admin.request.ConfirmErase || !admin.request.ConfirmOTGDisconnected || !admin.request.Reinitialize || !admin.request.MusicEnabled || admin.request.TeslaCamPercent != 80 {
 		t.Fatalf("status = %d, request = %#v", initialize.Code, admin.request)
 	}
 }

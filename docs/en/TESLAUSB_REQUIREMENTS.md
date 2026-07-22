@@ -61,6 +61,8 @@ Rules:
 - Data-drive initialization may repartition or format the drive and therefore requires an explicit user action. Service startup must never do this automatically.
 - Existing recordings must be backed up before initialization.
 - The virtual disk must leave capacity for copy-on-write snapshots and runtime state.
+- The settings workflow should use as much physical capacity as practical while reserving at least 5% and no less than 20 GB; the MBR-backed image is capped at 2 TB.
+- Initialization may create either one exFAT TeslaCam partition or an exFAT TeslaCam partition plus a FAT32 MUSIC partition with a user-selected capacity ratio.
 - Linux must never mount the writable image while it is exposed to the vehicle.
 - Media indexes, snapshots, and high-write runtime state belong on the external data drive to reduce microSD writes.
 - Stable identifiers must locate the data drive, images, snapshots, and mount points; `/dev/sdX` names are not stable identifiers.
@@ -73,11 +75,12 @@ TeslaBox manages USB Mass Storage Gadget through configfs:
 
 - Validate UDC, configfs, and the mass-storage function before startup.
 - Point the LUN at `teslacam.img`, never at a filesystem mounted by Linux.
-- Bind and unbind operations must be idempotent and recover after service restart.
+- Bind and unbind operations must be idempotent. A service restart within the same system boot may inspect or stop an existing Gadget but must not bind the UDC again.
 - Debian must still boot without the data drive, enter `WAITING_FOR_DATA_DRIVE`, and expose no empty LUN without blocking startup indefinitely.
-- When an initialized data drive with the configured stable identity is inserted after boot, the system must mount it, revalidate the backing image, and start Gadget automatically without a reboot or manual systemctl command. This path must never format an unknown or uninitialized drive.
+- When an initialized data drive with the configured stable identity is inserted after boot, the system must mount it and revalidate the backing image. If the safe binding window for that boot has ended, Gadget remains unbound until the user reconnects OTG and requests a warm reboot recovery; a fully powered-off boot with OTG pre-connected remains the fallback. This path must never format an unknown or uninitialized drive.
 - Do not expose a LUN when the backing image is unavailable or the data drive has failed.
 - If the active data drive disconnects while Gadget is running, enter a fault state, make a best effort to unbind the UDC, stop providing the LUN, and emit an explicit alert. After the drive returns, repeat identity, mount, and image validation instead of reusing stale state.
+- Allow at most one UDC binding attempt per ROCK 3A `boot_id`, during the initial service convergence. If the host does not complete enumeration within the bounded wait, unbind immediately and prohibit retries from polling, udev, service restarts, or UI actions during that boot.
 
 ## Consistent Snapshots and Online Viewing
 
@@ -137,14 +140,18 @@ any state ── severe storage fault ──> FAULT
 
 State changes must be visible in logs and APIs. Service exits, restarts, repeated udev events, and unexpected power loss must converge without reformatting, duplicate Gadgets, or writable mounts left behind.
 
-Data-drive hotplug must drive state convergence: remain in `WAITING_FOR_DATA_DRIVE` after a diskless boot, enter `GADGET_ACTIVE` after a matching drive is inserted and validated, and enter `FAULT` while stopping LUN exposure if the active drive disconnects.
+Data-drive hotplug must drive state convergence: remain in `WAITING_FOR_DATA_DRIVE` after a diskless boot, mount and validate a matching drive when it appears, but enter `GADGET_ACTIVE` only during a new cold-boot binding window. If the active drive disconnects, enter `FAULT` and stop LUN exposure.
 
 ## Safety Boundaries
 
 - Never let Tesla and Linux mount the same writable filesystem concurrently.
 - Never format, repartition, or delete recordings implicitly at service startup.
 - A destructive initializer must show the stable drive identifier, size, and model and run as a separate explicit operation.
-- Do not expose delete, format, or forced Gadget disconnect APIs in the first stage.
+- Do not expose arbitrary device paths, silent formatting, or recording deletion APIs.
+- Some ROCK 3A 5.10 kernels retain UDC `configured` and `high-speed` after the OTG cable is physically removed. These values therefore mean that enumeration completed most recently; they do not prove a current physical connection.
+- If UDC still reports `configured` while `/sys/class/udc/<UDC>/device/gadget/suspended` is `1`, the UI must report that the cable may be disconnected and explain that a normally suspended host cannot be distinguished losslessly from physical removal on this kernel. It must not present the link as active or rebind automatically merely to probe it, because that would interrupt vehicle writes.
+- Before an update, the authenticated same-origin UI may unbind only the TeslaBox-owned Gadget after the user explicitly confirms that the physical OTG cable is already removed. Persist the pause on the system disk across service restarts and updates. After inserting OTG, the user may only schedule recovery for the next cold boot; the current process must remain unbound. The API must not accept an arbitrary Gadget name, bypass confirmation, or automatically rebind after an update failure.
+- `/sys/class/extcon/extcon0/state` is not a trustworthy device-mode OTG cable signal on the tested board because it may still report `USB=1` after OTG removal. It must not authorize a bind.
 - Report low space, read-only media, I/O errors, and disconnects explicitly.
 
 ## First-Stage Acceptance Criteria
@@ -154,9 +161,9 @@ Data-drive hotplug must drive state convergence: remain in `WAITING_FOR_DATA_DRI
 3. ROCK 3A exposes stable USB Mass Storage to a test host or Tesla through OTG.
 4. TeslaBox creates and read-only mounts a snapshot while the host writes the virtual disk.
 5. The API or web interface plays a completed MP4 from a snapshot while Gadget remains connected and writable.
-6. Service restart restores Gadget, snapshot, and index state.
+6. Service restart restores snapshot and index state without rebinding Gadget during the same `boot_id`.
 7. Drive disconnect, low space, or snapshot failure never triggers automatic formatting or silent data loss.
-8. A diskless boot does not block Debian; inserting the initialized data drive after boot automatically mounts it and restores Gadget without a reboot or manual service start.
+8. A diskless boot does not block Debian; inserting the initialized data drive after boot mounts and validates it, while Gadget recovery requires a cold boot with OTG already connected.
 9. Removing the active data drive is detected, stops LUN exposure, and reports the fault through logs and APIs.
 
 ## Out of Scope for the First Stage

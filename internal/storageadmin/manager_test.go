@@ -2,6 +2,7 @@ package storageadmin
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,10 +33,14 @@ func (f *fakeDriveInitializer) Run(_ context.Context, _ driveinit.Options) (driv
 	return driveinit.Result{Partition: "/dev/sda1", WasExecuted: true}, nil
 }
 
-type fakeImageInitializer struct{ calls int }
+type fakeImageInitializer struct {
+	calls   int
+	options imageinit.Options
+}
 
 func (f *fakeImageInitializer) Run(_ context.Context, options imageinit.Options) (imageinit.Result, error) {
 	f.calls++
+	f.options = options
 	if err := os.WriteFile(options.ImagePath, []byte("image"), 0o640); err != nil {
 		return imageinit.Result{}, err
 	}
@@ -43,12 +48,21 @@ func (f *fakeImageInitializer) Run(_ context.Context, options imageinit.Options)
 }
 
 type fakeController struct {
-	state     service.Snapshot
-	triggered bool
+	state            service.Snapshot
+	triggered        bool
+	maintenanceErr   error
+	maintenanceCalls int
 }
 
 func (f *fakeController) Snapshot() service.Snapshot { return f.state }
 func (f *fakeController) TriggerRefresh()            { f.triggered = true }
+func (f *fakeController) BeginStorageMaintenance(context.Context) (func(), error) {
+	f.maintenanceCalls++
+	if f.maintenanceErr != nil {
+		return nil, f.maintenanceErr
+	}
+	return func() {}, nil
+}
 
 type fakeRunner struct{}
 
@@ -77,7 +91,7 @@ func TestManagerInitializeRegistersOnlyAfterCompleteLayout(t *testing.T) {
 	}, fakeRunner{}, registry, fakeLister{devices: []driveinit.Device{device}}, driveInitializer, imageInitializer, controller)
 
 	result, err := manager.Initialize(t.Context(), InitializeRequest{
-		StablePath: device.RequestedPath, ConfirmSerial: device.Serial, ConfirmErase: true,
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial, ConfirmErase: true, ConfirmOTGDisconnected: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,15 +115,63 @@ func TestManagerInitializeRejectsActiveGadgetBeforeDiskCommands(t *testing.T) {
 	t.Parallel()
 	registry := storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json"))
 	driveInitializer := &fakeDriveInitializer{root: t.TempDir()}
-	manager := New(Config{}, fakeRunner{}, registry, fakeLister{}, driveInitializer, &fakeImageInitializer{}, &fakeController{
-		state: service.Snapshot{GadgetStatus: gadgetBoundStatus()},
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-test", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Model: "USB SSD", Serial: "SERIAL", Size: 128_000_000_000,
+	}
+	manager := New(Config{}, fakeRunner{}, registry, fakeLister{devices: []driveinit.Device{device}}, driveInitializer, &fakeImageInitializer{}, &fakeController{
+		state:          service.Snapshot{GadgetStatus: gadgetBoundStatus()},
+		maintenanceErr: errors.New("录像仍在使用数据盘"),
 	})
-	_, err := manager.Initialize(t.Context(), InitializeRequest{StablePath: "/dev/disk/by-id/usb-test", ConfirmSerial: "SERIAL", ConfirmErase: true})
+	_, err := manager.Initialize(t.Context(), InitializeRequest{StablePath: "/dev/disk/by-id/usb-test", ConfirmSerial: "SERIAL", ConfirmErase: true, ConfirmOTGDisconnected: true})
 	if err == nil {
 		t.Fatal("Initialize() error = nil")
 	}
 	if driveInitializer.calls != 0 {
 		t.Fatalf("drive initializer calls = %d", driveInitializer.calls)
+	}
+}
+
+func TestManagerInitializeUsesFullCapacityAndMusicLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	registry := storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json"))
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-500g", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Model: "USB SSD", Serial: "SERIAL-500", Size: 500_000_000_000,
+	}
+	imageInitializer := &fakeImageInitializer{}
+	manager := New(Config{
+		DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+		DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+	}, fakeRunner{}, registry, fakeLister{devices: []driveinit.Device{device}}, &fakeDriveInitializer{root: root}, imageInitializer, &fakeController{})
+
+	result, err := manager.Initialize(t.Context(), InitializeRequest{
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial, ConfirmErase: true,
+		ConfirmOTGDisconnected: true, MusicEnabled: true, TeslaCamPercent: 80,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PlannedImageSizeBytes != 475_000_000_000 {
+		t.Fatalf("planned image size = %d", result.PlannedImageSizeBytes)
+	}
+	if imageInitializer.options.SizeBytes != 475_000_000_000 || !imageInitializer.options.MusicEnabled || imageInitializer.options.TeslaCamPercent != 80 || imageInitializer.options.MusicLabel != "MUSIC" {
+		t.Fatalf("image options = %#v", imageInitializer.options)
+	}
+}
+
+func TestClassifyReadyManagedDeviceAllowsReinitialize(t *testing.T) {
+	t.Parallel()
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-ready", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Model: "USB SSD", Serial: "SERIAL-READY", Size: 500_000_000_000,
+		Children: []driveinit.Device{{ResolvedPath: "/dev/sda1", FileSystem: "xfs", UUID: "ready-uuid", Label: "TESLABOX", MountPoint: "/var/lib/teslabox"}},
+	}
+	record := storage.DeviceRecord{StablePath: device.RequestedPath, Serial: device.Serial, SizeBytes: device.Size, UUID: "ready-uuid", Status: "ready"}
+	candidate := classify(device, []storage.DeviceRecord{record}, record, true, "/var/lib/teslabox", "TESLABOX")
+	if !candidate.Initialized || !candidate.Active || !candidate.CanReinitialize || candidate.PlannedImageSizeBytes != 475_000_000_000 {
+		t.Fatalf("candidate = %#v", candidate)
 	}
 }
 
@@ -157,7 +219,8 @@ func TestChooseImageSize(t *testing.T) {
 		want       int64
 		wantErr    bool
 	}{
-		{name: "128 GB cap", deviceSize: 128_000_000_000, want: 96_000_000_000},
+		{name: "128 GB uses remaining capacity", deviceSize: 128_000_000_000, want: 108_000_000_000},
+		{name: "500 GB keeps five percent reserve", deviceSize: 500_000_000_000, want: 475_000_000_000},
 		{name: "64 GB reserve", deviceSize: 64_000_000_000, want: 44_000_000_000},
 		{name: "too small", deviceSize: 40_000_000_000, wantErr: true},
 	}

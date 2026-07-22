@@ -1,0 +1,1139 @@
+// Package mediaassets 管理写入 Tesla 虚拟盘的非录像媒体文件。
+package mediaassets
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image"
+	_ "image/png"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/wen-ryon/teslabox/internal/system"
+)
+
+const (
+	maximumWrapBytes      int64 = 1 * 1024 * 1024
+	maximumBoomboxBytes   int64 = 16 * 1024 * 1024
+	maximumLightShowBytes int64 = 64 * 1024 * 1024
+	maximumMusicBytes     int64 = 256 * 1024 * 1024
+	maximumMusicBatch     int64 = 512 * 1024 * 1024
+	maximumWrapCount            = 10
+	maximumBoomboxCount         = 5
+)
+
+var (
+	assetIDPattern        = regexp.MustCompile(`^[a-f0-9]{32}$`)
+	loopDevicePattern     = regexp.MustCompile(`^/dev/loop[0-9]+$`)
+	ErrPreviewUnavailable = errors.New("当前媒体没有可用预览")
+)
+
+// Category 是媒体在 Tesla 虚拟盘内的固定目录类型。
+type Category string
+
+const (
+	CategoryBoombox   Category = "boombox"
+	CategoryWrap      Category = "wrap"
+	CategoryLightShow Category = "lightshow"
+	CategoryMusic     Category = "music"
+)
+
+// Config 固定原始虚拟盘、状态目录和临时挂载点，避免把用户输入解释为文件系统路径。
+type Config struct {
+	ImagePath   string
+	StatePath   string
+	StagingPath string
+	MountPath   string
+}
+
+// Maintenance 在写入虚拟盘前独占 Gadget 和录像快照，避免 Linux 与车机同时写入同一文件系统。
+type Maintenance interface {
+	BeginMediaMaintenance(context.Context) (func(), error)
+}
+
+// UploadFile 仅在一次 HTTP 上传处理期间持有输入流，调用方不得在 Upload 返回后继续使用它。
+type UploadFile struct {
+	Role     string
+	FileName string
+	Content  io.Reader
+}
+
+// File 描述一个将被放入 Tesla 目录的文件，不泄露服务器真实路径。
+type File struct {
+	Name      string `json:"name"`
+	SizeBytes int64  `json:"size_bytes"`
+	Staged    string `json:"staged,omitempty"`
+}
+
+// Asset 描述一条媒体中心管理的资源及其待应用状态。
+type Asset struct {
+	ID               string    `json:"id"`
+	Category         Category  `json:"category"`
+	Name             string    `json:"name"`
+	Files            []File    `json:"files"`
+	CreatedAt        time.Time `json:"created_at"`
+	Applied          bool      `json:"applied"`
+	Pending          bool      `json:"pending"`
+	PendingDelete    bool      `json:"pending_delete"`
+	PreviewAvailable bool      `json:"preview_available"`
+}
+
+// Status 是媒体中心可安全展示的资源清单。
+type Status struct {
+	Available      bool    `json:"available"`
+	ImageAvailable bool    `json:"image_available"`
+	NeedsApply     bool    `json:"needs_apply"`
+	Assets         []Asset `json:"assets"`
+	Message        string  `json:"message,omitempty"`
+}
+
+type manifest struct {
+	Version int     `json:"version"`
+	Assets  []Asset `json:"assets"`
+}
+
+// Manager 将上传先落到数据盘的受控暂存区，只有用户确认 OTG 已物理断开后才写回虚拟盘。
+type Manager struct {
+	cfg         Config
+	runner      system.Runner
+	maintenance Maintenance
+	now         func() time.Time
+	mu          sync.Mutex
+}
+
+type uploadSession struct {
+	manager  *Manager
+	ctx      context.Context
+	category Category
+	existing []Asset
+	created  []Asset
+	light    *lightStaging
+	closed   bool
+}
+
+type lightStaging struct {
+	id        string
+	directory string
+	files     []File
+}
+
+// New 创建媒体资源管理器，并在启动阶段拒绝不安全的固定路径。
+func New(cfg Config, runner system.Runner, maintenance Maintenance) (*Manager, error) {
+	for name, value := range map[string]string{
+		"镜像路径": cfg.ImagePath, "状态目录": cfg.StatePath, "暂存目录": cfg.StagingPath, "挂载目录": cfg.MountPath,
+	} {
+		if !filepath.IsAbs(value) || filepath.Clean(value) == string(filepath.Separator) {
+			return nil, fmt.Errorf("%s必须是非根目录绝对路径", name)
+		}
+	}
+	if runner == nil || maintenance == nil {
+		return nil, errors.New("媒体资源管理器依赖不能为空")
+	}
+	return &Manager{cfg: cfg, runner: runner, maintenance: maintenance, now: time.Now}, nil
+}
+
+// Status 返回当前 TeslaBox 管理的媒体；原始镜像不存在时仍返回可解释的空状态。
+func (m *Manager) Status(_ context.Context) (Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	assets, err := m.loadAssets()
+	if err != nil {
+		return Status{}, err
+	}
+	status := Status{Available: true, ImageAvailable: regularFile(m.cfg.ImagePath), Assets: publicAssets(assets)}
+	for _, asset := range assets {
+		if asset.Pending || asset.PendingDelete {
+			status.NeedsApply = true
+			break
+		}
+	}
+	if !status.ImageAvailable {
+		status.Message = "TeslaCam 虚拟盘尚未初始化；可先选择外接存储完成初始化。"
+	}
+	return status, nil
+}
+
+// Upload 校验并暂存上传内容，上传完成后不会立刻触碰正在提供给车机的虚拟盘。
+func (m *Manager) Upload(ctx context.Context, category Category, files []UploadFile) ([]Asset, error) {
+	return m.UploadStream(ctx, category, func(add func(UploadFile) error) error {
+		for _, file := range files {
+			if err := add(file); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// UploadStream 允许 HTTP multipart 处理器边读取边写入数据盘暂存区，避免把大文件落到 TF 系统盘或一次性读入内存。
+func (m *Manager) UploadStream(ctx context.Context, category Category, consume func(func(UploadFile) error) error) ([]Asset, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validCategory(category) || consume == nil {
+		return nil, errors.New("不支持的媒体分类或上传流为空")
+	}
+	existing, err := m.loadAssets()
+	if err != nil {
+		return nil, err
+	}
+	if err := m.ensureStagingRoot(); err != nil {
+		return nil, err
+	}
+	session := &uploadSession{manager: m, ctx: ctx, category: category, existing: existing}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			session.cleanup()
+		}
+	}()
+	if err := consume(session.add); err != nil {
+		return nil, err
+	}
+	created, err := session.complete()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateNewAssets(category, created, existing); err != nil {
+		return nil, err
+	}
+	if err := m.saveAssets(append(existing, created...)); err != nil {
+		return nil, err
+	}
+	cleanup = false
+	return publicAssets(created), nil
+}
+
+func (s *uploadSession) add(file UploadFile) error {
+	if s.closed {
+		return errors.New("媒体上传会话已结束")
+	}
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	if s.category == CategoryLightShow {
+		return s.addLightShow(file)
+	}
+	limit := 20
+	if s.category == CategoryMusic {
+		limit = 50
+	}
+	if len(s.created) >= limit {
+		return fmt.Errorf("一次最多上传 %d 个文件", limit)
+	}
+	asset, err := s.manager.stageSingle(s.ctx, s.category, file)
+	if err != nil {
+		return err
+	}
+	if s.category == CategoryMusic && totalAssetBytes(s.created)+asset.Files[0].SizeBytes > maximumMusicBatch {
+		_ = os.RemoveAll(filepath.Join(s.manager.cfg.StagingPath, asset.ID))
+		return fmt.Errorf("一次上传音乐总大小不能超过 %s", humanBytes(maximumMusicBatch))
+	}
+	s.created = append(s.created, asset)
+	return nil
+}
+
+func (s *uploadSession) addLightShow(upload UploadFile) error {
+	if s.light != nil && len(s.light.files) >= 2 {
+		return errors.New("自定义灯光秀只能包含一个 .fseq 和一个音频文件")
+	}
+	name, err := normalizeName(CategoryLightShow, upload.FileName)
+	if err != nil {
+		return err
+	}
+	extension := strings.ToLower(filepath.Ext(name))
+	if extension != ".fseq" && extension != ".mp3" && extension != ".wav" {
+		return errors.New("自定义灯光秀仅支持 .fseq、.mp3 或 .wav")
+	}
+	if s.light == nil {
+		id, err := newAssetID()
+		if err != nil {
+			return err
+		}
+		directory := filepath.Join(s.manager.cfg.StagingPath, id)
+		if err := os.Mkdir(directory, 0o750); err != nil {
+			return fmt.Errorf("创建灯光秀暂存目录: %w", err)
+		}
+		s.light = &lightStaging{id: id, directory: directory}
+	}
+	for _, existing := range s.light.files {
+		if strings.EqualFold(filepath.Ext(existing.Name), extension) {
+			return errors.New("灯光秀不能重复上传同类文件")
+		}
+	}
+	staged := "sequence.fseq"
+	if extension != ".fseq" {
+		staged = "audio" + extension
+	}
+	size, err := copyUpload(s.ctx, filepath.Join(s.light.directory, staged), upload.Content, maximumLightShowBytes)
+	if err != nil {
+		return err
+	}
+	s.light.files = append(s.light.files, File{Name: name, SizeBytes: size, Staged: staged})
+	return nil
+}
+
+func (s *uploadSession) complete() ([]Asset, error) {
+	defer func() { s.closed = true }()
+	if s.category != CategoryLightShow {
+		if len(s.created) == 0 {
+			return nil, errors.New("请选择至少一个文件")
+		}
+		return s.created, nil
+	}
+	if s.light == nil || len(s.light.files) != 2 {
+		return nil, errors.New("自定义灯光秀必须同时上传一个 .fseq 文件和一个 .wav 或 .mp3 音频文件")
+	}
+	var sequence, audio File
+	for _, file := range s.light.files {
+		if strings.EqualFold(filepath.Ext(file.Name), ".fseq") {
+			sequence = file
+		} else {
+			audio = file
+		}
+	}
+	if sequence.Name == "" || audio.Name == "" || !strings.EqualFold(strings.TrimSuffix(sequence.Name, filepath.Ext(sequence.Name)), strings.TrimSuffix(audio.Name, filepath.Ext(audio.Name))) {
+		return nil, errors.New("灯光秀 .fseq 与音频文件必须使用相同文件名")
+	}
+	asset := Asset{
+		ID: s.light.id, Category: CategoryLightShow, Name: strings.TrimSuffix(sequence.Name, filepath.Ext(sequence.Name)),
+		Files: []File{sequence, audio}, CreatedAt: s.manager.now().UTC(), Pending: true,
+	}
+	s.created = append(s.created, asset)
+	s.light = nil
+	return s.created, nil
+}
+
+func (s *uploadSession) cleanup() {
+	for _, asset := range s.created {
+		_ = os.RemoveAll(filepath.Join(s.manager.cfg.StagingPath, asset.ID))
+	}
+	if s.light != nil {
+		_ = os.RemoveAll(s.light.directory)
+	}
+}
+
+// Delete 将已应用文件标记为待删除；未应用文件会从暂存区直接移除。
+func (m *Manager) Delete(_ context.Context, id string) (Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !assetIDPattern.MatchString(id) {
+		return Status{}, errors.New("媒体资源标识不合法")
+	}
+	assets, err := m.loadAssets()
+	if err != nil {
+		return Status{}, err
+	}
+	position := slices.IndexFunc(assets, func(asset Asset) bool { return asset.ID == id })
+	if position < 0 {
+		return Status{}, errors.New("未找到指定媒体资源")
+	}
+	asset := assets[position]
+	if asset.Pending && !asset.Applied {
+		assets = append(assets[:position], assets[position+1:]...)
+		if err := m.saveAssets(assets); err != nil {
+			return Status{}, err
+		}
+		if err := os.RemoveAll(filepath.Join(m.cfg.StagingPath, asset.ID)); err != nil {
+			return Status{}, fmt.Errorf("删除待应用媒体暂存文件: %w", err)
+		}
+	} else {
+		assets[position].PendingDelete = true
+		assets[position].Pending = false
+		if err := m.saveAssets(assets); err != nil {
+			return Status{}, err
+		}
+	}
+	return m.statusLocked(assets), nil
+}
+
+// Apply 在安全维护窗口内把所有待应用变更写入对应分区，并保持 Gadget 暂停等待温重启恢复。
+func (m *Manager) Apply(ctx context.Context) (Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	assets, err := m.loadAssets()
+	if err != nil {
+		return Status{}, err
+	}
+	if !hasPendingChanges(assets) {
+		return m.statusLocked(assets), nil
+	}
+	if !regularFile(m.cfg.ImagePath) {
+		return Status{}, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return Status{}, fmt.Errorf("准备媒体写入维护窗口: %w", err)
+	}
+	defer release()
+	if err := m.applyLocked(ctx, assets); err != nil {
+		return Status{}, err
+	}
+	for index := range assets {
+		assets[index].Applied = true
+		assets[index].Pending = false
+	}
+	deleted := make([]Asset, 0)
+	remaining := make([]Asset, 0, len(assets))
+	for _, asset := range assets {
+		if asset.PendingDelete {
+			deleted = append(deleted, asset)
+			continue
+		}
+		asset.PendingDelete = false
+		remaining = append(remaining, asset)
+	}
+	if err := m.saveAssets(remaining); err != nil {
+		return Status{}, err
+	}
+	for _, asset := range deleted {
+		if err := os.RemoveAll(filepath.Join(m.cfg.StagingPath, asset.ID)); err != nil {
+			return Status{}, fmt.Errorf("清理已删除媒体预览: %w", err)
+		}
+	}
+	return m.statusLocked(remaining), nil
+}
+
+// OpenPreview 仅为受支持的小型音频和皮肤文件提供受控预览句柄。
+func (m *Manager) OpenPreview(_ context.Context, id string) (*os.File, Asset, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !assetIDPattern.MatchString(id) {
+		return nil, Asset{}, errors.New("媒体资源标识不合法")
+	}
+	assets, err := m.loadAssets()
+	if err != nil {
+		return nil, Asset{}, err
+	}
+	assetIndex := slices.IndexFunc(assets, func(asset Asset) bool { return asset.ID == id })
+	if assetIndex < 0 || !assets[assetIndex].PreviewAvailable || assets[assetIndex].PendingDelete {
+		return nil, Asset{}, ErrPreviewUnavailable
+	}
+	asset := assets[assetIndex]
+	if len(asset.Files) == 0 || !safeStagedName(asset.Files[0].Staged) {
+		return nil, Asset{}, ErrPreviewUnavailable
+	}
+	name := filepath.Join(m.cfg.StagingPath, asset.ID, asset.Files[0].Staged)
+	info, err := os.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, Asset{}, ErrPreviewUnavailable
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, Asset{}, fmt.Errorf("打开媒体预览: %w", err)
+	}
+	return file, publicAsset(asset), nil
+}
+
+func (m *Manager) stageSingle(ctx context.Context, category Category, upload UploadFile) (Asset, error) {
+	name, err := normalizeName(category, upload.FileName)
+	if err != nil {
+		return Asset{}, err
+	}
+	id, err := newAssetID()
+	if err != nil {
+		return Asset{}, err
+	}
+	directory := filepath.Join(m.cfg.StagingPath, id)
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		return Asset{}, fmt.Errorf("创建媒体暂存目录: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(directory)
+		}
+	}()
+	extension := strings.ToLower(filepath.Ext(name))
+	staged := "asset" + extension
+	size, err := copyUpload(ctx, filepath.Join(directory, staged), upload.Content, maximumSize(category))
+	if err != nil {
+		return Asset{}, err
+	}
+	asset := Asset{
+		ID: id, Category: category, Name: name, Files: []File{{Name: name, SizeBytes: size, Staged: staged}},
+		CreatedAt: m.now().UTC(), Pending: true, PreviewAvailable: category == CategoryBoombox || category == CategoryWrap,
+	}
+	if err := validateAssetContent(asset, directory); err != nil {
+		return Asset{}, err
+	}
+	cleanup = false
+	return asset, nil
+}
+
+func (m *Manager) applyLocked(ctx context.Context, assets []Asset) (resultErr error) {
+	needsPrimary := false
+	needsMusic := false
+	for _, asset := range assets {
+		if !asset.Pending && !asset.PendingDelete {
+			continue
+		}
+		if asset.Category == CategoryMusic {
+			needsMusic = true
+		} else {
+			needsPrimary = true
+		}
+	}
+	if !needsPrimary && !needsMusic {
+		return nil
+	}
+	if err := os.MkdirAll(m.cfg.MountPath, 0o750); err != nil {
+		return fmt.Errorf("创建媒体维护挂载目录: %w", err)
+	}
+	loopDevice, err := m.attachLoop(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := m.detachLoop(context.WithoutCancel(ctx), loopDevice); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
+		return fmt.Errorf("等待媒体分区设备: %w", err)
+	}
+	mounts := make(map[int]string, 2)
+	if needsPrimary {
+		primary, err := m.mountPartition(ctx, loopDevice+"p1", 1, true)
+		if err != nil {
+			return err
+		}
+		mounts[1] = primary
+		defer func() {
+			if err := m.unmountPartition(context.WithoutCancel(ctx), primary); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
+		if err := ensureTeslaMediaRootLayout(primary); err != nil {
+			return err
+		}
+	}
+	if needsMusic {
+		music, err := m.mountPartition(ctx, loopDevice+"p2", 2, false)
+		if err != nil {
+			return err
+		}
+		mounts[2] = music
+		defer func() {
+			if err := m.unmountPartition(context.WithoutCancel(ctx), music); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
+	}
+	for _, asset := range assets {
+		if !asset.Pending {
+			continue
+		}
+		if err := m.writeAsset(mounts, asset); err != nil {
+			return err
+		}
+	}
+	for _, asset := range assets {
+		if !asset.PendingDelete {
+			continue
+		}
+		if err := m.removeAsset(mounts, asset); err != nil {
+			return err
+		}
+	}
+	if _, err := m.runner.Run(ctx, "sync"); err != nil {
+		return fmt.Errorf("同步媒体虚拟盘: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) attachLoop(ctx context.Context) (string, error) {
+	output, err := m.runner.Run(ctx, "losetup", "--find", "--show", "--partscan", "--", m.cfg.ImagePath)
+	if err != nil {
+		return "", fmt.Errorf("建立媒体虚拟盘 loop 设备: %w", err)
+	}
+	device := strings.TrimSpace(string(output))
+	if !loopDevicePattern.MatchString(device) {
+		return "", fmt.Errorf("媒体虚拟盘 loop 设备无效: %q", device)
+	}
+	return device, nil
+}
+
+func (m *Manager) detachLoop(ctx context.Context, device string) error {
+	if !loopDevicePattern.MatchString(device) {
+		return errors.New("拒绝解绑无效媒体 loop 设备")
+	}
+	if _, err := m.runner.Run(ctx, "losetup", "--detach", device); err != nil {
+		return fmt.Errorf("解绑媒体虚拟盘 loop 设备: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) mountPartition(ctx context.Context, device string, partition int, exFAT bool) (string, error) {
+	mountPath := filepath.Join(m.cfg.MountPath, fmt.Sprintf("p%d", partition))
+	if err := os.MkdirAll(mountPath, 0o750); err != nil {
+		return "", fmt.Errorf("创建媒体分区挂载点: %w", err)
+	}
+	if exFAT {
+		if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", device); err != nil {
+			var commandErr *system.CommandError
+			if !errors.As(err, &commandErr) || commandErr.Code != 1 {
+				return "", fmt.Errorf("检查媒体 exFAT 分区: %w", err)
+			}
+		}
+	}
+	if _, err := m.runner.Run(ctx, "mount", "--options", "rw,nosuid,nodev,noexec", "--", device, mountPath); err == nil {
+		return mountPath, nil
+	} else if !exFAT || !unknownExFAT(err) {
+		return "", fmt.Errorf("挂载媒体分区: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, "mount.exfat-fuse", "-o", "rw,nosuid,nodev,noexec", device, mountPath); err != nil {
+		return "", fmt.Errorf("使用 exfat-fuse 挂载媒体分区: %w", err)
+	}
+	return mountPath, nil
+}
+
+func (m *Manager) unmountPartition(ctx context.Context, mountPath string) error {
+	if _, err := m.runner.Run(ctx, "umount", "--", mountPath); err != nil {
+		return fmt.Errorf("卸载媒体分区: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) writeAsset(mounts map[int]string, asset Asset) error {
+	partition, directory, err := targetLocation(asset.Category)
+	if err != nil {
+		return err
+	}
+	root := mounts[partition]
+	if root == "" {
+		if asset.Category == CategoryMusic {
+			return errors.New("当前虚拟盘没有 MUSIC FAT32 分区，请在设置中心重新初始化并启用音乐分区")
+		}
+		return errors.New("媒体主分区未挂载")
+	}
+	targetRoot, err := ensureTargetDirectory(root, directory)
+	if err != nil {
+		return err
+	}
+	for index, file := range asset.Files {
+		if !safeTargetName(file.Name) || !safeStagedName(file.Staged) {
+			return errors.New("媒体清单文件名不合法")
+		}
+		source := filepath.Join(m.cfg.StagingPath, asset.ID, file.Staged)
+		if err := copyReplace(source, targetRoot, file.Name, asset.ID, index); err != nil {
+			return fmt.Errorf("写入 %s: %w", file.Name, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) removeAsset(mounts map[int]string, asset Asset) error {
+	partition, directory, err := targetLocation(asset.Category)
+	if err != nil {
+		return err
+	}
+	root := mounts[partition]
+	if root == "" {
+		if asset.Category == CategoryMusic {
+			return errors.New("当前虚拟盘没有 MUSIC FAT32 分区，无法删除音乐文件")
+		}
+		return errors.New("媒体主分区未挂载")
+	}
+	targetRoot, err := ensureTargetDirectory(root, directory)
+	if err != nil {
+		return err
+	}
+	for _, file := range asset.Files {
+		if !safeTargetName(file.Name) {
+			return errors.New("媒体清单文件名不合法")
+		}
+		target := filepath.Join(targetRoot, file.Name)
+		info, err := os.Lstat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("检查待删除媒体文件: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("拒绝删除非普通媒体文件")
+		}
+		if err := os.Remove(target); err != nil {
+			return fmt.Errorf("删除媒体文件: %w", err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) loadAssets() ([]Asset, error) {
+	name := filepath.Join(m.cfg.StatePath, "media-assets.json")
+	info, err := os.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Asset{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取媒体清单: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("媒体清单不是可信普通文件")
+	}
+	content, err := os.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("读取媒体清单内容: %w", err)
+	}
+	data := manifest{}
+	if err := json.Unmarshal(content, &data); err != nil {
+		return nil, fmt.Errorf("解析媒体清单: %w", err)
+	}
+	if data.Version != 1 {
+		return nil, errors.New("媒体清单版本不受支持")
+	}
+	if err := validateManifest(data.Assets); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(data.Assets, func(left, right Asset) int { return right.CreatedAt.Compare(left.CreatedAt) })
+	return data.Assets, nil
+}
+
+func (m *Manager) saveAssets(assets []Asset) (resultErr error) {
+	if err := os.MkdirAll(m.cfg.StatePath, 0o750); err != nil {
+		return fmt.Errorf("创建媒体状态目录: %w", err)
+	}
+	if err := validateManifest(assets); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(m.cfg.StatePath, ".media-assets-*")
+	if err != nil {
+		return fmt.Errorf("创建媒体清单临时文件: %w", err)
+	}
+	temporaryName := temporary.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := temporary.Close(); closeErr != nil && resultErr == nil {
+				resultErr = closeErr
+			}
+		}
+		if resultErr != nil {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if err := temporary.Chmod(0o640); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(temporary).Encode(manifest{Version: 1, Assets: assets}); err != nil {
+		return fmt.Errorf("编码媒体清单: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("同步媒体清单: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("关闭媒体清单: %w", err)
+	}
+	closed = true
+	if err := os.Rename(temporaryName, filepath.Join(m.cfg.StatePath, "media-assets.json")); err != nil {
+		return fmt.Errorf("发布媒体清单: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) ensureStagingRoot() error {
+	if err := os.MkdirAll(m.cfg.StagingPath, 0o750); err != nil {
+		return fmt.Errorf("创建媒体暂存根目录: %w", err)
+	}
+	info, err := os.Lstat(m.cfg.StagingPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("媒体暂存目录不可信")
+	}
+	return nil
+}
+
+func (m *Manager) statusLocked(assets []Asset) Status {
+	status := Status{Available: true, ImageAvailable: regularFile(m.cfg.ImagePath), Assets: publicAssets(assets)}
+	status.NeedsApply = hasPendingChanges(assets)
+	if !status.ImageAvailable {
+		status.Message = "TeslaCam 虚拟盘尚未初始化；可先选择外接存储完成初始化。"
+	}
+	return status
+}
+
+func validateUploadShape(category Category, files []UploadFile) error {
+	if !validCategory(category) {
+		return errors.New("不支持的媒体分类")
+	}
+	if len(files) == 0 {
+		return errors.New("请选择至少一个文件")
+	}
+	if category == CategoryLightShow {
+		if len(files) != 2 {
+			return errors.New("自定义灯光秀必须同时上传序列和音频文件")
+		}
+		return nil
+	}
+	limit := 20
+	if category == CategoryMusic {
+		limit = 50
+	}
+	if len(files) > limit {
+		return fmt.Errorf("一次最多上传 %d 个文件", limit)
+	}
+	return nil
+}
+
+func validateNewAssets(category Category, created, existing []Asset) error {
+	active := make([]Asset, 0, len(existing))
+	for _, asset := range existing {
+		if asset.Category == category && !asset.PendingDelete {
+			active = append(active, asset)
+		}
+	}
+	if category == CategoryWrap && len(active)+len(created) > maximumWrapCount {
+		return fmt.Errorf("喷漆车间最多保留 %d 张皮肤", maximumWrapCount)
+	}
+	if category == CategoryBoombox && len(active)+len(created) > maximumBoomboxCount {
+		return fmt.Errorf("锁车音效最多保留 %d 个文件", maximumBoomboxCount)
+	}
+	seen := make(map[string]struct{}, len(active)+len(created))
+	for _, asset := range append(active, created...) {
+		for _, file := range asset.Files {
+			key := strings.ToLower(file.Name)
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("同一分类中已存在同名文件：%s", file.Name)
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateAssetContent(asset Asset, directory string) error {
+	if asset.Category != CategoryWrap {
+		return nil
+	}
+	file, err := os.Open(filepath.Join(directory, asset.Files[0].Staged))
+	if err != nil {
+		return fmt.Errorf("读取皮肤文件: %w", err)
+	}
+	defer file.Close()
+	configuration, format, err := image.DecodeConfig(file)
+	if err != nil || format != "png" {
+		return errors.New("喷漆车间皮肤必须是原生 PNG 文件")
+	}
+	if configuration.Width != configuration.Height || configuration.Width < 512 || configuration.Width > 1024 {
+		return errors.New("喷漆车间皮肤必须是 512 到 1024 像素的正方形 PNG")
+	}
+	return nil
+}
+
+func validateManifest(assets []Asset) error {
+	seenIDs := make(map[string]struct{}, len(assets))
+	for _, asset := range assets {
+		if !assetIDPattern.MatchString(asset.ID) || !validCategory(asset.Category) || asset.Name == "" || asset.CreatedAt.IsZero() {
+			return errors.New("媒体清单包含不合法记录")
+		}
+		if _, found := seenIDs[asset.ID]; found {
+			return errors.New("媒体清单存在重复资源标识")
+		}
+		seenIDs[asset.ID] = struct{}{}
+		if len(asset.Files) == 0 || (asset.Category == CategoryLightShow && len(asset.Files) != 2) {
+			return errors.New("媒体清单文件数量不合法")
+		}
+		for _, file := range asset.Files {
+			if !safeTargetName(file.Name) || !safeStagedName(file.Staged) || file.SizeBytes < 0 {
+				return errors.New("媒体清单文件不合法")
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeName(category Category, raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" || !utf8.ValidString(name) || filepath.Base(name) != name || strings.ContainsAny(name, "/\\\x00\r\n") || strings.HasPrefix(name, ".") {
+		return "", errors.New("文件名不合法")
+	}
+	if len(name) > 100 {
+		return "", errors.New("文件名过长")
+	}
+	extension := strings.ToLower(filepath.Ext(name))
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if base == "" {
+		return "", errors.New("文件名不合法")
+	}
+	switch category {
+	case CategoryWrap:
+		if extension != ".png" {
+			return "", errors.New("喷漆车间皮肤仅支持 PNG 文件")
+		}
+		return normalizedASCIIName(base, extension, 30, true), nil
+	case CategoryBoombox:
+		if extension != ".mp3" && extension != ".wav" {
+			return "", errors.New("锁车音效仅支持 .mp3 或 .wav 文件")
+		}
+		return normalizedASCIIName(base, extension, 64, false), nil
+	case CategoryLightShow:
+		if extension != ".fseq" && extension != ".mp3" && extension != ".wav" {
+			return "", errors.New("灯光秀仅支持 .fseq、.mp3 或 .wav 文件")
+		}
+		return normalizedASCIIName(base, extension, 64, true), nil
+	case CategoryMusic:
+		if !slices.Contains([]string{".mp3", ".wav", ".m4a", ".aac", ".flac"}, extension) || !safeMusicName(name) {
+			return "", errors.New("音乐仅支持 .mp3、.wav、.m4a、.aac 或 .flac 文件")
+		}
+	}
+	return name, nil
+}
+
+func normalizedASCIIName(base, extension string, maximumBaseLength int, allowSpaces bool) string {
+	var builder strings.Builder
+	for _, value := range base {
+		switch {
+		case value >= 'a' && value <= 'z', value >= 'A' && value <= 'Z', value >= '0' && value <= '9', value == '_', value == '-':
+			builder.WriteRune(value)
+		case value == ' ' && allowSpaces:
+			builder.WriteRune(value)
+		case value == ' ':
+			builder.WriteByte('_')
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	cleaned := strings.Trim(builder.String(), " .-_")
+	if cleaned == "" {
+		cleaned = "TeslaBox"
+	}
+	if len(cleaned) > maximumBaseLength {
+		cleaned = strings.Trim(cleaned[:maximumBaseLength], " .-_")
+		if cleaned == "" {
+			cleaned = "TeslaBox"
+		}
+	}
+	return cleaned + extension
+}
+
+func safeMusicName(name string) bool {
+	for _, value := range name {
+		if unicode.IsLetter(value) || unicode.IsNumber(value) || value == ' ' || value == '_' || value == '-' || value == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func copyUpload(ctx context.Context, target string, source io.Reader, maximum int64) (int64, error) {
+	if source == nil {
+		return 0, errors.New("上传文件内容为空")
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if err != nil {
+		return 0, fmt.Errorf("创建上传暂存文件: %w", err)
+	}
+	defer file.Close()
+	written, err := io.Copy(file, io.LimitReader(&contextReader{ctx: ctx, reader: source}, maximum+1))
+	if err != nil {
+		return 0, fmt.Errorf("保存上传文件: %w", err)
+	}
+	if written == 0 {
+		return 0, errors.New("上传文件为空")
+	}
+	if written > maximum {
+		return 0, fmt.Errorf("文件超过 %s 限制", humanBytes(maximum))
+	}
+	if err := file.Sync(); err != nil {
+		return 0, fmt.Errorf("同步上传文件: %w", err)
+	}
+	return written, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func targetLocation(category Category) (int, string, error) {
+	switch category {
+	case CategoryBoombox:
+		return 1, "Boombox", nil
+	case CategoryWrap:
+		return 1, "Wraps", nil
+	case CategoryLightShow:
+		return 1, "LightShow", nil
+	case CategoryMusic:
+		return 2, "", nil
+	default:
+		return 0, "", errors.New("不支持的媒体分类")
+	}
+}
+
+func ensureTargetDirectory(root, directory string) (string, error) {
+	if directory == "" {
+		return trustedDirectory(root)
+	}
+	target := filepath.Join(root, directory)
+	if filepath.Dir(target) != filepath.Clean(root) {
+		return "", errors.New("媒体目标目录不合法")
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(target, 0o755); err != nil {
+			return "", fmt.Errorf("创建 Tesla 媒体目录: %w", err)
+		}
+		return target, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("Tesla 媒体目录不可信")
+	}
+	return target, nil
+}
+
+// ensureTeslaMediaRootLayout 保持车机可识别目录始终位于主 exFAT 分区根目录，避免用户上传一个媒体类型后缺少其余目录。
+func ensureTeslaMediaRootLayout(root string) error {
+	for _, directory := range []string{"TeslaCam", "Boombox", "Wraps", "LightShow"} {
+		if _, err := ensureTargetDirectory(root, directory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func trustedDirectory(name string) (string, error) {
+	info, err := os.Lstat(name)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("媒体分区挂载目录不可信")
+	}
+	return name, nil
+}
+
+func copyReplace(source, directory, targetName, assetID string, index int) (resultErr error) {
+	sourceInfo, err := os.Lstat(source)
+	if err != nil || sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.Mode().IsRegular() {
+		return errors.New("媒体暂存文件不可信或不存在")
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	temporaryName := filepath.Join(directory, fmt.Sprintf(".%s-%d.partial", assetID, index))
+	output, err := os.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := output.Close(); closeErr != nil && resultErr == nil {
+				resultErr = closeErr
+			}
+		}
+		if resultErr != nil {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if _, err := io.Copy(output, input); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	closed = true
+	if err := os.Rename(temporaryName, filepath.Join(directory, targetName)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func maximumSize(category Category) int64 {
+	switch category {
+	case CategoryWrap:
+		return maximumWrapBytes
+	case CategoryBoombox:
+		return maximumBoomboxBytes
+	case CategoryLightShow:
+		return maximumLightShowBytes
+	default:
+		return maximumMusicBytes
+	}
+}
+
+func totalAssetBytes(assets []Asset) int64 {
+	var total int64
+	for _, asset := range assets {
+		for _, file := range asset.Files {
+			total += file.SizeBytes
+		}
+	}
+	return total
+}
+
+func validCategory(category Category) bool {
+	return category == CategoryBoombox || category == CategoryWrap || category == CategoryLightShow || category == CategoryMusic
+}
+
+func publicAssets(assets []Asset) []Asset {
+	result := make([]Asset, len(assets))
+	for index, asset := range assets {
+		result[index] = publicAsset(asset)
+	}
+	return result
+}
+
+func publicAsset(asset Asset) Asset {
+	asset.Files = slices.Clone(asset.Files)
+	for index := range asset.Files {
+		asset.Files[index].Staged = ""
+	}
+	return asset
+}
+
+func hasPendingChanges(assets []Asset) bool {
+	return slices.ContainsFunc(assets, func(asset Asset) bool { return asset.Pending || asset.PendingDelete })
+}
+
+func regularFile(name string) bool {
+	info, err := os.Lstat(name)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
+}
+
+func safeTargetName(name string) bool {
+	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, "/\\\x00\r\n") && !strings.HasPrefix(name, ".")
+}
+
+func safeStagedName(name string) bool {
+	return regexp.MustCompile(`^(asset|audio|sequence)\.[a-z0-9]+$`).MatchString(name)
+}
+
+func unknownExFAT(err error) bool {
+	var commandErr *system.CommandError
+	return errors.As(err, &commandErr) && strings.Contains(strings.ToLower(commandErr.Output), "unknown filesystem type 'exfat'")
+}
+
+func newAssetID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("生成媒体资源标识: %w", err)
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func humanBytes(value int64) string {
+	return fmt.Sprintf("%.0f MB", float64(value)/(1024*1024))
+}

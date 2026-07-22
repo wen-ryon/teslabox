@@ -19,6 +19,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/media"
+	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
@@ -52,10 +53,30 @@ type StorageAdmin interface {
 	Cancel(context.Context, storageadmin.CancelRequest) error
 }
 
+// GadgetAdmin 只开放受确认保护的安全断开和重新枚举能力。
+type GadgetAdmin interface {
+	PauseGadget(context.Context) (service.Snapshot, error)
+	ResumeGadget(context.Context) (service.Snapshot, error)
+}
+
+// PowerAdmin 只暴露温重启恢复所需的延迟电源操作。
+type PowerAdmin interface {
+	SchedulePower(string) error
+}
+
 // MediaInspector 定义 API 所需的媒体能力和单文件探测边界。
 type MediaInspector interface {
 	Capabilities(context.Context) (media.Capabilities, error)
 	Probe(context.Context, string) (media.Metadata, error)
+}
+
+// MediaAssetsAdmin 定义媒体中心受控上传、应用、预览与删除能力。
+type MediaAssetsAdmin interface {
+	Status(context.Context) (mediaassets.Status, error)
+	UploadStream(context.Context, mediaassets.Category, func(func(mediaassets.UploadFile) error) error) ([]mediaassets.Asset, error)
+	Delete(context.Context, string) (mediaassets.Status, error)
+	Apply(context.Context) (mediaassets.Status, error)
+	OpenPreview(context.Context, string) (*os.File, mediaassets.Asset, error)
 }
 
 // MediaCompositor 定义请求取消后必须停止的实时合成边界。
@@ -87,7 +108,9 @@ type Diagnostics interface {
 type handlerOptions struct {
 	deviceAdmin     DeviceAdmin
 	storageAdmin    StorageAdmin
+	gadgetAdmin     GadgetAdmin
 	mediaInspector  MediaInspector
+	mediaAssets     MediaAssetsAdmin
 	mediaCompositor MediaCompositor
 	exportAdmin     ExportAdmin
 	updateAdmin     UpdateAdmin
@@ -107,9 +130,19 @@ func WithStorageAdmin(admin StorageAdmin) Option {
 	return func(options *handlerOptions) { options.storageAdmin = admin }
 }
 
+// WithGadgetAdmin 启用受确认保护的 USB Gadget 安全断开和重新枚举接口。
+func WithGadgetAdmin(admin GadgetAdmin) Option {
+	return func(options *handlerOptions) { options.gadgetAdmin = admin }
+}
+
 // WithMediaInspector 启用 Rockchip 媒体能力和录像技术元数据接口。
 func WithMediaInspector(inspector MediaInspector) Option {
 	return func(options *handlerOptions) { options.mediaInspector = inspector }
+}
+
+// WithMediaAssetsAdmin 启用媒体中心接口；所有写入仍由实现统一控制 Gadget 维护窗口。
+func WithMediaAssetsAdmin(admin MediaAssetsAdmin) Option {
+	return func(options *handlerOptions) { options.mediaAssets = admin }
 }
 
 // WithMediaCompositor 启用单分钟多视角服务端实时合成。
@@ -201,8 +234,14 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.storageAdmin != nil {
 		registerStorageAdminRoutes(mux, settings.storageAdmin, logger)
 	}
+	if settings.gadgetAdmin != nil {
+		registerGadgetAdminRoutes(mux, settings.gadgetAdmin, settings.deviceAdmin, logger)
+	}
 	if settings.mediaInspector != nil {
 		registerMediaRoutes(mux, controller, settings.mediaInspector, logger)
+	}
+	if settings.mediaAssets != nil {
+		registerMediaAssetRoutes(mux, settings.mediaAssets, logger)
 	}
 	if settings.mediaCompositor != nil {
 		registerCompositeRoutes(mux, controller, settings.mediaCompositor, logger)
@@ -217,6 +256,74 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		registerDiagnosticsRoutes(mux, settings.diagnostics, logger)
 	}
 	return requestLogger(mux, logger)
+}
+
+func registerGadgetAdminRoutes(mux *http.ServeMux, admin GadgetAdmin, power PowerAdmin, logger *slog.Logger) {
+	mux.HandleFunc("POST /api/v1/gadget/disconnect", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ConfirmPhysicalDisconnect bool `json:"confirm_physical_disconnect"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if !input.ConfirmPhysicalDisconnect {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先确认物理 OTG 已断开"})
+			return
+		}
+		state, err := admin.PauseGadget(r.Context())
+		if err != nil {
+			logger.Warn("安全断开 USB Gadget 失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "USB Gadget 暂时无法安全断开"})
+			return
+		}
+		state.Videos = nil
+		writeJSON(w, http.StatusOK, state)
+	})
+	mux.HandleFunc("POST /api/v1/gadget/reconnect", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ConfirmPhysicalConnection bool `json:"confirm_physical_connection"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if !input.ConfirmPhysicalConnection {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理插入 OTG 线，再确认准备下次冷启动"})
+			return
+		}
+		state, err := admin.ResumeGadget(r.Context())
+		if err != nil {
+			logger.Warn("准备 USB Gadget 下次冷启动失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "USB Gadget 暂时无法准备下次冷启动"})
+			return
+		}
+		state.Videos = nil
+		writeJSON(w, http.StatusOK, state)
+	})
+	if power != nil {
+		mux.HandleFunc("POST /api/v1/gadget/reboot-recover", func(w http.ResponseWriter, r *http.Request) {
+			var input struct {
+				ConfirmPhysicalConnection bool `json:"confirm_physical_connection"`
+			}
+			if !decodeJSON(w, r, &input) {
+				return
+			}
+			if !input.ConfirmPhysicalConnection {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理插入 OTG 线，再确认温重启恢复"})
+				return
+			}
+			if _, err := admin.ResumeGadget(r.Context()); err != nil {
+				logger.Warn("准备 USB Gadget 温重启恢复失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "USB Gadget 暂时无法准备温重启恢复"})
+				return
+			}
+			if err := power.SchedulePower("reboot"); err != nil {
+				logger.Warn("提交 USB Gadget 温重启失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "恢复状态已保存，但自动重启提交失败，请手工重启设备"})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+		})
+	}
 }
 
 func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *slog.Logger) {
@@ -468,6 +575,127 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 		}
 		writeJSON(w, http.StatusOK, metadata)
 	})
+}
+
+const maximumMediaUploadRequestBytes int64 = 512 * 1024 * 1024
+
+func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/media-assets", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.Status(r.Context())
+		if err != nil {
+			logger.Warn("读取媒体中心状态失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取媒体中心状态"})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/media-assets/upload", func(w http.ResponseWriter, r *http.Request) {
+		category := mediaassets.Category(strings.TrimSpace(r.URL.Query().Get("category")))
+		r.Body = http.MaxBytesReader(w, r.Body, maximumMediaUploadRequestBytes)
+		reader, err := r.MultipartReader()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择要上传的文件"})
+			return
+		}
+		assets, err := admin.UploadStream(r.Context(), category, func(add func(mediaassets.UploadFile) error) error {
+			for {
+				part, nextErr := reader.NextPart()
+				if errors.Is(nextErr, io.EOF) {
+					return nil
+				}
+				if nextErr != nil {
+					return fmt.Errorf("读取上传文件: %w", nextErr)
+				}
+				if part.FileName() == "" {
+					_ = part.Close()
+					continue
+				}
+				role := strings.TrimSpace(part.FormName())
+				if role != "file" && role != "sequence" && role != "audio" {
+					_ = part.Close()
+					return errors.New("上传字段不受支持")
+				}
+				err := add(mediaassets.UploadFile{Role: role, FileName: part.FileName(), Content: part})
+				closeErr := part.Close()
+				if err != nil {
+					return err
+				}
+				if closeErr != nil {
+					return fmt.Errorf("关闭上传文件: %w", closeErr)
+				}
+			}
+		})
+		if err != nil {
+			logger.Warn("暂存媒体上传失败", "category", category, "error", err)
+			writeMediaAssetError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"assets": assets})
+	})
+	mux.HandleFunc("POST /api/v1/media-assets/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
+		status, err := admin.Delete(r.Context(), r.PathValue("id"))
+		if err != nil {
+			logger.Warn("标记删除媒体资源失败", "error", err)
+			writeMediaAssetError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/media-assets/apply", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if !input.ConfirmOTGDisconnected {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认应用媒体变更"})
+			return
+		}
+		status, err := admin.Apply(r.Context())
+		if err != nil {
+			logger.Warn("应用媒体变更失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "应用媒体变更失败；请确认 OTG 已物理断开、没有视频播放或导出任务，并在日志中心查看详情"})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("GET /api/v1/media-assets/{id}/preview", func(w http.ResponseWriter, r *http.Request) {
+		file, asset, err := admin.OpenPreview(r.Context(), r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, mediaassets.ErrPreviewUnavailable) {
+				http.NotFound(w, r)
+				return
+			}
+			logger.Warn("打开媒体预览失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体预览暂不可用"})
+			return
+		}
+		defer file.Close()
+		if len(asset.Files) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(asset.Files[0].Name)))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		http.ServeContent(w, r, asset.Files[0].Name, asset.CreatedAt, file)
+	})
+}
+
+func writeMediaAssetError(w http.ResponseWriter, err error) {
+	if errors.Is(err, mediaassets.ErrPreviewUnavailable) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "媒体预览不可用"})
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "媒体操作已取消或超时"})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
 
 func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *slog.Logger) {

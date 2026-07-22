@@ -25,6 +25,13 @@ func testManager(t *testing.T) (*Manager, string) {
 	if err := os.WriteFile(filepath.Join(udcPath, "fcc00000.dwc3", "current_speed"), []byte("high-speed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	suspendPath := filepath.Join(udcPath, "fcc00000.dwc3", "device", "gadget")
+	if err := os.MkdirAll(suspendPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(suspendPath, "suspended"), []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +49,19 @@ func testManager(t *testing.T) (*Manager, string) {
 	return manager, imagePath
 }
 
+func TestManagerReportsEnumerationWithoutClaimingPhysicalCableState(t *testing.T) {
+	t.Parallel()
+	manager, _ := testManager(t)
+
+	status, err := manager.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.EnumerationComplete || !status.HostConnected || status.UDCState != "configured" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
 func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	manager, imagePath := testManager(t)
 	status, err := manager.Start()
@@ -51,7 +71,7 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	if !status.Exists || !status.Bound || status.UDC != "fcc00000.dwc3" {
 		t.Fatalf("status = %#v", status)
 	}
-	if status.UDCState != "configured" || status.CurrentSpeed != "high-speed" || !status.HostDetected || !status.HostConnected {
+	if status.UDCState != "configured" || status.CurrentSpeed != "high-speed" || !status.HostDetected || !status.HostConnected || !status.EnumerationComplete || !status.BusSuspendKnown || status.BusSuspended {
 		t.Fatalf("UDC status = %#v", status)
 	}
 	if !samePath(status.ImagePath, imagePath) {
@@ -59,6 +79,23 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(manager.gadgetPath(), "configs", "c.1", "mass_storage.0")); err != nil {
 		t.Fatalf("mass storage link: %v", err)
+	}
+}
+
+func TestManagerReportsConfiguredSuspendedBusAsAmbiguous(t *testing.T) {
+	t.Parallel()
+	manager, _ := testManager(t)
+	suspendedPath := filepath.Join(manager.config.UDCPath, "fcc00000.dwc3", "device", "gadget", "suspended")
+	if err := os.WriteFile(suspendedPath, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := manager.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.EnumerationComplete || !status.BusSuspendKnown || !status.BusSuspended {
+		t.Fatalf("status = %#v", status)
 	}
 }
 
@@ -89,6 +126,9 @@ func TestManagerOnlyReportsConfiguredHostAsConnected(t *testing.T) {
 			}
 			if status.HostDetected != test.wantDetected || status.HostConnected != test.wantConnected {
 				t.Fatalf("status = %#v", status)
+			}
+			if status.EnumerationComplete != test.wantConnected {
+				t.Fatalf("EnumerationComplete = %t, want %t", status.EnumerationComplete, test.wantConnected)
 			}
 		})
 	}

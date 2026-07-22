@@ -118,7 +118,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
-    libnss-mdns network-manager parted pciutils rfkill udev util-linux xfsprogs
+    dosfstools libnss-mdns network-manager parted pciutils rfkill udev util-linux xfsprogs
 
 if ! systemctl is-active --quiet teslabox.service 2>/dev/null && command -v ss >/dev/null 2>&1; then
     if ss -H -ltn 'sport = :80' 2>/dev/null | sed -n '1p' | read -r _; then

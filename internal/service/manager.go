@@ -24,6 +24,8 @@ var (
 	ErrSnapshotUnavailable   = errors.New("当前状态不能创建媒体快照")
 )
 
+const gadgetEnumerationWait = 5 * time.Second
+
 // Phase 是 TeslaUSB 核心状态机对外暴露的稳定状态。
 type Phase string
 
@@ -53,6 +55,7 @@ type GadgetProber interface {
 // DataMounter 定义已确认身份的数据盘自动挂载能力。
 type DataMounter interface {
 	Mount(ctx context.Context, device storage.Device) error
+	Unmount(ctx context.Context) error
 }
 
 // GadgetLifecycle 定义状态机统一管理的 Gadget 生命周期能力。
@@ -77,20 +80,22 @@ type VideoScanner interface {
 
 // Snapshot 是数据盘、backing store、Gadget 和媒体索引的一致性只读视图。
 type Snapshot struct {
-	Phase            Phase                     `json:"phase"`
-	DataDrive        *storage.Device           `json:"data_drive,omitempty"`
-	Backing          backing.Status            `json:"backing"`
-	Gadget           gadget.Environment        `json:"gadget"`
-	GadgetStatus     gadget.Status             `json:"gadget_status"`
-	MediaSnapshot    *mediasnapshot.View       `json:"media_snapshot,omitempty"`
-	VideoCount       int                       `json:"video_count"`
-	Videos           []teslacam.Video          `json:"-"`
-	LastRefreshAt    *time.Time                `json:"last_refresh_at,omitempty"`
-	LastError        string                    `json:"last_error,omitempty"`
-	SnapshotError    string                    `json:"snapshot_error,omitempty"`
-	SnapshotSpace    mediasnapshot.SpaceStatus `json:"snapshot_space"`
-	SnapshotFailures int                       `json:"snapshot_failures,omitempty"`
-	SnapshotRetryAt  *time.Time                `json:"snapshot_retry_at,omitempty"`
+	Phase               Phase                     `json:"phase"`
+	DataDrive           *storage.Device           `json:"data_drive,omitempty"`
+	Backing             backing.Status            `json:"backing"`
+	Gadget              gadget.Environment        `json:"gadget"`
+	GadgetStatus        gadget.Status             `json:"gadget_status"`
+	GadgetPaused        bool                      `json:"gadget_paused"`
+	GadgetResumePending bool                      `json:"gadget_resume_pending"`
+	MediaSnapshot       *mediasnapshot.View       `json:"media_snapshot,omitempty"`
+	VideoCount          int                       `json:"video_count"`
+	Videos              []teslacam.Video          `json:"-"`
+	LastRefreshAt       *time.Time                `json:"last_refresh_at,omitempty"`
+	LastError           string                    `json:"last_error,omitempty"`
+	SnapshotError       string                    `json:"snapshot_error,omitempty"`
+	SnapshotSpace       mediasnapshot.SpaceStatus `json:"snapshot_space"`
+	SnapshotFailures    int                       `json:"snapshot_failures,omitempty"`
+	SnapshotRetryAt     *time.Time                `json:"snapshot_retry_at,omitempty"`
 }
 
 // Manager 串行化 udev、轮询和 API 刷新，防止未来生命周期操作并发执行。
@@ -105,17 +110,22 @@ type Manager struct {
 	scanner     VideoScanner
 	logger      *slog.Logger
 
-	refreshMu         sync.Mutex
-	stateMu           sync.RWMutex
-	state             Snapshot
-	triggerCh         chan struct{}
-	cleanupCh         chan struct{}
-	retired           []mediasnapshot.View
-	mediaLeases       map[string]int
-	snapshotRecovered bool
-	snapshotFailures  int
-	snapshotRetryAt   time.Time
-	now               func() time.Time
+	refreshMu           sync.Mutex
+	stateMu             sync.RWMutex
+	state               Snapshot
+	triggerCh           chan struct{}
+	cleanupCh           chan struct{}
+	retired             []mediasnapshot.View
+	mediaLeases         map[string]int
+	snapshotRecovered   bool
+	snapshotFailures    int
+	snapshotRetryAt     time.Time
+	gadgetPaused        bool
+	gadgetResumePending bool
+	bootID              string
+	bindAttemptAllowed  bool
+	waitForEnumeration  func(context.Context, gadget.Status) (gadget.Status, bool, error)
+	now                 func() time.Time
 }
 
 // NewManager 使用手工依赖注入保持系统边界可测试，初始状态不触发任何磁盘写入。
@@ -130,21 +140,59 @@ func NewManager(
 	scanner VideoScanner,
 	logger *slog.Logger,
 ) *Manager {
-	return &Manager{
-		cfg:         cfg,
-		detector:    detector,
-		inspector:   inspector,
-		prober:      prober,
-		mounter:     mounter,
-		lifecycle:   lifecycle,
-		snapshotter: snapshotter,
-		scanner:     scanner,
-		logger:      logger,
-		state:       Snapshot{Phase: PhaseStarting},
-		triggerCh:   make(chan struct{}, 1),
-		cleanupCh:   make(chan struct{}, 1),
-		mediaLeases: make(map[string]int),
-		now:         time.Now,
+	bootID, bootErr := readBootID(cfg.BootIDPath)
+	guard, guardErr := loadGadgetGuardState(cfg.GadgetPauseStatePath)
+	gadgetPaused, resumePending, bindAttemptAllowed := resolveGadgetGuard(bootID, guard, errors.Join(bootErr, guardErr))
+	if (bootErr != nil || guardErr != nil) && logger != nil {
+		// 无法证明这是新的系统启动时必须保持解绑，避免服务重启被误当成冷启动。
+		logger.Warn("读取 USB Gadget 启动保护失败，将保持安全断开", "error", errors.Join(bootErr, guardErr))
+	}
+	manager := &Manager{
+		cfg:                 cfg,
+		detector:            detector,
+		inspector:           inspector,
+		prober:              prober,
+		mounter:             mounter,
+		lifecycle:           lifecycle,
+		snapshotter:         snapshotter,
+		scanner:             scanner,
+		logger:              logger,
+		state:               Snapshot{Phase: PhaseStarting, GadgetPaused: gadgetPaused, GadgetResumePending: resumePending},
+		triggerCh:           make(chan struct{}, 1),
+		cleanupCh:           make(chan struct{}, 1),
+		mediaLeases:         make(map[string]int),
+		gadgetPaused:        gadgetPaused,
+		gadgetResumePending: resumePending,
+		bootID:              bootID,
+		bindAttemptAllowed:  bindAttemptAllowed,
+		now:                 time.Now,
+	}
+	manager.waitForEnumeration = manager.pollGadgetEnumeration
+	return manager
+}
+
+func resolveGadgetGuard(bootID string, guard gadgetGuardState, loadErr error) (paused, resumePending, bindAttemptAllowed bool) {
+	if loadErr != nil || bootID == "" {
+		return true, false, false
+	}
+	if !guard.exists {
+		return false, false, true
+	}
+	switch guard.mode {
+	case gadgetGuardPaused:
+		return true, false, false
+	case gadgetGuardAttempt:
+		if guard.bootID == bootID {
+			return true, false, false
+		}
+		return false, false, true
+	case gadgetGuardResumeAfter:
+		if guard.bootID == bootID {
+			return true, true, false
+		}
+		return false, false, true
+	default:
+		return true, false, false
 	}
 }
 
@@ -184,6 +232,143 @@ func (m *Manager) TriggerRefresh() {
 // Refresh 供 API 在请求上下文内触发一次完整的生命周期收敛。
 func (m *Manager) Refresh(ctx context.Context) error {
 	return m.reconcile(ctx)
+}
+
+// PauseGadget 在用户确认物理 OTG 已断开后保持 UDC 解绑，避免旧内核残留状态阻止更新。
+func (m *Manager) PauseGadget(ctx context.Context) (Snapshot, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return m.Snapshot(), err
+	}
+
+	previous := m.Snapshot()
+	if err := persistGadgetGuardState(m.cfg.GadgetPauseStatePath, gadgetGuardPaused); err != nil {
+		return previous, err
+	}
+	m.gadgetPaused = true
+	m.gadgetResumePending = false
+	m.bindAttemptAllowed = false
+	status, err := m.lifecycle.Stop()
+	now := m.now()
+	previous.GadgetPaused = true
+	previous.GadgetResumePending = false
+	previous.GadgetStatus = status
+	previous.LastRefreshAt = &now
+	if err != nil {
+		previous.Phase = PhaseFault
+		previous.LastError = fmt.Sprintf("安全断开 USB Gadget 失败: %v", err)
+		m.store(previous)
+		return m.Snapshot(), fmt.Errorf("安全断开 USB Gadget: %w", err)
+	}
+	previous.Phase = PhaseReadyForGadget
+	previous.LastError = ""
+	m.store(previous)
+	return m.Snapshot(), nil
+}
+
+// ResumeGadget 只预约下一次冷启动恢复，避免旧 BSP 内核运行时重新绑定 UDC 导致系统挂死。
+func (m *Manager) ResumeGadget(ctx context.Context) (Snapshot, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return m.Snapshot(), err
+	}
+	if err := persistGadgetGuardState(m.cfg.GadgetPauseStatePath, gadgetGuardResumeAfter+m.bootID); err != nil {
+		return m.Snapshot(), err
+	}
+	m.gadgetPaused = true
+	m.gadgetResumePending = true
+	m.bindAttemptAllowed = false
+	status, stopErr := m.lifecycle.Stop()
+	state := m.Snapshot()
+	state.GadgetPaused = true
+	state.GadgetResumePending = true
+	state.GadgetStatus = status
+	state.Phase = PhaseReadyForGadget
+	state.LastError = ""
+	now := m.now()
+	state.LastRefreshAt = &now
+	if stopErr != nil {
+		state.Phase = PhaseFault
+		state.LastError = fmt.Sprintf("准备下次冷启动前保持 Gadget 解绑失败: %v", stopErr)
+	}
+	m.store(state)
+	if stopErr != nil {
+		return m.Snapshot(), stopErr
+	}
+	return m.Snapshot(), nil
+}
+
+// BeginStorageMaintenance 独占状态机并释放 Gadget、快照和数据盘挂载，避免重新分区时仍有内核引用。
+func (m *Manager) BeginStorageMaintenance(ctx context.Context) (func(), error) {
+	return m.beginMaintenance(ctx, true)
+}
+
+// BeginMediaMaintenance 在写入虚拟盘内媒体前释放 Gadget 和快照，但保持 XFS 数据盘挂载以保留受控暂存文件。
+func (m *Manager) BeginMediaMaintenance(ctx context.Context) (func(), error) {
+	return m.beginMaintenance(ctx, false)
+}
+
+func (m *Manager) beginMaintenance(ctx context.Context, unmountDataDrive bool) (func(), error) {
+	m.refreshMu.Lock()
+	release := sync.OnceFunc(func() { m.refreshMu.Unlock() })
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	if m.hasMediaLeases() {
+		release()
+		return nil, errors.New("仍有录像播放或导出请求正在使用数据盘")
+	}
+	if err := persistGadgetGuardState(m.cfg.GadgetPauseStatePath, gadgetGuardPaused); err != nil {
+		release()
+		return nil, err
+	}
+	m.gadgetPaused = true
+	m.gadgetResumePending = false
+	m.bindAttemptAllowed = false
+	previous := m.Snapshot()
+	status, stopErr := m.lifecycle.Stop()
+	cleanupErr := m.cleanupDisconnectedSnapshots(ctx, previous)
+	var unmountErr error
+	if unmountDataDrive {
+		unmountErr = m.mounter.Unmount(ctx)
+	}
+	now := m.now()
+	state := previous
+	state.Phase = PhaseReadyForGadget
+	if unmountDataDrive {
+		state.DataDrive = nil
+	}
+	state.GadgetStatus = status
+	state.GadgetPaused = true
+	state.GadgetResumePending = false
+	state.MediaSnapshot = nil
+	state.VideoCount = 0
+	state.Videos = nil
+	state.LastRefreshAt = &now
+	state.LastError = ""
+	if cause := errors.Join(stopErr, cleanupErr, unmountErr); cause != nil {
+		state.Phase = PhaseFault
+		state.LastError = fmt.Sprintf("准备存储维护失败: %v", cause)
+		m.store(state)
+		release()
+		return nil, cause
+	}
+	m.store(state)
+	return release, nil
+}
+
+func (m *Manager) hasMediaLeases() bool {
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
+	for _, count := range m.mediaLeases {
+		if count > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Scan 创建新的只读快照，并在扫描成功后原子替换对外媒体索引。
@@ -322,6 +507,35 @@ func (m *Manager) reconcile(ctx context.Context) error {
 	defer m.refreshMu.Unlock()
 
 	previous := m.Snapshot()
+	initialGadgetStatus, err := m.lifecycle.Inspect()
+	if err != nil {
+		return m.stopForFault(nil, fmt.Errorf("读取 USB Gadget 状态: %w", err))
+	}
+	attemptRecorded := false
+	attemptCompleted := initialGadgetStatus.Bound && initialGadgetStatus.EnumerationComplete
+	if !m.gadgetPaused && m.bindAttemptAllowed {
+		if err := persistGadgetGuardState(m.cfg.GadgetPauseStatePath, gadgetGuardAttempt+m.bootID); err != nil {
+			return m.stopForFault(nil, fmt.Errorf("保存 USB Gadget 本次启动绑定保护: %w", err))
+		}
+		m.bindAttemptAllowed = false
+		attemptRecorded = true
+	}
+	if !m.gadgetPaused && !initialGadgetStatus.Bound && !attemptRecorded {
+		// 相同 boot_id 已消费过绑定机会，服务重启或页面操作都不得再次触碰 UDC。
+		m.gadgetPaused = true
+	}
+	defer func() {
+		if !attemptRecorded || attemptCompleted {
+			return
+		}
+		m.gadgetPaused = true
+		m.gadgetResumePending = false
+		state := m.Snapshot()
+		state.GadgetPaused = true
+		state.GadgetResumePending = false
+		m.store(state)
+	}()
+
 	device, err := m.detector.Detect(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrDeviceNotFound) {
@@ -354,12 +568,14 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		}
 		now := time.Now()
 		m.store(Snapshot{
-			Phase:         PhasePreparingBackingStore,
-			DataDrive:     &device,
-			Backing:       backingStatus,
-			GadgetStatus:  gadgetStatus,
-			LastRefreshAt: &now,
-			LastError:     backingStatus.Reason,
+			Phase:               PhasePreparingBackingStore,
+			DataDrive:           &device,
+			Backing:             backingStatus,
+			GadgetStatus:        gadgetStatus,
+			GadgetPaused:        m.gadgetPaused,
+			GadgetResumePending: m.gadgetResumePending,
+			LastRefreshAt:       &now,
+			LastError:           backingStatus.Reason,
 		}, previous)
 		return nil
 	}
@@ -374,35 +590,114 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		}
 		now := time.Now()
 		m.store(Snapshot{
-			Phase:         PhaseDegraded,
-			DataDrive:     &device,
-			Backing:       backingStatus,
-			Gadget:        gadgetEnvironment,
-			GadgetStatus:  gadgetStatus,
-			LastRefreshAt: &now,
-			LastError:     gadgetEnvironment.Reason,
+			Phase:               PhaseDegraded,
+			DataDrive:           &device,
+			Backing:             backingStatus,
+			Gadget:              gadgetEnvironment,
+			GadgetStatus:        gadgetStatus,
+			GadgetPaused:        m.gadgetPaused,
+			GadgetResumePending: m.gadgetResumePending,
+			LastRefreshAt:       &now,
+			LastError:           gadgetEnvironment.Reason,
+		}, previous)
+		return nil
+	}
+	if m.gadgetPaused {
+		gadgetStatus, stopErr := m.lifecycle.Stop()
+		if stopErr != nil {
+			return m.stopForFault(&device, fmt.Errorf("保持 USB Gadget 安全断开失败: %w", stopErr))
+		}
+		now := m.now()
+		m.store(Snapshot{
+			Phase:               PhaseReadyForGadget,
+			DataDrive:           &device,
+			Backing:             backingStatus,
+			Gadget:              gadgetEnvironment,
+			GadgetStatus:        gadgetStatus,
+			GadgetPaused:        true,
+			GadgetResumePending: m.gadgetResumePending,
+			LastRefreshAt:       &now,
 		}, previous)
 		return nil
 	}
 
-	gadgetStatus, err := m.lifecycle.Start()
-	if err != nil {
-		return m.stopForFault(&device, fmt.Errorf("启动 TeslaBox Gadget: %w", err))
+	gadgetStatus := initialGadgetStatus
+	if !gadgetStatus.Bound {
+		gadgetStatus, err = m.lifecycle.Start()
+		if err != nil {
+			return m.stopForFault(&device, fmt.Errorf("启动 TeslaBox Gadget: %w", err))
+		}
 	}
 	if !gadgetStatus.Bound {
 		return m.stopForFault(&device, errors.New("Gadget 启动完成但没有绑定 UDC"))
 	}
+	gadgetStatus, enumerationComplete, err := m.waitForEnumeration(ctx, gadgetStatus)
+	if err != nil {
+		return m.stopForFault(&device, fmt.Errorf("等待 USB 主机枚举: %w", err))
+	}
+	if !enumerationComplete {
+		gadgetStatus, stopErr := m.lifecycle.Stop()
+		if stopErr != nil {
+			return m.stopForFault(&device, fmt.Errorf("未完成枚举后安全解绑 Gadget: %w", stopErr))
+		}
+		m.gadgetPaused = true
+		m.gadgetResumePending = false
+		now := m.now()
+		m.store(Snapshot{
+			Phase:               PhaseReadyForGadget,
+			DataDrive:           &device,
+			Backing:             backingStatus,
+			Gadget:              gadgetEnvironment,
+			GadgetStatus:        gadgetStatus,
+			GadgetPaused:        true,
+			GadgetResumePending: false,
+			LastRefreshAt:       &now,
+			LastError:           "本次开机未检测到 USB 主机完成枚举，已安全解绑；请预先插好 OTG 线后冷启动",
+		}, previous)
+		return nil
+	}
+	attemptCompleted = true
 	now := time.Now()
 	state := Snapshot{
-		Phase:         PhaseGadgetActive,
-		DataDrive:     &device,
-		Backing:       backingStatus,
-		Gadget:        gadgetEnvironment,
-		GadgetStatus:  gadgetStatus,
-		LastRefreshAt: &now,
+		Phase:               PhaseGadgetActive,
+		DataDrive:           &device,
+		Backing:             backingStatus,
+		Gadget:              gadgetEnvironment,
+		GadgetStatus:        gadgetStatus,
+		GadgetPaused:        false,
+		GadgetResumePending: false,
+		LastRefreshAt:       &now,
 	}
 	m.store(state, previous)
 	return nil
+}
+
+func (m *Manager) pollGadgetEnumeration(ctx context.Context, initial gadget.Status) (gadget.Status, bool, error) {
+	if initial.EnumerationComplete {
+		return initial, true, nil
+	}
+	timer := time.NewTimer(gadgetEnumerationWait)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	status := initial
+	for {
+		select {
+		case <-ctx.Done():
+			return status, false, ctx.Err()
+		case <-timer.C:
+			return status, false, nil
+		case <-ticker.C:
+			var err error
+			status, err = m.lifecycle.Inspect()
+			if err != nil {
+				return status, false, err
+			}
+			if status.EnumerationComplete {
+				return status, true, nil
+			}
+		}
+	}
 }
 
 func (m *Manager) refreshSnapshot(ctx context.Context) error {
@@ -573,9 +868,19 @@ func (m *Manager) handleMissingDataDrive(ctx context.Context, previous Snapshot)
 		wasActive = wasActive || status.Bound
 	}
 	status, stopErr := m.lifecycle.Stop()
+	if !m.bindAttemptAllowed {
+		m.gadgetPaused = true
+		m.gadgetResumePending = false
+	}
 	cleanupErr := m.cleanupDisconnectedSnapshots(ctx, previous)
 	now := time.Now()
-	state := Snapshot{Phase: PhaseWaitingForDataDrive, GadgetStatus: status, LastRefreshAt: &now}
+	state := Snapshot{
+		Phase:               PhaseWaitingForDataDrive,
+		GadgetStatus:        status,
+		GadgetPaused:        m.gadgetPaused,
+		GadgetResumePending: m.gadgetResumePending,
+		LastRefreshAt:       &now,
+	}
 	if stopErr != nil || cleanupErr != nil {
 		state.Phase = PhaseFault
 		cause := errors.Join(stopErr, cleanupErr)
@@ -629,16 +934,22 @@ func (m *Manager) cleanupDisconnectedSnapshots(ctx context.Context, previous Sna
 
 func (m *Manager) stopForFault(device *storage.Device, cause error) error {
 	status, stopErr := m.lifecycle.Stop()
+	if !m.bindAttemptAllowed {
+		m.gadgetPaused = true
+		m.gadgetResumePending = false
+	}
 	if stopErr != nil {
 		cause = errors.Join(cause, fmt.Errorf("停止 TeslaBox Gadget: %w", stopErr))
 	}
 	now := time.Now()
 	m.store(Snapshot{
-		Phase:         PhaseFault,
-		DataDrive:     device,
-		GadgetStatus:  status,
-		LastRefreshAt: &now,
-		LastError:     cause.Error(),
+		Phase:               PhaseFault,
+		DataDrive:           device,
+		GadgetStatus:        status,
+		GadgetPaused:        m.gadgetPaused,
+		GadgetResumePending: m.gadgetResumePending,
+		LastRefreshAt:       &now,
+		LastError:           cause.Error(),
 	})
 	return cause
 }

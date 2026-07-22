@@ -35,16 +35,20 @@ type Binding struct {
 
 // Status 描述 TeslaBox Gadget 当前的 configfs 状态。
 type Status struct {
-	Exists        bool      `json:"exists"`
-	Bound         bool      `json:"bound"`
-	UDC           string    `json:"udc,omitempty"`
-	UDCState      string    `json:"udc_state,omitempty"`
-	CurrentSpeed  string    `json:"current_speed,omitempty"`
-	HostDetected  bool      `json:"host_detected"`
-	HostConnected bool      `json:"host_connected"`
-	ImagePath     string    `json:"image_path,omitempty"`
-	SelectedUDC   string    `json:"selected_udc,omitempty"`
-	OtherBindings []Binding `json:"other_bindings"`
+	Exists        bool   `json:"exists"`
+	Bound         bool   `json:"bound"`
+	UDC           string `json:"udc,omitempty"`
+	UDCState      string `json:"udc_state,omitempty"`
+	CurrentSpeed  string `json:"current_speed,omitempty"`
+	HostDetected  bool   `json:"host_detected"`
+	HostConnected bool   `json:"host_connected"`
+	// EnumerationComplete 只表示 UDC 曾进入 configured；部分 RK3568 内核拔线后会保留该状态。
+	EnumerationComplete bool      `json:"enumeration_complete"`
+	BusSuspendKnown     bool      `json:"bus_suspend_known"`
+	BusSuspended        bool      `json:"bus_suspended"`
+	ImagePath           string    `json:"image_path,omitempty"`
+	SelectedUDC         string    `json:"selected_udc,omitempty"`
+	OtherBindings       []Binding `json:"other_bindings"`
 }
 
 // Manager 只管理固定名称的 TeslaBox Gadget，不接管其他 configfs 配置。
@@ -79,7 +83,23 @@ func (m *Manager) Inspect() (Status, error) {
 	}
 	normalizedState := strings.ToLower(strings.TrimSpace(status.UDCState))
 	status.HostDetected = normalizedState != "" && normalizedState != "not attached"
-	status.HostConnected = normalizedState == "configured"
+	status.EnumerationComplete = normalizedState == "configured"
+	// HostConnected 保留旧 API 兼容性；调用方不得再把它解释为可靠的物理插线检测。
+	status.HostConnected = status.EnumerationComplete
+	suspended, err := readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "device", "gadget", "suspended"))
+	if err != nil {
+		return Status{}, fmt.Errorf("读取 USB 总线挂起状态: %w", err)
+	}
+	switch strings.TrimSpace(suspended) {
+	case "":
+	case "0":
+		status.BusSuspendKnown = true
+	case "1":
+		status.BusSuspendKnown = true
+		status.BusSuspended = true
+	default:
+		return Status{}, fmt.Errorf("USB 总线挂起状态不合法: %q", suspended)
+	}
 	entries, err := os.ReadDir(m.config.ConfigFSPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("读取 USB Gadget configfs: %w", err)

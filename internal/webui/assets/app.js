@@ -11,13 +11,13 @@ const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
-const initialPage = window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
+const initialPage = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
 const state = {
   offset: 0, total: 0, loading: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
   page: initialPage, mustChangePassword: false,
-  wifi: null, ap: null, storage: null, update: null, uiFont: savedUIFont,
+  wifi: null, ap: null, storage: null, update: null, mediaAssets: null, uiFont: savedUIFont,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +27,7 @@ const loginForm = $("login-form");
 const loginError = $("login-error");
 const timelineList = $("video-grid");
 const notice = $("notice");
+const toastRegion = $("toast-region");
 const playerModal = $("player-modal");
 const mainVideoFrame = document.querySelector(".main-video-frame");
 const compositeGrid = $("composite-grid");
@@ -110,6 +111,7 @@ async function initialize() {
       return;
     }
     await refreshAll();
+    if (state.page === "media") await loadMediaAssets();
     if (state.page === "settings") await loadSettings();
     if (state.page === "logs") await loadLogs();
   } catch (error) {
@@ -172,6 +174,15 @@ $("logs-refresh").addEventListener("click", loadLogs);
 $("logs-lines").addEventListener("change", loadLogs);
 $("logs-auto-refresh").addEventListener("change", scheduleLogsRefresh);
 $("logs-copy").addEventListener("click", copyLogs);
+$("media-refresh").addEventListener("click", loadMediaAssets);
+$("media-boombox-upload").addEventListener("click", () => uploadMediaFiles("boombox"));
+$("media-wrap-upload").addEventListener("click", () => uploadMediaFiles("wrap"));
+$("media-lightshow-upload").addEventListener("click", () => uploadMediaFiles("lightshow"));
+$("media-music-upload").addEventListener("click", () => uploadMediaFiles("music"));
+$("media-apply").addEventListener("click", applyMediaAssets);
+$("usb-gadget-disconnect").addEventListener("click", disconnectGadget);
+$("usb-gadget-reconnect").addEventListener("click", reconnectGadget);
+$("usb-gadget-warm-restart").addEventListener("click", warmRestartGadget);
 document.querySelectorAll("[data-log-source]").forEach((button) => button.addEventListener("click", () => {
   activeLogSource = button.dataset.logSource;
   document.querySelectorAll("[data-log-source]").forEach((item) => item.classList.toggle("active", item === button));
@@ -184,6 +195,8 @@ $("ap-form").addEventListener("submit", saveAPSettings);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
 $("storage-refresh").addEventListener("click", loadStorageDevices);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
+$("storage-music-enabled").addEventListener("change", renderStoragePartitionPreview);
+$("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
 $("password-change-open").addEventListener("click", () => openPasswordModal(false));
 $("password-change-form").addEventListener("submit", changeManagementPassword);
 document.querySelectorAll("[data-close-password]").forEach((element) => element.addEventListener("click", () => closePasswordModal(false)));
@@ -324,15 +337,17 @@ function closeAppearanceMenu() {
 }
 
 function showPage(page, updateHistory) {
-  state.page = ["settings", "logs"].includes(page) ? page : "dashboard";
+  state.page = ["media", "settings", "logs"].includes(page) ? page : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
+  $("media-page").hidden = state.page !== "media";
   $("settings-page").hidden = state.page !== "settings";
   $("logs-page").hidden = state.page !== "logs";
   document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
   closeNavigation();
   closeAppearanceMenu();
-  const pagePath = state.page === "settings" ? "/settings" : state.page === "logs" ? "/logs" : "/";
+  const pagePath = state.page === "media" ? "/media" : state.page === "settings" ? "/settings" : state.page === "logs" ? "/logs" : "/";
   if (updateHistory) window.history.pushState({page:state.page}, "", pagePath);
+  if (state.page === "media" && !appView.hidden) loadMediaAssets();
   if (state.page === "settings" && !appView.hidden) loadSettings();
   if (state.page === "logs" && !appView.hidden) loadLogs();
   scheduleLogsRefresh();
@@ -340,15 +355,14 @@ function showPage(page, updateHistory) {
 }
 
 window.addEventListener("popstate", () => {
-  const page = window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
+  const page = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
   showPage(page, false);
 });
 
 async function loadLogs() {
   if (state.page !== "logs" || appView.hidden) return;
   $("logs-refresh").disabled = true;
-  $("logs-notice").textContent = "";
-  $("logs-notice").classList.remove("error");
+  setLogsNotice("", false);
   try {
     const lineCount = Number($("logs-lines").value) || 200;
     const [report, storage] = await Promise.all([
@@ -358,24 +372,247 @@ async function loadLogs() {
     renderLogDiagnostics(storage);
     renderLogs(report);
   } catch (error) {
-    $("logs-notice").textContent = error.message;
-    $("logs-notice").classList.add("error");
+    setLogsNotice(error.message, true);
   } finally {
     $("logs-refresh").disabled = false;
     scheduleLogsRefresh();
   }
 }
 
+async function loadMediaAssets() {
+  if (state.page !== "media" || appView.hidden) return;
+  $("media-refresh").disabled = true;
+  setMediaNotice("", false);
+  try {
+    const payload = await request("/api/v1/media-assets");
+    state.mediaAssets = payload;
+    renderMediaAssets(payload);
+  } catch (error) {
+    setMediaNotice(error.message, true);
+    renderMediaUnavailable(error.message);
+  } finally {
+    $("media-refresh").disabled = false;
+  }
+}
+
+function renderMediaAssets(payload) {
+  const assets = Array.isArray(payload.assets) ? payload.assets : [];
+  const categories = ["boombox", "wrap", "lightshow", "music"];
+  categories.forEach((category) => renderMediaCategory(category, assets.filter((asset) => asset.category === category)));
+  const status = $("media-apply-status");
+  status.className = `badge${payload.needs_apply ? " error" : " ok"}`;
+  status.textContent = payload.needs_apply ? "有待应用变更" : "已同步";
+  $("media-apply").disabled = !payload.needs_apply || !payload.image_available;
+  if (!payload.image_available) {
+    $("media-apply-detail").textContent = payload.message || "TeslaCam 虚拟盘尚未初始化。";
+  } else if (payload.needs_apply) {
+    $("media-apply-detail").textContent = "已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。";
+  } else {
+    $("media-apply-detail").textContent = "当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。";
+  }
+}
+
+function renderMediaUnavailable(message) {
+  ["boombox", "wrap", "lightshow", "music"].forEach((category) => {
+    const list = $(`media-${category}-list`);
+    list.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = message;
+    list.append(empty);
+  });
+  $("media-apply-status").textContent = "不可用";
+  $("media-apply-status").className = "badge error";
+  $("media-apply").disabled = true;
+}
+
+function renderMediaCategory(category, assets) {
+  const list = $(`media-${category}-list`);
+  const count = $(`media-${category}-count`);
+  count.textContent = category === "wrap" ? `${assets.length} / 10` : category === "music" ? `${assets.length} 首` : `${assets.length} 个`;
+  list.replaceChildren();
+  if (!assets.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "暂无通过 TeslaBox 管理的文件。";
+    list.append(empty);
+    return;
+  }
+  assets.forEach((asset) => {
+    const row = document.createElement("article");
+    row.className = "media-asset-row";
+    const main = document.createElement("div");
+    main.className = "media-asset-main";
+    const name = document.createElement("strong");
+    name.textContent = asset.name || "未命名媒体";
+    const detail = document.createElement("small");
+    const files = Array.isArray(asset.files) ? asset.files : [];
+    detail.textContent = files.map((file) => `${file.name} · ${formatBytes(file.size_bytes)}`).join(" · ") || "文件详情不可用";
+    main.append(name, detail);
+    if (asset.preview_available && !asset.pending_delete) {
+      const previewPath = `/api/v1/media-assets/${encodeURIComponent(asset.id)}/preview`;
+      if (category === "wrap") {
+        const preview = document.createElement("img");
+        preview.className = "media-wrap-preview";
+        preview.loading = "lazy";
+        preview.alt = `${asset.name || "皮肤"} 预览`;
+        preview.src = previewPath;
+        main.append(preview);
+      } else if (category === "boombox") {
+        const preview = document.createElement("audio");
+        preview.className = "media-audio-preview";
+        preview.controls = true;
+        preview.preload = "none";
+        preview.src = previewPath;
+        main.append(preview);
+      }
+    }
+    const actions = document.createElement("div");
+    actions.className = "media-asset-actions";
+    const stateBadge = document.createElement("span");
+    stateBadge.className = `badge${asset.pending_delete ? " error" : asset.applied ? " ok" : ""}`;
+    stateBadge.textContent = asset.pending_delete ? "待删除" : asset.pending ? "待应用" : "已应用";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ghost compact";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => deleteMediaAsset(asset));
+    actions.append(stateBadge, remove);
+    row.append(main, actions);
+    list.append(row);
+  });
+}
+
+async function uploadMediaFiles(category) {
+  const configuration = {
+    boombox: {input:"media-boombox-files", button:"media-boombox-upload", role:"file"},
+    wrap: {input:"media-wrap-files", button:"media-wrap-upload", role:"file"},
+    music: {input:"media-music-files", button:"media-music-upload", role:"file"},
+  }[category];
+  const form = new FormData();
+  let button;
+  if (category === "lightshow") {
+    const sequence = $("media-lightshow-sequence").files[0];
+    const audio = $("media-lightshow-audio").files[0];
+    if (!sequence || !audio) {
+      setMediaNotice("请同时选择 .fseq 序列文件和 MP3/WAV 音频文件", true);
+      return;
+    }
+    form.append("sequence", sequence, sequence.name);
+    form.append("audio", audio, audio.name);
+    button = $("media-lightshow-upload");
+  } else {
+    const files = configuration ? $(configuration.input).files : [];
+    if (!files?.length) {
+      setMediaNotice("请先选择文件", true);
+      return;
+    }
+    for (const file of files) form.append(configuration.role, file, file.name);
+    button = $(configuration.button);
+  }
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "暂存中…";
+  try {
+    const result = await request(`/api/v1/media-assets/upload?category=${encodeURIComponent(category)}`, {method:"POST", body:form});
+    const count = Array.isArray(result.assets) ? result.assets.length : 0;
+    setMediaNotice(`已安全暂存 ${count} 个媒体资源；待确认 OTG 已断开后再应用。`, false);
+    if (category === "lightshow") {
+      $("media-lightshow-sequence").value = "";
+      $("media-lightshow-audio").value = "";
+    } else if (configuration) {
+      $(configuration.input).value = "";
+    }
+    await loadMediaAssets();
+  } catch (error) {
+    setMediaNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function deleteMediaAsset(asset) {
+  const confirmed = await askConfirmation(
+    "删除媒体文件",
+    asset.applied ? "文件会标记为待删除，确认应用变更后才从车机虚拟盘移除。" : "这会丢弃尚未应用到车机的暂存文件。",
+    "确认删除", true,
+  );
+  if (!confirmed) return;
+  try {
+    await request(`/api/v1/media-assets/${encodeURIComponent(asset.id)}/delete`, {method:"POST"});
+    setMediaNotice(asset.applied ? "已标记删除；请在 OTG 断开后应用变更。" : "已删除暂存文件。", false);
+    await loadMediaAssets();
+  } catch (error) {
+    setMediaNotice(error.message, true);
+  }
+}
+
+async function applyMediaAssets() {
+  if (!$("media-confirm-otg-disconnected").checked) {
+    setMediaNotice("请先物理拔掉 OTG 线，并勾选确认项。", true);
+    return;
+  }
+  const confirmed = await askConfirmation(
+    "安全应用媒体变更",
+    "TeslaBox 将暂停 USB Gadget 并写入虚拟盘。本次运行不会重新绑定 OTG；完成后请插回 OTG，再到日志中心执行温重启恢复。",
+    "确认应用", true,
+  );
+  if (!confirmed) return;
+  const button = $("media-apply");
+  button.disabled = true;
+  try {
+    await postJSON("/api/v1/media-assets/apply", {confirm_otg_disconnected:true});
+    $("media-confirm-otg-disconnected").checked = false;
+    setMediaNotice("媒体变更已写入虚拟盘。请插回 OTG 后到日志中心执行温重启恢复。", false);
+    await Promise.allSettled([loadMediaAssets(), loadStatus()]);
+  } catch (error) {
+    setMediaNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setMediaNotice(message, error) {
+  presentNotice($("media-notice"), message, error);
+}
+
+function setLogsNotice(message, error) {
+  presentNotice($("logs-notice"), message, error);
+}
+
 function renderLogDiagnostics(storage) {
   const gadget = storage.gadget_status || {};
+  const enumerationComplete = Boolean(gadget.enumeration_complete ?? gadget.host_connected);
+  const busSuspended = Boolean(gadget.bus_suspend_known && gadget.bus_suspended);
   const badge = $("logs-usb-status");
   const warning = $("logs-usb-warning");
+  const disconnect = $("usb-gadget-disconnect");
+  const reconnect = $("usb-gadget-reconnect");
+	const warmRestart = $("usb-gadget-warm-restart");
   badge.className = "badge";
   warning.hidden = true;
   warning.textContent = "";
-  if (gadget.host_connected) {
-    badge.textContent = "枚举完成";
+	disconnect.hidden = Boolean(storage.gadget_paused) || !gadget.bound;
+	reconnect.hidden = !storage.gadget_paused || Boolean(storage.gadget_resume_pending);
+	warmRestart.hidden = !storage.gadget_paused || Boolean(storage.gadget_resume_pending);
+	if (storage.gadget_paused) {
+		badge.textContent = storage.gadget_resume_pending ? "等待冷启动" : "已安全断开";
+		badge.classList.add("ok");
+		warning.hidden = false;
+		warning.textContent = storage.gadget_resume_pending
+			? "已准备下次冷启动恢复。本次运行不会重新绑定 UDC；请保持 OTG 已插入，正常关机后断开主电源，再重新上电。"
+			: "USB Gadget 已从 UDC 解绑。同一开机周期禁止重新绑定；请先物理插入 OTG 线，再执行温重启恢复，冷启动可作为备用方案。";
+  } else if (enumerationComplete && busSuspended) {
+    badge.textContent = "可能已断开";
+    badge.classList.add("error");
+    warning.hidden = false;
+		warning.textContent = "控制器仍保留 configured/high-speed，但 USB 总线已经挂起。它可能是主机正常休眠，也可能是 OTG 已拔出；当前内核无法无损区分，TeslaBox 不会为确认状态而运行时重绑。";
+  } else if (enumerationComplete) {
+    badge.textContent = "已完成枚举";
     badge.classList.add("ok");
+    warning.hidden = false;
+		warning.textContent = "该状态只表示 UDC 最近一次完成过枚举。部分 ROCK 3A 内核拔线后仍会保留 configured/high-speed，因此它不能证明物理 OTG 当前仍连接。";
   } else if (gadget.host_detected) {
     badge.textContent = "枚举未完成";
     badge.classList.add("error");
@@ -391,6 +628,53 @@ function renderLogDiagnostics(storage) {
   $("logs-usb-speed").textContent = gadget.current_speed || "—";
   $("logs-udc").textContent = gadget.udc || gadget.selected_udc || "—";
   $("logs-backing").textContent = gadget.image_path || "未绑定";
+}
+
+async function disconnectGadget() {
+  const confirmed = await askConfirmation(
+    "安全断开 USB Gadget",
+		"请先确认车机或电脑上的 OTG 线已经物理拔出。继续后 TeslaBox 会解绑 UDC 并保持暂停；本次开机不会再重新绑定。",
+    "确认已拔线并断开", true,
+  );
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
+		setLogsNotice("USB Gadget 已安全断开；请先插入 OTG 线，再准备下次冷启动恢复", false);
+    await Promise.allSettled([loadLogs(), loadStatus()]);
+  } catch (error) {
+    setLogsNotice(error.message, true);
+  }
+}
+
+async function reconnectGadget() {
+	const confirmed = await askConfirmation(
+		"准备下次冷启动恢复",
+		"请先把 OTG 线物理插入车机或电脑。确认后本次运行仍保持 UDC 解绑；请正常关机，断开主电源后重新上电，TeslaBox 只会在新的系统开机周期尝试一次绑定。",
+		"确认已插线并准备", true,
+	);
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/gadget/reconnect", {confirm_physical_connection:true});
+		setLogsNotice("已准备下次冷启动恢复；请保持 OTG 已插入，关机断电后重新上电", false);
+    await Promise.allSettled([loadLogs(), loadStatus()]);
+  } catch (error) {
+    setLogsNotice(error.message, true);
+  }
+}
+
+async function warmRestartGadget() {
+	const confirmed = await askConfirmation(
+		"温重启恢复 USB Gadget",
+		"请先把 OTG 线物理插入车机或电脑。确认后 TeslaBox 会保存恢复状态并自动重启；本次运行不会直接重新绑定 UDC。",
+		"确认已插线并重启", true,
+	);
+	if (!confirmed) return;
+	try {
+		await postJSON("/api/v1/gadget/reboot-recover", {confirm_physical_connection:true});
+		setLogsNotice("温重启命令已提交，请等待设备重新上线", false);
+	} catch (error) {
+		setLogsNotice(error.message, true);
+	}
 }
 
 function renderLogs(report) {
@@ -445,11 +729,9 @@ async function copyLogs() {
       document.execCommand("copy");
       textarea.remove();
     }
-    $("logs-notice").classList.remove("error");
-    $("logs-notice").textContent = "日志已复制。";
+    setLogsNotice("日志已复制。", false);
   } catch (_) {
-    $("logs-notice").classList.add("error");
-    $("logs-notice").textContent = "浏览器不允许自动复制，请选中日志内容后手动复制。";
+    setLogsNotice("浏览器不允许自动复制，请选中日志内容后手动复制。", true);
   }
 }
 
@@ -460,7 +742,7 @@ async function postJSON(path, body) {
 }
 
 async function loadSettings() {
-  setSettingsNotice("正在读取网络设置…", false);
+  setSettingsNotice("正在读取网络设置…", false, false);
   const [wifiResult, apResult, storageResult, updateResult] = await Promise.allSettled([
     request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"),
   ]);
@@ -488,7 +770,7 @@ async function loadSettings() {
   } else {
     renderUpdateUnavailable(updateResult.reason.message);
   }
-  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false);
+  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false, false);
   else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
 }
 
@@ -529,6 +811,12 @@ function renderUpdateUnavailable(message) {
   $("update-install").hidden = true;
 }
 
+function setUpdateNotice(message, error) {
+  const notice = $("update-notice");
+  presentNotice(notice, message, error);
+  notice.hidden = true;
+}
+
 function scheduleUpdatePoll() {
   clearUpdatePoll();
   updatePollTimer = window.setTimeout(async () => {
@@ -554,9 +842,9 @@ async function checkUpdate() {
   try {
     state.update = await postJSON("/api/v1/update/check", {});
     renderUpdate(state.update);
-    setSettingsNotice(state.update.available ? `发现 ${state.update.latest_version} 更新` : "当前已是最新版本", false);
+    setUpdateNotice(state.update.available ? `发现 ${state.update.latest_version} 更新` : "当前已是最新版本", false);
   } catch (error) {
-    setSettingsNotice(error.message, true);
+    setUpdateNotice(error.message, true);
     await refreshUpdateStatus();
   }
 }
@@ -565,25 +853,30 @@ async function downloadUpdate() {
   try {
     state.update = await postJSON("/api/v1/update/download", {});
     renderUpdate(state.update);
-    setSettingsNotice("更新包正在后台下载并校验", false);
+    setUpdateNotice("更新包正在后台下载并校验", false);
   } catch (error) {
-    setSettingsNotice(error.message, true);
+    setUpdateNotice(error.message, true);
   }
 }
 
 async function installUpdate() {
   const confirmed = await askConfirmation(
     "安装系统更新",
-    `将安装 ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先断开车机 OTG，确认没有视频导出任务。失败时设备会自动恢复旧程序。`,
-    "安装并重启", true,
+		`将安装 ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
+    "确认已拔线并安装", true,
   );
   if (!confirmed) return;
   try {
+    const storage = await request("/api/v1/storage");
+    if (storage.gadget_status?.bound) {
+      setUpdateNotice("已确认 OTG 物理断开，正在安全解绑 USB Gadget…", false);
+      await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
+    }
     state.update = await postJSON("/api/v1/update/install", {});
     renderUpdate(state.update);
-    setSettingsNotice("安装请求已提交，服务即将重启", false);
-  } catch (error) {
-    setSettingsNotice(error.message, true);
+		setUpdateNotice("安装请求已提交。服务重启后 Gadget 会继续保持安全断开；请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。", false);
+	} catch (error) {
+		setUpdateNotice(`${error.message}。USB Gadget 会继续保持安全断开；请先插入 OTG 线，再到日志中心准备下次冷启动。`, true);
   }
 }
 
@@ -931,11 +1224,11 @@ function renderStorageDevices(storage) {
     const reason = document.createElement("small");
     reason.textContent = device.last_error || device.reason || "—";
     stateBox.append(badge, reason);
-    if (device.can_initialize || device.can_resume) {
+    if (device.can_initialize || device.can_resume || device.can_reinitialize) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = device.can_resume ? "secondary compact" : "danger-button compact";
-      button.textContent = device.can_resume ? "继续初始化" : "初始化设备";
+      button.className = device.can_resume || device.can_reinitialize ? "secondary compact" : "danger-button compact";
+      button.textContent = device.can_resume ? "继续初始化" : device.can_reinitialize ? "重新初始化" : "初始化设备";
       button.addEventListener("click", () => openStorageModal(device));
       stateBox.append(button);
     }
@@ -975,12 +1268,28 @@ function storageStateLabel(device) {
 
 function openStorageModal(device) {
   pendingStorage = device;
-  $("storage-modal-title").textContent = device.can_resume ? "继续初始化存储设备" : "初始化存储设备";
-  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，${formatBytes(device.size_bytes)}。目标序列号：${device.serial}。该操作可能擦除整块设备。`;
+  const reinitialize = Boolean(device.initialized && device.can_reinitialize);
+  $("storage-modal-title").textContent = device.can_resume ? "继续初始化存储设备" : reinitialize ? "重新初始化存储设备" : "初始化存储设备";
+  const imageSize = device.planned_image_size_bytes || device.size_bytes;
+  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，物理容量 ${formatBytes(device.size_bytes)}，预计向车机提供 ${formatBytes(imageSize)}。目标序列号：${device.serial}。该操作会擦除整块设备。`;
+  $("storage-music-enabled").checked = false;
+  $("storage-teslacam-percent").value = "80";
   $("storage-confirm-serial").value = "";
+  $("storage-confirm-otg-disconnected").checked = false;
   $("storage-confirm-erase").checked = false;
+  renderStoragePartitionPreview();
   $("storage-modal").hidden = false;
   $("storage-confirm-serial").focus();
+}
+
+function renderStoragePartitionPreview() {
+  const enabled = $("storage-music-enabled").checked;
+  $("storage-partition-options").hidden = !enabled;
+  if (!pendingStorage || !enabled) return;
+  const percent = Number($("storage-teslacam-percent").value || 80);
+  const total = Number(pendingStorage.planned_image_size_bytes || pendingStorage.size_bytes || 0);
+  const teslaCam = Math.floor(total * percent / 100);
+  $("storage-partition-preview").textContent = `TeslaCam ${percent}%（约 ${formatBytes(teslaCam)}） · MUSIC ${100 - percent}%（约 ${formatBytes(total - teslaCam)}）`;
 }
 
 function closeStorageModal() {
@@ -999,9 +1308,13 @@ async function initializeStorageDevice(event) {
       stable_path:pendingStorage.stable_path,
       confirm_serial:$("storage-confirm-serial").value,
       confirm_erase:$("storage-confirm-erase").checked,
+      confirm_otg_disconnected:$("storage-confirm-otg-disconnected").checked,
+      reinitialize:Boolean(pendingStorage.initialized && pendingStorage.can_reinitialize),
+      music_enabled:$("storage-music-enabled").checked,
+      teslacam_percent:Number($("storage-teslacam-percent").value || 80),
     });
     closeStorageModal();
-    setSettingsNotice("存储设备初始化完成，正在恢复 TeslaUSB", false);
+    setSettingsNotice("存储设备初始化完成；请插好 OTG 后到日志中心执行温重启恢复", false);
     await loadStorageDevices();
     await refreshAll();
   } catch (error) {
@@ -1068,9 +1381,8 @@ function supportedWiFiSecurity(security) {
   return value === "OPEN" || (value.includes("WPA") && !value.includes("EAP") && !value.includes("802.1X"));
 }
 
-function setSettingsNotice(message, error) {
-  $("settings-notice").textContent = message;
-  $("settings-notice").classList.toggle("error", Boolean(error));
+function setSettingsNotice(message, error, toast = true) {
+  presentNotice($("settings-notice"), message, error, toast);
 }
 
 async function loadStatus() {
@@ -1082,24 +1394,34 @@ async function loadStatus() {
     const storage = storageResult.value;
     renderStatus(storage);
     $("live-indicator").classList.add("online");
-    $("live-indicator").querySelector("span").textContent = "已连接";
+    $("live-indicator").querySelector("span").textContent = "设备在线";
     if (systemResult.status === "fulfilled") renderSystemStatus(systemResult.value);
     else renderSystemUnavailable();
   } catch (error) {
     $("live-indicator").classList.remove("online");
-    $("live-indicator").querySelector("span").textContent = "连接异常";
+    $("live-indicator").querySelector("span").textContent = "设备离线";
     setNotice(error.message, true);
   }
 }
 
 function renderStatus(storage) {
   const gadget = storage.gadget_status || {};
+  const enumerationComplete = Boolean(gadget.enumeration_complete ?? gadget.host_connected);
+  const busSuspended = Boolean(gadget.bus_suspend_known && gadget.bus_suspended);
   const badge = $("usb-badge");
   badge.className = "badge";
-  if (gadget.host_connected) {
-    badge.textContent = "车机已连接";
+	if (storage.gadget_paused) {
+		badge.textContent = storage.gadget_resume_pending ? "等待冷启动" : "已安全断开";
+		badge.classList.add("ok");
+		$("usb-title").textContent = storage.gadget_resume_pending ? "已准备下次冷启动恢复" : "USB Gadget 保持暂停";
+  } else if (enumerationComplete && busSuspended) {
+    badge.textContent = "可能已断开";
+    badge.classList.add("error");
+    $("usb-title").textContent = "主机休眠或 OTG 已拔出";
+  } else if (enumerationComplete) {
+    badge.textContent = "已完成枚举";
     badge.classList.add("ok");
-    $("usb-title").textContent = gadget.current_speed || "USB 已连接";
+    $("usb-title").textContent = gadget.current_speed || "USB 枚举完成";
   } else if (gadget.host_detected) {
     badge.textContent = "枚举未完成";
     badge.classList.add("error");
@@ -1112,7 +1434,14 @@ function renderStatus(storage) {
     badge.classList.add("error");
     $("usb-title").textContent = "USB Gadget 未绑定";
   }
-  $("usb-detail").textContent = `${gadget.udc_state || "状态未知"} · ${storage.phase || "UNKNOWN"}`;
+	if (storage.gadget_resume_pending) {
+		$("usb-detail").textContent = "本次运行保持解绑 · 请关机断电后重新上电";
+	} else if (busSuspended) {
+    $("usb-detail").textContent = "USB 总线已挂起 · Gadget 仍保持就绪";
+  } else {
+    const usbSemantics = enumerationComplete && !storage.gadget_paused ? "内核可能保留该枚举状态" : "";
+    $("usb-detail").textContent = [gadget.udc_state || "状态未知", storage.phase || "UNKNOWN", usbSemantics].filter(Boolean).join(" · ");
+  }
   $("video-count").textContent = `${formatNumber(storage.video_count || 0)} 个`;
 
   const space = storage.snapshot_space || {};
@@ -1199,7 +1528,7 @@ async function loadSessions() {
   if (state.loading) return;
   state.loading = true;
   timelineList.replaceChildren();
-  setNotice("正在整理完整录像时间轴…", false);
+  setNotice("正在整理完整录像时间轴…", false, false);
   try {
     const params = new URLSearchParams({ limit: "1000" });
     for (const id of ["clip-type", "date", "event"]) {
@@ -1212,7 +1541,7 @@ async function loadSessions() {
     renderArchiveTimeline();
     $("result-count").textContent = `${formatNumber(payload.total)} 段完整录像`;
     $("load-more").hidden = true;
-    setNotice(payload.total === 0 ? "当前筛选条件下没有录像" : "", false);
+    setNotice(payload.total === 0 ? "当前筛选条件下没有录像" : "", false, false);
   } catch (error) {
     setNotice(error.message, true);
   } finally {
@@ -2407,9 +2736,60 @@ function writePreference(key, value) {
   try { window.localStorage.setItem(key, value); } catch (_) { /* 无持久存储时仍保持当前页面状态 */ }
 }
 
-function setNotice(message, error) {
-  notice.textContent = message;
-  notice.classList.toggle("error", Boolean(error));
+function setNotice(message, error, toast = true) {
+  presentNotice(notice, message, error, toast);
+}
+
+function presentNotice(element, message, error, toast = true) {
+  const content = String(message || "").trim();
+  element.textContent = content;
+  element.classList.toggle("error", Boolean(error));
+  if (toast && content) showToast(content, Boolean(error));
+}
+
+function showToast(message, error) {
+  if (!toastRegion || !message) return;
+  const content = String(message).trim();
+  if (!content) return;
+  const fingerprint = `${error ? "error" : "info"}:${content}`;
+  const existing = Array.from(toastRegion.children).find((item) => item.dataset.fingerprint === fingerprint);
+  if (existing) {
+    existing.classList.remove("closing");
+    scheduleToastDismiss(existing, error);
+    return;
+  }
+  while (toastRegion.children.length >= 4) toastRegion.firstElementChild?.remove();
+  const toast = document.createElement("article");
+  toast.className = `toast${error ? " error" : ""}`;
+  toast.dataset.fingerprint = fingerprint;
+  const icon = document.createElement("span");
+  icon.className = "toast-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = error ? "!" : "✓";
+  const text = document.createElement("p");
+  text.className = "toast-message";
+  text.textContent = content.length > 480 ? `${content.slice(0, 479)}…` : content;
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "toast-dismiss";
+  dismiss.setAttribute("aria-label", "关闭提示");
+  dismiss.textContent = "×";
+  dismiss.addEventListener("click", () => dismissToast(toast));
+  toast.append(icon, text, dismiss);
+  toastRegion.append(toast);
+  scheduleToastDismiss(toast, error);
+}
+
+function scheduleToastDismiss(toast, error) {
+  window.clearTimeout(toast.dismissTimer);
+  toast.dismissTimer = window.setTimeout(() => dismissToast(toast), error ? 10000 : 5200);
+}
+
+function dismissToast(toast) {
+  if (!toast?.parentElement || toast.classList.contains("closing")) return;
+  window.clearTimeout(toast.dismissTimer);
+  toast.classList.add("closing");
+  window.setTimeout(() => toast.remove(), 220);
 }
 
 function cameraLabel(value) {

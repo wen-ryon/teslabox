@@ -36,7 +36,7 @@ sudo ./teslabox-install.sh
 
 1. 核对 ROCK 3A、Debian 11 和 ARM64。
 2. 从 Gitee Release 下载首装包并校验归档及包内每个文件的 SHA-256。
-3. 安装 XFS、exFAT/FUSE、分区、NetworkManager、mDNS 和 USB 管理依赖。
+3. 安装 XFS、exFAT/FUSE、FAT32 格式化工具 `dosfstools`、分区、NetworkManager、mDNS 和 USB 管理依赖。
 4. 安装 `teslabox`、`teslabox-init`、`teslabox-image-init` 和 `teslabox-gadget`。
 5. 安装 Rockchip 专用 FFmpeg、MPP 和 RGA 到 `/opt/teslabox/media`，不覆盖系统自带的 `ffmpeg`。
 6. 安装 `teslabox.service`、按需启动的 `teslabox-update.service`、udev 规则和 AP 恢复组件。
@@ -92,7 +92,11 @@ teslabox
 
 第一次登录必须修改默认密码。完成改密后进入“设置中心 → 外接存储”，插入准备用作 TeslaBox 数据盘的 USB U 盘、USB SSD 或 USB 硬盘，再由页面扫描并初始化。
 
-存储初始化会擦除选中的整块盘。页面会再次核对 USB by-id、序列号、容量、挂载和 swap 状态，并要求擦除确认。TF 卡只运行 Debian 和 TeslaBox；外接数据盘保存 TeslaCam 虚拟磁盘、快照、导出和媒体索引。
+存储初始化会擦除选中的整块盘。页面会再次核对 USB by-id、序列号、容量、挂载和 swap 状态，并要求先物理拔掉车机/电脑 OTG 线、输入序列号和确认擦除。TF 卡只运行 Debian 和 TeslaBox；外接数据盘保存 TeslaCam 虚拟磁盘、快照、导出和媒体索引。
+
+初始化页面会尽可能利用外接盘容量，同时为快照和运行数据预留 5% 且不少于 20GB。若希望车机同时读取本地音乐，可以勾选“创建 MUSIC 音乐分区（FAT32）”，再调整 TeslaCam 与音乐容量比例；不需要音乐时保持未勾选即可。已初始化盘也可以通过“重新初始化”更改布局，但该操作同样会删除全部录像、音乐和导出文件。
+
+初始化完成后先插好 OTG，再到“日志中心”执行“温重启恢复”。系统会保存恢复标记并自动重启；若目标主机仍不能识别，关闭设备并完全断电，保持 OTG 预插后重新上电。
 
 不要手工把 `/dev/sdX` 写入配置，也不要把普通 exFAT U 盘直接当作 TeslaBox backing store。最终数据盘需要 XFS reflink，TeslaCam 则位于数据盘内的 MBR/exFAT 虚拟磁盘镜像中。
 
@@ -153,3 +157,15 @@ sudo journalctl -u teslabox.service -n 100 --no-pager
 ```
 
 首装脚本在健康检查失败时会恢复之前的主程序。配置、数据盘或端口问题仍需要根据日志处理。
+
+### 创建 MUSIC 分区提示缺少 `mkfs.vfat`
+
+这通常说明设备曾通过早期版本安装，缺少 FAT32 格式化工具。先安装依赖，再在“外接存储”刷新页面并优先选择“继续初始化”：
+
+```sh
+sudo apt-get update
+sudo apt-get install -y dosfstools
+command -v mkfs.vfat
+```
+
+新版本会在擦除数据盘前检查 `mkfs.vfat`；不要在缺少该命令时反复执行重新初始化。

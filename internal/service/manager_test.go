@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,8 +43,15 @@ type fakeProber struct {
 }
 
 type fakeMounter struct {
-	calls int
-	err   error
+	calls        int
+	err          error
+	unmountCalls int
+	unmountErr   error
+}
+
+func (m *fakeMounter) Unmount(context.Context) error {
+	m.unmountCalls++
+	return m.unmountErr
 }
 
 func (m *fakeMounter) Mount(context.Context, storage.Device) error {
@@ -122,6 +132,8 @@ func (l *fakeLifecycle) Start() (gadget.Status, error) {
 	l.status.Exists = true
 	l.status.Bound = true
 	l.status.UDC = "fcc00000.dwc3"
+	l.status.EnumerationComplete = true
+	l.status.HostConnected = true
 	return l.status, nil
 }
 
@@ -133,6 +145,8 @@ func (l *fakeLifecycle) Stop() (gadget.Status, error) {
 	l.status.Exists = false
 	l.status.Bound = false
 	l.status.UDC = ""
+	l.status.EnumerationComplete = false
+	l.status.HostConnected = false
 	return l.status, nil
 }
 
@@ -326,6 +340,285 @@ func TestManagerLateDataDriveMountsAndStartsGadget(t *testing.T) {
 	}
 }
 
+func TestManagerPauseKeepsGadgetUnboundAndResumeOnlySchedulesColdBoot(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	lifecycle := &fakeLifecycle{}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{},
+		lifecycle,
+		&fakeSnapshotter{},
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	paused, err := manager.PauseGadget(t.Context())
+	if err != nil {
+		t.Fatalf("PauseGadget() error = %v", err)
+	}
+	if !paused.GadgetPaused || paused.Phase != PhaseReadyForGadget || paused.GadgetStatus.Bound {
+		t.Fatalf("paused state = %#v", paused)
+	}
+	startsBeforeRefresh := lifecycle.startCalls
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("paused Refresh() error = %v", err)
+	}
+	if state := manager.Snapshot(); !state.GadgetPaused || state.GadgetStatus.Bound || lifecycle.startCalls != startsBeforeRefresh {
+		t.Fatalf("paused refresh state = %#v, start calls = %d", state, lifecycle.startCalls)
+	}
+
+	resumed, err := manager.ResumeGadget(t.Context())
+	if err != nil {
+		t.Fatalf("ResumeGadget() error = %v", err)
+	}
+	if !resumed.GadgetPaused || !resumed.GadgetResumePending || resumed.Phase != PhaseReadyForGadget || resumed.GadgetStatus.Bound || lifecycle.startCalls != startsBeforeRefresh {
+		t.Fatalf("resumed state = %#v, start calls = %d", resumed, lifecycle.startCalls)
+	}
+}
+
+func TestManagerBeginStorageMaintenanceStopsAndUnmounts(t *testing.T) {
+	t.Parallel()
+	mounter := &fakeMounter{}
+	lifecycle := &fakeLifecycle{status: gadget.Status{Exists: true, Bound: true, UDC: "fcc00000.dwc3"}}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{},
+		fakeInspector{},
+		fakeProber{},
+		mounter,
+		lifecycle,
+		&fakeSnapshotter{},
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	release, err := manager.BeginStorageMaintenance(t.Context())
+	if err != nil {
+		t.Fatalf("BeginStorageMaintenance() error = %v", err)
+	}
+	state := manager.Snapshot()
+	if !state.GadgetPaused || state.GadgetStatus.Bound || state.DataDrive != nil || lifecycle.stopCalls != 1 || mounter.unmountCalls != 1 {
+		t.Fatalf("state = %#v, stop calls = %d, unmount calls = %d", state, lifecycle.stopCalls, mounter.unmountCalls)
+	}
+	// 维护结束回调可能同时经过正常返回和错误清理路径，必须保持幂等。
+	release()
+	release()
+}
+
+func TestManagerBeginMediaMaintenanceKeepsDataDriveMounted(t *testing.T) {
+	t.Parallel()
+	mounter := &fakeMounter{}
+	lifecycle := &fakeLifecycle{status: gadget.Status{Exists: true, Bound: true, UDC: "fcc00000.dwc3"}}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{},
+		fakeInspector{},
+		fakeProber{},
+		mounter,
+		lifecycle,
+		&fakeSnapshotter{},
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	manager.store(Snapshot{DataDrive: &device, GadgetStatus: lifecycle.status})
+
+	release, err := manager.BeginMediaMaintenance(t.Context())
+	if err != nil {
+		t.Fatalf("BeginMediaMaintenance() error = %v", err)
+	}
+	state := manager.Snapshot()
+	if !state.GadgetPaused || state.GadgetStatus.Bound || state.DataDrive == nil || mounter.unmountCalls != 0 || lifecycle.stopCalls != 1 {
+		t.Fatalf("state = %#v, unmount calls = %d, stop calls = %d", state, mounter.unmountCalls, lifecycle.stopCalls)
+	}
+	release()
+}
+
+func TestManagerStopsUnconfiguredBootAttemptAndDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	lifecycle := &fakeLifecycle{}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, lifecycle, &fakeSnapshotter{}, &fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	manager.waitForEnumeration = func(context.Context, gadget.Status) (gadget.Status, bool, error) {
+		return lifecycle.status, false, nil
+	}
+
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	state := manager.Snapshot()
+	if state.Phase != PhaseReadyForGadget || !state.GadgetPaused || state.GadgetStatus.Bound || lifecycle.startCalls != 1 || lifecycle.stopCalls == 0 {
+		t.Fatalf("state = %#v, start calls = %d", state, lifecycle.startCalls)
+	}
+
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("second Refresh() error = %v", err)
+	}
+	if state = manager.Snapshot(); !state.GadgetPaused || state.GadgetStatus.Bound || lifecycle.startCalls != 1 {
+		t.Fatalf("state = %#v, start calls = %d", state, lifecycle.startCalls)
+	}
+}
+
+func TestManagerPauseSurvivesServiceRestart(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	pausePath := filepath.Join(root, "gadget-paused")
+	bootIDPath := filepath.Join(root, "boot-id")
+	if err := os.WriteFile(bootIDPath, []byte("boot-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	cfg := config.Config{GadgetPauseStatePath: pausePath, BootIDPath: bootIDPath}
+	newManager := func(lifecycle *fakeLifecycle) *Manager {
+		return NewManager(
+			cfg,
+			fakeDetector{device: device},
+			fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+			fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+			&fakeMounter{}, lifecycle, &fakeSnapshotter{}, &fakeVideoScanner{},
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+		)
+	}
+
+	firstLifecycle := &fakeLifecycle{}
+	first := newManager(firstLifecycle)
+	if _, err := first.PauseGadget(t.Context()); err != nil {
+		t.Fatalf("PauseGadget() error = %v", err)
+	}
+	if _, err := os.Stat(pausePath); err != nil {
+		t.Fatalf("pause marker: %v", err)
+	}
+
+	secondLifecycle := &fakeLifecycle{}
+	second := newManager(secondLifecycle)
+	if err := second.Refresh(t.Context()); err != nil {
+		t.Fatalf("restarted Refresh() error = %v", err)
+	}
+	if state := second.Snapshot(); !state.GadgetPaused || state.GadgetStatus.Bound || secondLifecycle.startCalls != 0 {
+		t.Fatalf("state = %#v, start calls = %d", state, secondLifecycle.startCalls)
+	}
+
+	if _, err := second.ResumeGadget(t.Context()); err != nil {
+		t.Fatalf("ResumeGadget() error = %v", err)
+	}
+	content, err := os.ReadFile(pausePath)
+	if err != nil || strings.TrimSpace(string(content)) != "resume-after:boot-a" {
+		t.Fatalf("resume marker = %q, error = %v", content, err)
+	}
+
+	sameBootLifecycle := &fakeLifecycle{}
+	sameBoot := newManager(sameBootLifecycle)
+	if err := sameBoot.Refresh(t.Context()); err != nil {
+		t.Fatalf("same boot Refresh() error = %v", err)
+	}
+	if state := sameBoot.Snapshot(); !state.GadgetPaused || !state.GadgetResumePending || sameBootLifecycle.startCalls != 0 {
+		t.Fatalf("same boot state = %#v, start calls = %d", state, sameBootLifecycle.startCalls)
+	}
+
+	if err := os.WriteFile(bootIDPath, []byte("boot-b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nextBootLifecycle := &fakeLifecycle{}
+	nextBoot := newManager(nextBootLifecycle)
+	if err := nextBoot.Refresh(t.Context()); err != nil {
+		t.Fatalf("next boot Refresh() error = %v", err)
+	}
+	if state := nextBoot.Snapshot(); state.GadgetPaused || state.GadgetResumePending || state.Phase != PhaseGadgetActive || nextBootLifecycle.startCalls != 1 {
+		t.Fatalf("next boot state = %#v, start calls = %d", state, nextBootLifecycle.startCalls)
+	}
+}
+
+func TestManagerSameBootIDCannotBindAgainAfterServiceRestart(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	bootIDPath := filepath.Join(root, "boot-id")
+	guardPath := filepath.Join(root, "gadget-guard")
+	if err := os.WriteFile(bootIDPath, []byte("boot-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	cfg := config.Config{GadgetPauseStatePath: guardPath, BootIDPath: bootIDPath}
+	newManager := func(lifecycle *fakeLifecycle) *Manager {
+		return NewManager(
+			cfg,
+			fakeDetector{device: device},
+			fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+			fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+			&fakeMounter{}, lifecycle, &fakeSnapshotter{}, &fakeVideoScanner{},
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+		)
+	}
+
+	firstLifecycle := &fakeLifecycle{}
+	first := newManager(firstLifecycle)
+	if err := first.Refresh(t.Context()); err != nil {
+		t.Fatalf("first Refresh() error = %v", err)
+	}
+	if firstLifecycle.startCalls != 1 {
+		t.Fatalf("first start calls = %d", firstLifecycle.startCalls)
+	}
+	content, err := os.ReadFile(guardPath)
+	if err != nil || strings.TrimSpace(string(content)) != "attempt:boot-a" {
+		t.Fatalf("attempt marker = %q, error = %v", content, err)
+	}
+
+	restartedLifecycle := &fakeLifecycle{}
+	restarted := newManager(restartedLifecycle)
+	if err := restarted.Refresh(t.Context()); err != nil {
+		t.Fatalf("restarted Refresh() error = %v", err)
+	}
+	if state := restarted.Snapshot(); !state.GadgetPaused || state.GadgetStatus.Bound || restartedLifecycle.startCalls != 0 {
+		t.Fatalf("restarted state = %#v, start calls = %d", state, restartedLifecycle.startCalls)
+	}
+}
+
+func TestManagerPauseFailureRemainsPausedForRetry(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	lifecycle := &fakeLifecycle{stopErr: errors.New("unbind failed")}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{},
+		lifecycle,
+		&fakeSnapshotter{},
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	failed, err := manager.PauseGadget(t.Context())
+	if err == nil || !failed.GadgetPaused || failed.Phase != PhaseFault || !failed.GadgetStatus.Bound {
+		t.Fatalf("failed pause state = %#v, error = %v", failed, err)
+	}
+
+	lifecycle.stopErr = nil
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("retry Refresh() error = %v", err)
+	}
+	if state := manager.Snapshot(); !state.GadgetPaused || state.GadgetStatus.Bound || state.Phase != PhaseReadyForGadget {
+		t.Fatalf("retried pause state = %#v", state)
+	}
+}
+
 func TestManagerDataDriveDisconnectStopsGadgetAndFaults(t *testing.T) {
 	t.Parallel()
 	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
@@ -357,7 +650,7 @@ func TestManagerDataDriveDisconnectStopsGadgetAndFaults(t *testing.T) {
 	if err := manager.Refresh(t.Context()); !errors.Is(err, ErrDataDriveDisconnected) || manager.Snapshot().Phase != PhaseFault {
 		t.Fatalf("repeated missing drive error = %v, state = %#v", err, manager.Snapshot())
 	}
-	if err := manager.Refresh(t.Context()); err != nil || manager.Snapshot().Phase != PhaseGadgetActive {
+	if err := manager.Refresh(t.Context()); err != nil || manager.Snapshot().Phase != PhaseReadyForGadget || !manager.Snapshot().GadgetPaused {
 		t.Fatalf("recovered drive error = %v, state = %#v", err, manager.Snapshot())
 	}
 }

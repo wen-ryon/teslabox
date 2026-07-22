@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260722-2">
-  <script src="/app.js?v=20260722-2" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260722-6">
+  <script src="/app.js?v=20260722-9" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -43,14 +43,16 @@
         </div>
       </div>
     </header>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-relevant="additions"></div>
 
     <div id="nav-backdrop" class="nav-backdrop" hidden></div>
     <aside id="nav-drawer" class="nav-drawer" aria-label="主导航" hidden>
       <div class="drawer-head"><span class="brand-mark static">T</span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
       <nav class="drawer-nav">
         <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
-        <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
+        <button type="button" data-page-link="media"><span>媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
         <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、服务与网络诊断</small></button>
+        <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
       </nav>
       <p class="drawer-foot">TeslaBox 本地管理中心</p>
     </aside>
@@ -131,6 +133,50 @@
       </section>
     </div>
 
+    <div id="media-page" class="page media-page app-page" hidden>
+      <section class="settings-hero media-hero">
+        <div><p class="eyebrow">TESLA MEDIA</p><h1>媒体中心</h1><p class="hero-copy">把锁车音效、喷漆车间皮肤、自定义灯光秀和音乐整理到车机可识别的目录。上传会先安全暂存；点击应用时才写入虚拟盘。</p></div>
+        <button id="media-refresh" class="secondary" type="button">刷新媒体</button>
+      </section>
+      <div id="media-notice" class="notice" role="status" aria-live="polite"></div>
+      <div class="settings-warning">应用变更前，必须先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。</div>
+
+      <section class="media-grid" aria-label="Tesla 媒体分类">
+        <article class="settings-card media-card">
+          <div class="media-card-head"><div><p class="eyebrow">BOOMBOX</p><h2>锁车音效</h2><p>写入 exFAT 分区根目录的 <code>Boombox/</code>。支持 MP3、WAV，最多保留 5 个。</p></div><span id="media-boombox-count" class="badge">0 个</span></div>
+          <label class="media-upload-control">选择音效<input id="media-boombox-files" type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" multiple></label>
+          <button id="media-boombox-upload" class="secondary compact" type="button">暂存音效</button>
+          <div id="media-boombox-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+
+        <article class="settings-card media-card">
+          <div class="media-card-head"><div><p class="eyebrow">PAINT SHOP</p><h2>喷漆车间皮肤</h2><p>写入 <code>Wraps/</code>。上传时校验 PNG、正方形尺寸、1MB 和名称安全。</p></div><span id="media-wrap-count" class="badge">0 / 10</span></div>
+          <label class="media-upload-control">选择 PNG 皮肤<input id="media-wrap-files" type="file" accept="image/png,.png" multiple></label>
+          <button id="media-wrap-upload" class="secondary compact" type="button">暂存皮肤</button>
+          <div id="media-wrap-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+
+        <article class="settings-card media-card">
+          <div class="media-card-head"><div><p class="eyebrow">LIGHT SHOW</p><h2>自定义灯光秀</h2><p>写入 <code>LightShow/</code>。序列和音频必须同名，例如 <code>show.fseq</code> 与 <code>show.wav</code>。</p></div><span id="media-lightshow-count" class="badge">0 个</span></div>
+          <div class="media-lightshow-inputs"><label class="media-upload-control">FSEQ 序列<input id="media-lightshow-sequence" type="file" accept=".fseq"></label><label class="media-upload-control">MP3 或 WAV 音频<input id="media-lightshow-audio" type="file" accept="audio/mpeg,audio/wav,.mp3,.wav"></label></div>
+          <button id="media-lightshow-upload" class="secondary compact" type="button">暂存灯光秀</button>
+          <div id="media-lightshow-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+
+        <article class="settings-card media-card">
+          <div class="media-card-head"><div><p class="eyebrow">MUSIC</p><h2>音乐</h2><p>批量写入可选 FAT32 音乐分区。若初始化时未创建 MUSIC 分区，应用时会给出明确提示。</p></div><span id="media-music-count" class="badge">0 首</span></div>
+          <label class="media-upload-control">选择音乐<input id="media-music-files" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.m4a,.aac,.flac" multiple></label>
+          <button id="media-music-upload" class="secondary compact" type="button">暂存音乐</button>
+          <div id="media-music-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+      </section>
+
+      <section class="settings-section media-apply-section" aria-labelledby="media-apply-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">SAFE WRITE</p><h2 id="media-apply-title">应用到车机存储</h2></div><span id="media-apply-status" class="badge">检查中</span></div>
+        <article class="settings-card media-apply-card"><div><h3>待应用变更</h3><p id="media-apply-detail">正在读取媒体变更…</p></div><div class="media-apply-actions"><label class="inline-check"><input id="media-confirm-otg-disconnected" type="checkbox"><span>我确认 OTG 已物理断开</span></label><button id="media-apply" class="primary" type="button">安全应用变更</button></div></article>
+      </section>
+    </div>
+
     <div id="settings-page" class="page settings-page app-page" hidden>
       <section class="settings-hero">
         <div><p class="eyebrow">SETTINGS</p><h1>设置中心</h1><p class="hero-copy">管理 WiFi 无线局域网、TeslaBox 热点和设备电源。网络变更可能使当前页面断开。</p></div>
@@ -206,9 +252,10 @@
           </div>
           <div id="update-progress-wrap" class="update-progress" hidden><progress id="update-progress" max="100" value="0"></progress><span id="update-progress-detail">0%</span></div>
           <p id="update-release-notes" class="update-release-notes muted" hidden></p>
+          <p id="update-notice" class="notice" role="status" aria-live="polite" hidden></p>
           <div class="power-actions"><button id="update-check" class="secondary" type="button">检查更新</button><button id="update-download" class="secondary" type="button" hidden>下载更新</button><button id="update-install" class="primary" type="button" hidden>安装并重启</button></div>
         </article>
-        <div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。安装仅替换 TeslaBox 主程序；车机 USB 已连接或正在导出视频时会拒绝安装。</div>
+		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。安装前请先物理拔掉车机 OTG，页面会安全解绑 USB Gadget；更新后必须预先插好 OTG，再通过冷启动恢复。</div>
       </section>
 
       <section class="settings-section power-section" aria-labelledby="power-title">
@@ -238,6 +285,11 @@
           <div><span>原厂 USB 网络</span><strong id="logs-radxa-usbnet">读取中</strong></div>
         </div>
         <div id="logs-usb-warning" class="settings-warning" hidden></div>
+        <div class="logs-actions usb-gadget-actions">
+          <button id="usb-gadget-disconnect" class="secondary compact" type="button">安全断开 USB Gadget</button>
+          <button id="usb-gadget-warm-restart" class="primary compact" type="button" hidden>温重启恢复</button>
+          <button id="usb-gadget-reconnect" class="secondary compact" type="button" hidden>仅准备冷启动</button>
+        </div>
       </section>
 
       <section class="settings-section" aria-labelledby="system-logs-title">
@@ -289,7 +341,15 @@
     <form id="storage-init-form" class="action-modal-card">
       <p class="eyebrow">DESTRUCTIVE OPERATION</p><h2 id="storage-modal-title">初始化存储设备</h2>
       <p id="storage-modal-detail" class="muted"></p>
+      <label class="inline-check"><input id="storage-music-enabled" type="checkbox"><span>创建 MUSIC 音乐分区（FAT32）</span></label>
+      <div id="storage-partition-options" hidden>
+        <label>TeslaCam 录像分区比例
+          <input id="storage-teslacam-percent" type="range" min="10" max="95" step="5" value="80">
+        </label>
+        <p id="storage-partition-preview" class="muted"></p>
+      </div>
       <label>输入设备序列号确认<input id="storage-confirm-serial" autocomplete="off" required></label>
+      <label class="inline-check"><input id="storage-confirm-otg-disconnected" type="checkbox" required><span>我确认已经物理拔掉连接车机或电脑的 OTG 线</span></label>
       <label class="inline-check"><input id="storage-confirm-erase" type="checkbox" required><span>我确认目标设备中的全部数据可以被擦除</span></label>
       <div class="modal-actions"><button class="secondary" type="button" data-close-storage>取消</button><button id="storage-init-submit" class="danger-button" type="submit">擦除并初始化</button></div>
     </form>

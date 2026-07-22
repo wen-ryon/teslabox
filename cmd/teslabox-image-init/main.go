@@ -20,6 +20,9 @@ func main() {
 	flag.StringVar(&options.ImagePath, "image", "/var/lib/teslabox/images/teslacam.img", "TeslaCam 虚拟整盘镜像")
 	flag.Int64Var(&options.SizeBytes, "size-bytes", 96_000_000_000, "虚拟磁盘容量，默认保留约 28GB 物理空间")
 	flag.StringVar(&options.Label, "label", "TESLACAM", "Tesla 可识别的 exFAT 卷标")
+	flag.BoolVar(&options.MusicEnabled, "music", false, "创建独立的 FAT32 音乐分区")
+	flag.IntVar(&options.TeslaCamPercent, "teslacam-percent", 80, "启用音乐分区时 TeslaCam 所占比例")
+	flag.StringVar(&options.MusicLabel, "music-label", "MUSIC", "FAT32 音乐分区卷标")
 	flag.BoolVar(&options.Execute, "execute", false, "实际创建并格式化镜像；默认仅预演")
 	flag.Parse()
 	if err := imageinit.RequireRoot(options.Execute); err != nil {
@@ -39,6 +42,7 @@ func main() {
 	fmt.Printf("backing store: %s (%s, reflink=%t)\n", result.Environment.DataRoot, result.Environment.FileSystem, result.Environment.Reflink)
 	fmt.Printf("镜像: %s\n", result.Environment.ImagePath)
 	fmt.Printf("物理容量/镜像容量/预留容量: %d / %d / %d bytes\n", result.Environment.TotalBytes, options.SizeBytes, result.Environment.TotalBytes-options.SizeBytes)
+	fmt.Printf("TeslaCam/音乐分区容量: %d / %d bytes\n", result.Layout.TeslaCamBytes, result.Layout.MusicBytes)
 	for index, command := range result.Commands {
 		fmt.Printf("%02d. %s %s\n", index+1, command.Name, strings.Join(command.Args, " "))
 	}

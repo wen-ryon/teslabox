@@ -21,6 +21,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
 	"github.com/wen-ryon/teslabox/internal/media"
+	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
@@ -160,6 +161,16 @@ func main() {
 		logger.Error("初始化视频导出器失败", "error", err)
 		os.Exit(1)
 	}
+	mediaAssets, err := mediaassets.New(mediaassets.Config{
+		ImagePath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		StatePath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath)),
+		StagingPath: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath), "media-staging"),
+		MountPath:   "/run/teslabox/media-assets",
+	}, runner, manager)
+	if err != nil {
+		logger.Error("初始化媒体中心失败，拒绝以不完整写入保护启动", "error", err)
+		os.Exit(1)
+	}
 	updateManager, err := updater.New(updater.Config{
 		ManifestURL: cfg.UpdateManifestURL, PublicKey: cfg.UpdatePublicKey,
 		Channel: cfg.UpdateChannel, Board: cfg.UpdateBoard,
@@ -167,8 +178,8 @@ func main() {
 		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
 		ResultPath: cfg.UpdateResultPath, MaximumSize: cfg.UpdateMaxBytes, Logger: logger,
 		CanInstall: func() error {
-			if manager.Snapshot().GadgetStatus.HostDetected {
-				return errors.New("车机 USB 当前已连接，请停车并断开 OTG 后再安装更新")
+			if manager.Snapshot().GadgetStatus.Bound {
+				return errors.New("USB Gadget 尚未安全断开，请确认已拔掉 OTG 后重试")
 			}
 			if mediaExporter.Busy() {
 				return errors.New("仍有视频导出任务，完成或取消后再安装更新")
@@ -188,7 +199,9 @@ func main() {
 		logger,
 		api.WithDeviceAdmin(deviceAdmin),
 		api.WithStorageAdmin(storageAdmin),
+		api.WithGadgetAdmin(manager),
 		api.WithMediaInspector(mediaInspector),
+		api.WithMediaAssetsAdmin(mediaAssets),
 		api.WithMediaCompositor(mediaCompositor),
 		api.WithExportAdmin(mediaExporter),
 		api.WithUpdateAdmin(updateManager),
@@ -208,7 +221,8 @@ func main() {
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
+		// 音乐批量上传可能经过车载热点，使用受认证、总大小受限的较长读取窗口避免大文件被错误中断。
+		ReadTimeout: 15 * time.Minute,
 		// 视频 Range 和下载响应可能持续较久，连接生命周期由客户端和服务关闭信号控制。
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,

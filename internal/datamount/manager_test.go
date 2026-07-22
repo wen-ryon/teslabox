@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wen-ryon/teslabox/internal/storage"
+	"github.com/wen-ryon/teslabox/internal/system"
 )
 
 type command struct {
@@ -96,6 +97,17 @@ func TestManagerMountWrapsCommandError(t *testing.T) {
 	err := manager.Mount(t.Context(), storage.Device{UUID: "data-uuid", FSType: "xfs"})
 	if err == nil {
 		t.Fatal("Mount() error = nil, want command error")
+	}
+}
+
+func TestManagerUnmountTreatsMountpointExitOneAsAlreadyUnmounted(t *testing.T) {
+	runner := &fakeRunner{err: &system.CommandError{Name: "mountpoint", Code: 1, Internal: errors.New("exit status 1")}}
+	manager := New(runner, t.TempDir(), "data-uuid", "TESLABOX")
+	if err := manager.Unmount(t.Context()); err != nil {
+		t.Fatalf("Unmount() error = %v", err)
+	}
+	if len(runner.commands) != 1 || runner.commands[0].name != "mountpoint" {
+		t.Fatalf("commands = %#v", runner.commands)
 	}
 }
 

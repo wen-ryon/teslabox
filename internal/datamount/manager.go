@@ -62,6 +62,21 @@ func (m *Manager) Mount(ctx context.Context, device storage.Device) error {
 	return nil
 }
 
+// Unmount 只卸载 TeslaBox 固定数据目录，重复调用时保持幂等。
+func (m *Manager) Unmount(ctx context.Context) error {
+	if _, err := m.runner.Run(ctx, "mountpoint", "--quiet", "--", m.mountPath); err != nil {
+		commandError, ok := errors.AsType[*system.CommandError](err)
+		if ok && commandError.Code == 1 {
+			return nil
+		}
+		return fmt.Errorf("检查 TeslaBox 数据盘挂载状态: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, "umount", "--", m.mountPath); err != nil {
+		return fmt.Errorf("卸载 TeslaBox 数据盘: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) identity() (string, string, error) {
 	uuid, label := m.uuid, m.label
 	if m.source != nil {
