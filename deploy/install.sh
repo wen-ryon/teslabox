@@ -1,17 +1,16 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="0.1.5"
-RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.5"
+INSTALLER_VERSION="0.1.6"
+RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.6"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256="4438aa507358e03924f159d2a27eeb24f5c49df218b4a825131fd7179477128e"
+BOOTSTRAP_SHA256=""
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
 RADXA_KEYRING_VERSION="0.2.0"
 RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
-RADXA_KEYRING_URL="https://github.com/radxa-pkg/radxa-archive-keyring/releases/download/0.2.0/${RADXA_KEYRING_DEB}"
 RADXA_KEYRING_SHA256="a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad"
 
 WORK_DIR=""
@@ -135,11 +134,10 @@ validate_elf_aarch64_file() {
 }
 
 install_radxa_archive_keyring() {
-    keyring_path="${WORK_DIR}/${RADXA_KEYRING_DEB}"
+    keyring_path="${PAYLOAD_DIR}/keyring/${RADXA_KEYRING_DEB}"
 
-    log "更新 Radxa APT 签名密钥环"
-    curl --fail --location --retry 3 --connect-timeout 15 \
-        --output "${keyring_path}" "${RADXA_KEYRING_URL}"
+    # 密钥环随首装包发布，避免目标网络无法访问 GitHub 时卡住或阻断首装。
+    log "安装 Radxa APT 签名密钥环"
 
     actual_keyring_sha256="$(sha256sum "${keyring_path}" | awk '{print tolower($1)}')"
     if [ "${actual_keyring_sha256}" != "${RADXA_KEYRING_SHA256}" ]; then
@@ -169,6 +167,7 @@ for REQUIRED_PAYLOAD_FILE in \
     udev/99-teslabox.rules \
     scripts/teslabox-ap-setup.sh \
     scripts/install-media-toolchain.sh \
+    keyring/radxa-archive-keyring_0.2.0_all.deb \
     media/teslabox-media-debian11-arm64.tar.gz \
     media/teslabox-media-debian11-arm64.tar.gz.sha256; do
     validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
