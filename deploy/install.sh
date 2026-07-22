@@ -1,14 +1,18 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="0.1.4"
-RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.4"
+INSTALLER_VERSION="0.1.5"
+RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.5"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256="fbdcd7f01837b342dc37f377e9bd5ce3e376d4e2024fa9eaa3323d98d41f89b3"
+BOOTSTRAP_SHA256=""
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
+RADXA_KEYRING_VERSION="0.2.0"
+RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
+RADXA_KEYRING_URL="https://github.com/radxa-pkg/radxa-archive-keyring/releases/download/0.2.0/${RADXA_KEYRING_DEB}"
+RADXA_KEYRING_SHA256="a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad"
 
 WORK_DIR=""
 AP_INITIAL_PASSWORD=""
@@ -120,6 +124,37 @@ validate_payload_file() {
     fi
 }
 
+validate_elf_aarch64_file() {
+    required_file="$1"
+    executable_path="${PAYLOAD_DIR}/${required_file}"
+    elf_ident="$(od -An -tx1 -N6 "${executable_path}" | tr -d '[:space:]')"
+    elf_machine="$(od -An -tx1 -j18 -N2 "${executable_path}" | tr -d '[:space:]')"
+    if [ "${elf_ident}" != "7f454c460201" ] || [ "${elf_machine}" != "b700" ]; then
+        die "首装包可执行文件格式或架构错误：${required_file}。为保护现有安装，未覆盖任何系统文件。"
+    fi
+}
+
+install_radxa_archive_keyring() {
+    keyring_path="${WORK_DIR}/${RADXA_KEYRING_DEB}"
+
+    log "更新 Radxa APT 签名密钥环"
+    curl --fail --location --retry 3 --connect-timeout 15 \
+        --output "${keyring_path}" "${RADXA_KEYRING_URL}"
+
+    actual_keyring_sha256="$(sha256sum "${keyring_path}" | awk '{print tolower($1)}')"
+    if [ "${actual_keyring_sha256}" != "${RADXA_KEYRING_SHA256}" ]; then
+        die "Radxa APT 签名密钥环 SHA-256 校验失败。"
+    fi
+
+    if [ "$(dpkg-deb -f "${keyring_path}" Package)" != "radxa-archive-keyring" ] || \
+        [ "$(dpkg-deb -f "${keyring_path}" Version)" != "${RADXA_KEYRING_VERSION}" ] || \
+        [ "$(dpkg-deb -f "${keyring_path}" Architecture)" != "all" ]; then
+        die "Radxa APT 签名密钥环元数据不符合预期。"
+    fi
+
+    dpkg -i "${keyring_path}"
+}
+
 # SHA-256 清单由发布包携带；还需拒绝被错误打包为零字节的关键组件。
 for REQUIRED_PAYLOAD_FILE in \
     bin/teslabox \
@@ -139,8 +174,18 @@ for REQUIRED_PAYLOAD_FILE in \
     validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
 done
 
+for REQUIRED_EXECUTABLE_FILE in \
+    bin/teslabox \
+    bin/teslabox-init \
+    bin/teslabox-image-init \
+    bin/teslabox-gadget \
+    libexec/teslabox-update-helper; do
+    validate_elf_aarch64_file "${REQUIRED_EXECUTABLE_FILE}"
+done
+
 log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
+install_radxa_archive_keyring
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
