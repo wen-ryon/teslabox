@@ -113,6 +113,32 @@ normalize_checksum_file "${PAYLOAD_DIR}/SHA256SUMS"
     sha256sum -c SHA256SUMS
 )
 
+validate_payload_file() {
+    required_file="$1"
+    if [ ! -s "${PAYLOAD_DIR}/${required_file}" ]; then
+        die "首装包关键文件缺失或为空：${required_file}。为保护现有安装，未覆盖任何系统文件。"
+    fi
+}
+
+# SHA-256 清单由发布包携带；还需拒绝被错误打包为零字节的关键组件。
+for REQUIRED_PAYLOAD_FILE in \
+    bin/teslabox \
+    bin/teslabox-init \
+    bin/teslabox-image-init \
+    bin/teslabox-gadget \
+    libexec/teslabox-update-helper \
+    config/teslabox.env.example \
+    systemd/teslabox.service \
+    systemd/teslabox-update.service \
+    systemd/teslabox-ap.service \
+    udev/99-teslabox.rules \
+    scripts/teslabox-ap-setup.sh \
+    scripts/install-media-toolchain.sh \
+    media/teslabox-media-debian11-arm64.tar.gz \
+    media/teslabox-media-debian11-arm64.tar.gz.sha256; do
+    validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
+done
+
 log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update

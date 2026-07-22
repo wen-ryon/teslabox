@@ -99,23 +99,18 @@ $files = @{
 }
 foreach ($entry in $files.GetEnumerator()) {
     $destination = Join-Path $stage $entry.Value
-    Copy-Item -LiteralPath (Join-Path $root $entry.Key) -Destination $destination
-    # UTF-8 多字节序列不会包含 0x0D；按字节清理 CR 可同时覆盖 CRLF 和孤立 CR，并避免 PowerShell 改写编码。
-    $sourceBytes = [IO.File]::ReadAllBytes($destination)
-    $normalizedBytes = New-Object 'System.Collections.Generic.List[byte]' $sourceBytes.Length
-    for ($index = 0; $index -lt $sourceBytes.Length; $index++) {
-        if ($sourceBytes[$index] -eq 13) {
-            continue
-        }
-        if ($index -lt 3 -and $sourceBytes.Length -ge 3 -and $sourceBytes[0] -eq 0xEF -and $sourceBytes[1] -eq 0xBB -and $sourceBytes[2] -eq 0xBF) {
-            continue
-        }
-        $normalizedBytes.Add($sourceBytes[$index])
+    $source = Join-Path $root $entry.Key
+    $sourceLength = (Get-Item -LiteralPath $source).Length
+    if ($sourceLength -eq 0) {
+        throw "Required Linux source text file is empty: $source"
     }
-    [IO.File]::WriteAllBytes($destination, $normalizedBytes.ToArray())
-    $verificationBytes = [IO.File]::ReadAllBytes($destination)
-    if ($verificationBytes -contains 13) {
-        throw "Linux text still contains a CR byte: $destination"
+    Copy-Item -LiteralPath $source -Destination $destination
+    $destinationLength = (Get-Item -LiteralPath $destination).Length
+    if ($destinationLength -ne $sourceLength) {
+        throw "Linux text file copy size mismatch: $destination (source bytes=$sourceLength, destination bytes=$destinationLength)"
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash) {
+        throw "Linux text file copy checksum mismatch: $destination"
     }
 }
 Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
