@@ -127,6 +127,37 @@ func TestNewManagerIsDisabledWithoutTrustConfiguration(t *testing.T) {
 	}
 }
 
+func TestManagerStatusKeepsAvailableUpdateAfterPreviousInstall(t *testing.T) {
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	result := InstallResult{
+		Version:   "0.1.0",
+		Status:    "success",
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	}
+	content, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{
+		config: Config{ResultPath: resultPath},
+		state: Status{
+			Configured:     true,
+			CurrentVersion: "0.1.0",
+			LatestVersion:  "0.1.1",
+			State:          StateAvailable,
+			Available:      true,
+		},
+	}
+
+	status := manager.Status()
+	if status.State != StateAvailable || !status.Available {
+		t.Fatalf("Status() = %+v, want available update preserved", status)
+	}
+}
+
 type fakeStarter struct {
 	started atomic.Bool
 }

@@ -150,12 +150,15 @@ func (m *Manager) Status() Status {
 			age := time.Since(updatedAt)
 			if decodeErr == nil && timeErr == nil && age >= 0 && age <= 7*24*time.Hour {
 				status.InstallResult = result.Status
-				if status.Configured && result.Status == "success" && result.Version == status.CurrentVersion {
-					status.State = StateCurrent
-				}
-				if result.Status == "failed" {
-					status.State = StateFailed
-					status.Error = result.Message
+				// 只在进程尚未执行更新操作时恢复上次结果，避免旧结果覆盖本次检查或下载状态。
+				if status.State == StateIdle {
+					if status.Configured && result.Status == "success" && result.Version == status.CurrentVersion {
+						status.State = StateCurrent
+					}
+					if result.Status == "failed" {
+						status.State = StateFailed
+						status.Error = result.Message
+					}
 				}
 			}
 		}
