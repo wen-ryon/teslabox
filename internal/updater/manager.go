@@ -187,7 +187,7 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 		return m.Status(), err
 	}
 	available, err := newerVersion(manifest.Version, m.config.CurrentVersion)
-	if err == nil && manifest.MinVersion != "" && m.config.CurrentVersion != "dev" {
+	if err == nil && manifest.MinVersion != "" && !isDevelopmentVersion(m.config.CurrentVersion) {
 		var meetsMinimum bool
 		meetsMinimum, err = versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
 		if err == nil && !meetsMinimum {

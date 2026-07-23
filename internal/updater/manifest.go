@@ -118,7 +118,7 @@ func newerVersion(candidate, current string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if current == "dev" || current == "" {
+	if isDevelopmentVersion(current) {
 		return true, nil
 	}
 	currentParts, err := parseStableVersion(current)
@@ -131,6 +131,11 @@ func newerVersion(candidate, current string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func isDevelopmentVersion(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || value == "dev" || strings.HasPrefix(value, "candidate-")
 }
 
 func parseStableVersion(value string) ([3]uint64, error) {

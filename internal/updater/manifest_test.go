@@ -104,6 +104,7 @@ func TestVersionComparison(t *testing.T) {
 		{candidate: "1.0.0", current: "1.0.0", want: false},
 		{candidate: "1.0.0", current: "2.0.0", want: false},
 		{candidate: "0.1.0", current: "dev", want: true},
+		{candidate: "0.1.7", current: "candidate-20260723-ui-layout", want: true},
 	}
 	for _, test := range tests {
 		got, err := newerVersion(test.candidate, test.current)
@@ -167,7 +168,7 @@ func (f *fakeStarter) StartUpdate(context.Context) error {
 	return nil
 }
 
-func TestManagerCheckDownloadAndSubmitInstall(t *testing.T) {
+func TestManagerCheckAllowsCandidateBuildToInstallStableRelease(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +193,7 @@ func TestManagerCheckDownloadAndSubmitInstall(t *testing.T) {
 	manager, err := New(Config{
 		ManifestURL: server.URL + "/latest.json",
 		PublicKey:   base64.StdEncoding.EncodeToString(publicKey), Channel: "stable", Board: "radxa-rock-3a", Arch: "arm64",
-		CurrentVersion: "0.1.0", CurrentCommit: "test", DownloadDir: filepath.Join(root, "updates"),
+		CurrentVersion: "candidate-20260723-ui-layout", CurrentCommit: "test", DownloadDir: filepath.Join(root, "updates"),
 		RequestPath: filepath.Join(root, "request.json"), ResultPath: filepath.Join(root, "result.json"), MaximumSize: 1024,
 		AutoReboot: func() bool { return true },
 	}, starter)
