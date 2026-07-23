@@ -253,7 +253,7 @@ $("export-form").addEventListener("submit", createExportTask);
 $("export-cancel").addEventListener("click", cancelExportTask);
 $("export-layout").addEventListener("change", renderExportOptions);
 document.querySelectorAll("[data-close-export]").forEach((element) => element.addEventListener("click", closeExportModal));
-$("player-quality").value = playbackQuality;
+refreshPlaybackQualityControl();
 $("player-quality").addEventListener("change", (event) => setPlaybackQuality(event.target.value));
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-period]").forEach((button) => button.addEventListener("click", () => setPeriod(button.dataset.period)));
@@ -2788,10 +2788,8 @@ function closePlayerMedia() {
 function setPlaybackQuality(quality) {
   playbackQuality = normalizePlaybackQuality(quality);
   resetPlaybackFallbackState();
-  $("player-quality").value = playbackQuality;
   writePreference("teslabox-playback-quality", playbackQuality);
-  const automaticQuality = automaticPlaybackQuality(playbackQuality);
-  if (automaticQuality) showPlayerMessage(`自动画质：多路优先${qualityLabel(automaticQuality)}合成，卡顿时自动降级；单路保持原画`);
+  if (isAutomaticPlaybackQuality(playbackQuality)) showPlayerMessage(`自动画质：当前${qualityLabel(effectivePlaybackQuality)}；卡顿时会自动降低画质`);
   else hidePlayerMessage();
   if (activeSession && isCompositeDisplay(activeDisplay)) {
     const position = currentSessionPosition();
@@ -2804,9 +2802,9 @@ function setPlaybackQuality(quality) {
 }
 
 function normalizePlaybackQuality(quality) {
-  if (quality === "auto") return "auto-standard";
-  if (["smooth", "standard", "high"].includes(quality)) return `auto-${quality}`;
-  return ["auto-smooth", "auto-standard", "auto-high", "original"].includes(quality) ? quality : "auto-standard";
+  // 兼容上一版把自动策略拆成三个选项时留下的浏览器本地偏好，统一回真正的自动模式。
+  if (["auto-smooth", "auto-standard", "auto-high"].includes(quality)) return "auto";
+  return ["auto", "smooth", "standard", "high", "original"].includes(quality) ? quality : "auto";
 }
 
 function usesServerComposite() {
@@ -2814,7 +2812,7 @@ function usesServerComposite() {
 }
 
 function qualityLabel(quality) {
-  return ({smooth:"流畅", standard:"标准", high:"高清", original:"原画", auto:"自动"})[quality] || "自动";
+  return ({smooth:"流畅", standard:"标清", high:"高清", original:"原画", auto:"自动"})[quality] || "自动";
 }
 
 const playbackFallbackLadder = {high:"standard", standard:"smooth", smooth:"single"};
@@ -2822,21 +2820,29 @@ const playbackFallbackLadder = {high:"standard", standard:"smooth", smooth:"sing
 function resetPlaybackFallbackState() {
   effectivePlaybackQuality = resolvePlaybackQuality(playbackQuality, activeDisplay);
   playbackFallbackInProgress = false;
+  refreshPlaybackQualityControl();
 }
 
 function resolvePlaybackQuality(quality, display) {
-  const automaticQuality = automaticPlaybackQuality(quality);
-  if (!automaticQuality) return quality;
-  if (!isCompositeDisplay(display) || isLocalAccessPath()) return "original";
-  return automaticQuality;
+  if (!isAutomaticPlaybackQuality(quality)) return quality;
+  if (!isCompositeDisplay(display)) return "original";
+  // 局域网先使用最高合成档，远程链路从标清起步；两者都由自动恢复流程按实际播放状态调整。
+  return isLocalAccessPath() ? "high" : "standard";
 }
 
-function automaticPlaybackQuality(quality) {
-  return ({"auto-smooth":"smooth", "auto-standard":"standard", "auto-high":"high"})[quality] || "";
+function isAutomaticPlaybackQuality(quality) {
+  return quality === "auto";
+}
+
+function refreshPlaybackQualityControl() {
+  const qualitySelect = $("player-quality");
+  const automaticOption = qualitySelect?.querySelector('option[value="auto"]');
+  if (automaticOption) automaticOption.textContent = `自动（当前：${qualityLabel(effectivePlaybackQuality)}）`;
+  if (qualitySelect) qualitySelect.value = playbackQuality;
 }
 
 function shouldAutomaticallyDowngrade() {
-  return Boolean(automaticPlaybackQuality(playbackQuality)) && !isLocalAccessPath();
+  return isAutomaticPlaybackQuality(playbackQuality) && !isLocalAccessPath();
 }
 
 function handlePlaybackError() {
@@ -2846,7 +2852,7 @@ function handlePlaybackError() {
 function requestPlaybackFallback(reason) {
   if (!activeSession || playbackFallbackInProgress || !isCompositeDisplay(activeDisplay) || !usesServerComposite()) return;
   if (!shouldAutomaticallyDowngrade()) {
-    if (isLocalAccessPath()) showPlayerMessage(`${reason}，局域网自动模式保持原画，不会自动降级`);
+    if (isLocalAccessPath()) showPlayerMessage(`${reason}，局域网自动模式保持高清，不会自动降级`);
     return;
   }
   playbackFallbackInProgress = true;
@@ -2878,6 +2884,7 @@ async function recoverPlayback(reason) {
       notice = `${reason}，已自动降至${qualityLabel(next)}画质`;
     }
 
+    refreshPlaybackQualityControl();
     applyDisplayState();
     renderCameraSwitcher();
     await loadSessionPosition(position, autoplay);

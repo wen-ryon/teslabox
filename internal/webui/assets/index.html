@@ -6,7 +6,7 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="stylesheet" href="/app.css?v=20260723-4">
-  <script src="/app.js?v=20260723-6" defer></script>
+  <script src="/app.js?v=20260723-7" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -393,9 +393,10 @@
         <div class="player-head-actions">
           <label class="quality-control">画质
             <select id="player-quality" aria-label="播放画质">
-              <option value="auto-high">自动（高清）</option>
-              <option value="auto-standard">自动（标准）</option>
-              <option value="auto-smooth">自动（流畅）</option>
+              <option value="auto">自动（当前：高清）</option>
+              <option value="smooth">流畅（480p · 20 FPS）</option>
+              <option value="standard">标清（720p · 24 FPS）</option>
+              <option value="high">高清（720p · 30 FPS）</option>
               <option value="original">原画</option>
             </select>
           </label>

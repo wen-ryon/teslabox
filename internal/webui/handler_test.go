@@ -55,9 +55,9 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "app.css?v=20260723-4", "app.js?v=20260723-6",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "app.css?v=20260723-4", "app.js?v=20260723-7",
 		"toast-region",
-		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）", "自动（高清）", "自动（标准）", "自动（流畅）",
+		"自动（当前：高清）", "流畅（480p · 20 FPS）", "标清（720p · 24 FPS）", "高清（720p · 30 FPS）", "<option value=\"original\">原画</option>",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
@@ -163,7 +163,7 @@ func TestHandlerServesCompositeLayoutGeometry(t *testing.T) {
 		"applyCompositeFrameGeometry", "applyServerCompositeFrameGeometry", "compositeLayoutFactor", "composite6:3/2", "composite4a:1",
 		"composite4b:3/4", "composite3:2/3", "fitCompositeFrame", "fitFullscreenCompositeGrid", "isPlayerFullscreen",
 		"if (!composite || serverComposite) resetCompositeFrameGeometry();",
-		`resolvePlaybackQuality(playbackQuality, activeDisplay)`, "automaticPlaybackQuality", "shouldAutomaticallyDowngrade", "isLocalAccessPath", "auto-standard", "auto-high", "auto-smooth",
+		`resolvePlaybackQuality(playbackQuality, activeDisplay)`, "isAutomaticPlaybackQuality", "refreshPlaybackQualityControl", "shouldAutomaticallyDowngrade", "isLocalAccessPath",
 	} {
 		if !strings.Contains(scriptRecorder.Body.String(), marker) {
 			t.Errorf("播放器布局脚本缺少标记 %q", marker)
