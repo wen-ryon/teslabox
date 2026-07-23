@@ -1,18 +1,23 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="0.1.3"
-RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.3"
+INSTALLER_VERSION="0.1.6"
+RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.6"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256="475ad8ca12396ea30160824ca4ce3c7911d16a6c95aa3e2298a82881ad6a66b6"
+BOOTSTRAP_SHA256="b78842f244526d65ee39f42abedb5a935aec4eecaeba1a344a878cfbf5a30d73"
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
+RADXA_KEYRING_VERSION="0.2.0"
+RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
+RADXA_KEYRING_SHA256="a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad"
 
 WORK_DIR=""
 AP_INITIAL_PASSWORD=""
 MT7922_MODE="ask"
+APT_SOURCE_BACKUP_DIR="/var/backups/teslabox/apt-sources"
+APT_SOURCE_BACKUP_TIMESTAMP=""
 
 log() {
     printf '\n[TeslaBox] %s\n' "$*"
@@ -42,6 +47,243 @@ normalize_checksum_file() {
     mv "${normalized_file}" "${checksum_file}"
 }
 
+apt_source_files() {
+    if [ -f /etc/apt/sources.list ]; then
+        printf '%s\n' /etc/apt/sources.list
+    fi
+    if [ -d /etc/apt/sources.list.d ]; then
+        find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) -print
+    fi
+}
+
+backup_apt_source_file() {
+    source_file="$1"
+    backup_name="$(printf '%s' "${source_file}" | sed 's#^/etc/apt/##; s#/#_#g')"
+    backup_file="${APT_SOURCE_BACKUP_DIR}/${backup_name}.${APT_SOURCE_BACKUP_TIMESTAMP}"
+
+    install -d -m 0700 "${APT_SOURCE_BACKUP_DIR}"
+    if [ ! -e "${backup_file}" ]; then
+        cp -a "${source_file}" "${backup_file}"
+    fi
+    printf '%s\n' "${backup_file}"
+}
+
+replace_apt_source_file() {
+    source_file="$1"
+    temporary_file="$2"
+
+    if cmp -s "${source_file}" "${temporary_file}"; then
+        rm -f "${temporary_file}"
+        return
+    fi
+
+    backup_file="$(backup_apt_source_file "${source_file}")"
+    chmod 0644 "${temporary_file}"
+    mv "${temporary_file}" "${source_file}"
+    log "已更新 APT 配置：${source_file}（原文件备份到 ${backup_file}）"
+}
+
+rewrite_debian_list_file() {
+    source_file="$1"
+    switch_to_tuna="$2"
+    temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
+
+    # 仅处理 Debian 基础仓；Radxa 和其他第三方仓的路径不匹配，不会被改写。
+    awk -v switch_to_tuna="${switch_to_tuna}" '
+        function source_field_index(    field_no) {
+            field_no = 2
+            if ($2 ~ /^\[/) {
+                while (field_no <= NF && $field_no !~ /\]$/) {
+                    field_no++
+                }
+                field_no++
+            }
+            return field_no
+        }
+
+        function is_debian_main_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian\/?$/
+        }
+
+        function is_debian_security_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+        }
+
+        {
+            if ($0 ~ /^[[:space:]]*#/) {
+                print
+                next
+            }
+
+            source_index = source_field_index()
+            if (($1 == "deb" || $1 == "deb-src") && source_index + 1 <= NF) {
+                uri = $(source_index)
+                suite = $(source_index + 1)
+
+                if (suite == "bullseye-backports") {
+                    print "# 由 TeslaBox 禁用：bullseye-backports 已从 Debian 活跃镜像下线。"
+                    print "# " $0
+                    next
+                }
+
+                if (switch_to_tuna == "1") {
+                    if ((suite == "bullseye" || suite == "bullseye-updates") && is_debian_main_uri(uri)) {
+                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian"
+                    } else if (suite == "bullseye-security" && is_debian_security_uri(uri)) {
+                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                    }
+                }
+            }
+            print
+        }
+    ' "${source_file}" >"${temporary_file}"
+
+    replace_apt_source_file "${source_file}" "${temporary_file}"
+}
+
+rewrite_debian_deb822_file() {
+    source_file="$1"
+    switch_to_tuna="$2"
+    temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
+
+    awk -v switch_to_tuna="${switch_to_tuna}" '
+        BEGIN {
+            RS = ""
+            ORS = "\n\n"
+        }
+
+        function field_value(field_name,    lines, line_count, line_no, pattern, value) {
+            line_count = split($0, lines, "\n")
+            pattern = "^" field_name ":[[:space:]]*"
+            for (line_no = 1; line_no <= line_count; line_no++) {
+                if (lines[line_no] ~ pattern) {
+                    value = lines[line_no]
+                    sub(pattern, "", value)
+                    return value
+                }
+            }
+            return ""
+        }
+
+        function set_field(field_name, value,    lines, line_count, line_no, pattern, output, found) {
+            line_count = split($0, lines, "\n")
+            pattern = "^" field_name ":[[:space:]]*"
+            found = 0
+            for (line_no = 1; line_no <= line_count; line_no++) {
+                if (lines[line_no] ~ pattern) {
+                    lines[line_no] = field_name ": " value
+                    found = 1
+                }
+            }
+            if (!found) {
+                lines[++line_count] = field_name ": " value
+            }
+            output = lines[1]
+            for (line_no = 2; line_no <= line_count; line_no++) {
+                output = output "\n" lines[line_no]
+            }
+            $0 = output
+        }
+
+        function has_word(value, word,    fields, field_count, field_no) {
+            field_count = split(value, fields, /[[:space:]]+/)
+            for (field_no = 1; field_no <= field_count; field_no++) {
+                if (fields[field_no] == word) {
+                    return 1
+                }
+            }
+            return 0
+        }
+
+        function without_word(value, word,    fields, field_count, field_no, result) {
+            field_count = split(value, fields, /[[:space:]]+/)
+            result = ""
+            for (field_no = 1; field_no <= field_count; field_no++) {
+                if (fields[field_no] != "" && fields[field_no] != word) {
+                    result = result (result == "" ? "" : " ") fields[field_no]
+                }
+            }
+            return result
+        }
+
+        function is_debian_main_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian\/?$/
+        }
+
+        function is_debian_security_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+        }
+
+        {
+            types = field_value("Types")
+            suites = field_value("Suites")
+
+            if (!has_word(types, "deb")) {
+                print
+                next
+            }
+
+            if (has_word(suites, "bullseye-backports")) {
+                remaining_suites = without_word(suites, "bullseye-backports")
+                if (remaining_suites == "") {
+                    set_field("Enabled", "no")
+                } else {
+                    set_field("Suites", remaining_suites)
+                }
+                suites = field_value("Suites")
+            }
+
+            if (switch_to_tuna == "1") {
+                uris = field_value("URIs")
+                if ((has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) && is_debian_main_uri(uris)) {
+                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian")
+                } else if (has_word(suites, "bullseye-security") && is_debian_security_uri(uris)) {
+                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian-security")
+                }
+            }
+            print
+        }
+    ' "${source_file}" >"${temporary_file}"
+
+    replace_apt_source_file "${source_file}" "${temporary_file}"
+}
+
+configure_debian_apt_sources() {
+    log "配置 Debian APT 源"
+    printf '%s\n' '请选择 Debian 基础仓镜像：'
+    printf '%s\n' '  1) 切换到清华大学镜像源'
+    printf '%s\n' '  2) 保持当前镜像源'
+    printf '%s\n' '无论选择哪项，都会禁用系统镜像自带的失效 bullseye-backports。'
+
+    while :; do
+        printf '%s' '请输入 1 或 2 [2]：'
+        if ! IFS= read -r apt_mirror_choice; then
+            apt_mirror_choice="2"
+            printf '\n'
+        fi
+        case "${apt_mirror_choice}" in
+            1|2|"") break ;;
+            *) warn "请输入 1 或 2。" ;;
+        esac
+    done
+
+    case "${apt_mirror_choice:-2}" in
+        1) log "将 Debian 基础仓切换到清华大学镜像源" ;;
+        *) apt_mirror_choice="2"; log "保留当前 Debian 基础仓镜像" ;;
+    esac
+
+    APT_SOURCE_BACKUP_TIMESTAMP="$(date +%Y%m%d%H%M%S)"
+    apt_source_list="${WORK_DIR}/apt-source-files"
+    apt_source_files >"${apt_source_list}"
+    while IFS= read -r source_file; do
+        case "${source_file}" in
+            *.list) rewrite_debian_list_file "${source_file}" "${apt_mirror_choice}" ;;
+            *.sources) rewrite_debian_deb822_file "${source_file}" "${apt_mirror_choice}" ;;
+        esac
+    done <"${apt_source_list}"
+}
+
 trap cleanup EXIT HUP INT TERM
 
 for argument in "$@"; do
@@ -52,6 +294,7 @@ for argument in "$@"; do
 用法：sudo ./teslabox-install.sh [--skip-mt7922]
 
 默认安装 TeslaBox、FFmpeg/MPP/RGA、systemd、udev 和在线升级组件。
+安装 Debian 运行依赖前会询问是否切换到清华大学镜像源；两种选择都会禁用失效的 bullseye-backports。
 安装末尾会单独询问是否安装 MT7922 测试内核，默认不安装。
 EOF
             exit 0
@@ -113,8 +356,76 @@ normalize_checksum_file "${PAYLOAD_DIR}/SHA256SUMS"
     sha256sum -c SHA256SUMS
 )
 
+validate_payload_file() {
+    required_file="$1"
+    if [ ! -s "${PAYLOAD_DIR}/${required_file}" ]; then
+        die "首装包关键文件缺失或为空：${required_file}。为保护现有安装，未覆盖任何系统文件。"
+    fi
+}
+
+validate_elf_aarch64_file() {
+    required_file="$1"
+    executable_path="${PAYLOAD_DIR}/${required_file}"
+    elf_ident="$(od -An -tx1 -N6 "${executable_path}" | tr -d '[:space:]')"
+    elf_machine="$(od -An -tx1 -j18 -N2 "${executable_path}" | tr -d '[:space:]')"
+    if [ "${elf_ident}" != "7f454c460201" ] || [ "${elf_machine}" != "b700" ]; then
+        die "首装包可执行文件格式或架构错误：${required_file}。为保护现有安装，未覆盖任何系统文件。"
+    fi
+}
+
+install_radxa_archive_keyring() {
+    keyring_path="${PAYLOAD_DIR}/keyring/${RADXA_KEYRING_DEB}"
+
+    # 密钥环随首装包发布，避免目标网络无法访问 GitHub 时卡住或阻断首装。
+    log "安装 Radxa APT 签名密钥环"
+
+    actual_keyring_sha256="$(sha256sum "${keyring_path}" | awk '{print tolower($1)}')"
+    if [ "${actual_keyring_sha256}" != "${RADXA_KEYRING_SHA256}" ]; then
+        die "Radxa APT 签名密钥环 SHA-256 校验失败。"
+    fi
+
+    if [ "$(dpkg-deb -f "${keyring_path}" Package)" != "radxa-archive-keyring" ] || \
+        [ "$(dpkg-deb -f "${keyring_path}" Version)" != "${RADXA_KEYRING_VERSION}" ] || \
+        [ "$(dpkg-deb -f "${keyring_path}" Architecture)" != "all" ]; then
+        die "Radxa APT 签名密钥环元数据不符合预期。"
+    fi
+
+    dpkg -i "${keyring_path}"
+}
+
+# SHA-256 清单由发布包携带；还需拒绝被错误打包为零字节的关键组件。
+for REQUIRED_PAYLOAD_FILE in \
+    bin/teslabox \
+    bin/teslabox-init \
+    bin/teslabox-image-init \
+    bin/teslabox-gadget \
+    libexec/teslabox-update-helper \
+    config/teslabox.env.example \
+    systemd/teslabox.service \
+    systemd/teslabox-update.service \
+    systemd/teslabox-ap.service \
+    udev/99-teslabox.rules \
+    scripts/teslabox-ap-setup.sh \
+    scripts/install-media-toolchain.sh \
+    keyring/radxa-archive-keyring_0.2.0_all.deb \
+    media/teslabox-media-debian11-arm64.tar.gz \
+    media/teslabox-media-debian11-arm64.tar.gz.sha256; do
+    validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
+done
+
+for REQUIRED_EXECUTABLE_FILE in \
+    bin/teslabox \
+    bin/teslabox-init \
+    bin/teslabox-image-init \
+    bin/teslabox-gadget \
+    libexec/teslabox-update-helper; do
+    validate_elf_aarch64_file "${REQUIRED_EXECUTABLE_FILE}"
+done
+
 log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
+install_radxa_archive_keyring
+configure_debian_apt_sources
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \

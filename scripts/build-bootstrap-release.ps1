@@ -3,6 +3,7 @@ param(
     [string]$MainBinary = "dist\update\teslabox-linux-arm64",
     [string]$UpdateHelper = "dist\update\teslabox-update-helper-linux-arm64",
     [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
+    [string]$RadxaKeyring = "dist\bootstrap-inputs\radxa-archive-keyring_0.2.0_all.deb",
     [string]$OutputDirectory = "dist\bootstrap",
     [switch]$AllowDirty
 )
@@ -23,9 +24,14 @@ if (-not $AllowDirty) {
 $mainPath = (Resolve-Path (Join-Path $root $MainBinary)).Path
 $helperPath = (Resolve-Path (Join-Path $root $UpdateHelper)).Path
 $mediaPath = (Resolve-Path (Join-Path $root $MediaArchive)).Path
+$radxaKeyringPath = (Resolve-Path (Join-Path $root $RadxaKeyring)).Path
 $mediaChecksumPath = "$mediaPath.sha256"
 if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
     throw "The media archive checksum is missing: $mediaChecksumPath"
+}
+$radxaKeyringHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $radxaKeyringPath).Hash.ToLowerInvariant()
+if ($radxaKeyringHash -ne "a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad") {
+    throw "The Radxa archive keyring checksum is unexpected: $radxaKeyringPath"
 }
 
 $manifestPath = Join-Path (Split-Path -Parent $mainPath) "latest.json"
@@ -49,7 +55,7 @@ if (Test-Path -LiteralPath $stage) {
 }
 
 $directories = @(
-    "bin", "libexec", "config", "systemd", "udev", "scripts", "media"
+    "bin", "libexec", "config", "systemd", "udev", "scripts", "media", "keyring"
 )
 foreach ($directory in $directories) {
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $directory) | Out-Null
@@ -99,27 +105,23 @@ $files = @{
 }
 foreach ($entry in $files.GetEnumerator()) {
     $destination = Join-Path $stage $entry.Value
-    Copy-Item -LiteralPath (Join-Path $root $entry.Key) -Destination $destination
-    # UTF-8 多字节序列不会包含 0x0D；按字节清理 CR 可同时覆盖 CRLF 和孤立 CR，并避免 PowerShell 改写编码。
-    $sourceBytes = [IO.File]::ReadAllBytes($destination)
-    $normalizedBytes = New-Object 'System.Collections.Generic.List[byte]' $sourceBytes.Length
-    for ($index = 0; $index -lt $sourceBytes.Length; $index++) {
-        if ($sourceBytes[$index] -eq 13) {
-            continue
-        }
-        if ($index -lt 3 -and $sourceBytes.Length -ge 3 -and $sourceBytes[0] -eq 0xEF -and $sourceBytes[1] -eq 0xBB -and $sourceBytes[2] -eq 0xBF) {
-            continue
-        }
-        $normalizedBytes.Add($sourceBytes[$index])
+    $source = Join-Path $root $entry.Key
+    $sourceLength = (Get-Item -LiteralPath $source).Length
+    if ($sourceLength -eq 0) {
+        throw "Required Linux source text file is empty: $source"
     }
-    [IO.File]::WriteAllBytes($destination, $normalizedBytes.ToArray())
-    $verificationBytes = [IO.File]::ReadAllBytes($destination)
-    if ($verificationBytes -contains 13) {
-        throw "Linux text still contains a CR byte: $destination"
+    Copy-Item -LiteralPath $source -Destination $destination
+    $destinationLength = (Get-Item -LiteralPath $destination).Length
+    if ($destinationLength -ne $sourceLength) {
+        throw "Linux text file copy size mismatch: $destination (source bytes=$sourceLength, destination bytes=$destinationLength)"
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash) {
+        throw "Linux text file copy checksum mismatch: $destination"
     }
 }
 Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
 Copy-Item -LiteralPath $mediaChecksumPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz.sha256")
+Copy-Item -LiteralPath $radxaKeyringPath -Destination (Join-Path $stage "keyring\radxa-archive-keyring_0.2.0_all.deb")
 
 $info = @(
     "version=$Version",
