@@ -16,6 +16,8 @@ RADXA_KEYRING_SHA256="a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95d
 WORK_DIR=""
 AP_INITIAL_PASSWORD=""
 MT7922_MODE="ask"
+APT_SOURCE_BACKUP_DIR="/var/backups/teslabox/apt-sources"
+APT_SOURCE_BACKUP_TIMESTAMP=""
 
 log() {
     printf '\n[TeslaBox] %s\n' "$*"
@@ -45,6 +47,243 @@ normalize_checksum_file() {
     mv "${normalized_file}" "${checksum_file}"
 }
 
+apt_source_files() {
+    if [ -f /etc/apt/sources.list ]; then
+        printf '%s\n' /etc/apt/sources.list
+    fi
+    if [ -d /etc/apt/sources.list.d ]; then
+        find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) -print
+    fi
+}
+
+backup_apt_source_file() {
+    source_file="$1"
+    backup_name="$(printf '%s' "${source_file}" | sed 's#^/etc/apt/##; s#/#_#g')"
+    backup_file="${APT_SOURCE_BACKUP_DIR}/${backup_name}.${APT_SOURCE_BACKUP_TIMESTAMP}"
+
+    install -d -m 0700 "${APT_SOURCE_BACKUP_DIR}"
+    if [ ! -e "${backup_file}" ]; then
+        cp -a "${source_file}" "${backup_file}"
+    fi
+    printf '%s\n' "${backup_file}"
+}
+
+replace_apt_source_file() {
+    source_file="$1"
+    temporary_file="$2"
+
+    if cmp -s "${source_file}" "${temporary_file}"; then
+        rm -f "${temporary_file}"
+        return
+    fi
+
+    backup_file="$(backup_apt_source_file "${source_file}")"
+    chmod 0644 "${temporary_file}"
+    mv "${temporary_file}" "${source_file}"
+    log "已更新 APT 配置：${source_file}（原文件备份到 ${backup_file}）"
+}
+
+rewrite_debian_list_file() {
+    source_file="$1"
+    switch_to_tuna="$2"
+    temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
+
+    # 仅处理 Debian 基础仓；Radxa 和其他第三方仓的路径不匹配，不会被改写。
+    awk -v switch_to_tuna="${switch_to_tuna}" '
+        function source_field_index(    field_no) {
+            field_no = 2
+            if ($2 ~ /^\[/) {
+                while (field_no <= NF && $field_no !~ /\]$/) {
+                    field_no++
+                }
+                field_no++
+            }
+            return field_no
+        }
+
+        function is_debian_main_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian\/?$/
+        }
+
+        function is_debian_security_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+        }
+
+        {
+            if ($0 ~ /^[[:space:]]*#/) {
+                print
+                next
+            }
+
+            source_index = source_field_index()
+            if (($1 == "deb" || $1 == "deb-src") && source_index + 1 <= NF) {
+                uri = $(source_index)
+                suite = $(source_index + 1)
+
+                if (suite == "bullseye-backports") {
+                    print "# 由 TeslaBox 禁用：bullseye-backports 已从 Debian 活跃镜像下线。"
+                    print "# " $0
+                    next
+                }
+
+                if (switch_to_tuna == "1") {
+                    if ((suite == "bullseye" || suite == "bullseye-updates") && is_debian_main_uri(uri)) {
+                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian"
+                    } else if (suite == "bullseye-security" && is_debian_security_uri(uri)) {
+                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                    }
+                }
+            }
+            print
+        }
+    ' "${source_file}" >"${temporary_file}"
+
+    replace_apt_source_file "${source_file}" "${temporary_file}"
+}
+
+rewrite_debian_deb822_file() {
+    source_file="$1"
+    switch_to_tuna="$2"
+    temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
+
+    awk -v switch_to_tuna="${switch_to_tuna}" '
+        BEGIN {
+            RS = ""
+            ORS = "\n\n"
+        }
+
+        function field_value(field_name,    lines, line_count, line_no, pattern, value) {
+            line_count = split($0, lines, "\n")
+            pattern = "^" field_name ":[[:space:]]*"
+            for (line_no = 1; line_no <= line_count; line_no++) {
+                if (lines[line_no] ~ pattern) {
+                    value = lines[line_no]
+                    sub(pattern, "", value)
+                    return value
+                }
+            }
+            return ""
+        }
+
+        function set_field(field_name, value,    lines, line_count, line_no, pattern, output, found) {
+            line_count = split($0, lines, "\n")
+            pattern = "^" field_name ":[[:space:]]*"
+            found = 0
+            for (line_no = 1; line_no <= line_count; line_no++) {
+                if (lines[line_no] ~ pattern) {
+                    lines[line_no] = field_name ": " value
+                    found = 1
+                }
+            }
+            if (!found) {
+                lines[++line_count] = field_name ": " value
+            }
+            output = lines[1]
+            for (line_no = 2; line_no <= line_count; line_no++) {
+                output = output "\n" lines[line_no]
+            }
+            $0 = output
+        }
+
+        function has_word(value, word,    fields, field_count, field_no) {
+            field_count = split(value, fields, /[[:space:]]+/)
+            for (field_no = 1; field_no <= field_count; field_no++) {
+                if (fields[field_no] == word) {
+                    return 1
+                }
+            }
+            return 0
+        }
+
+        function without_word(value, word,    fields, field_count, field_no, result) {
+            field_count = split(value, fields, /[[:space:]]+/)
+            result = ""
+            for (field_no = 1; field_no <= field_count; field_no++) {
+                if (fields[field_no] != "" && fields[field_no] != word) {
+                    result = result (result == "" ? "" : " ") fields[field_no]
+                }
+            }
+            return result
+        }
+
+        function is_debian_main_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian\/?$/
+        }
+
+        function is_debian_security_uri(uri) {
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+        }
+
+        {
+            types = field_value("Types")
+            suites = field_value("Suites")
+
+            if (!has_word(types, "deb")) {
+                print
+                next
+            }
+
+            if (has_word(suites, "bullseye-backports")) {
+                remaining_suites = without_word(suites, "bullseye-backports")
+                if (remaining_suites == "") {
+                    set_field("Enabled", "no")
+                } else {
+                    set_field("Suites", remaining_suites)
+                }
+                suites = field_value("Suites")
+            }
+
+            if (switch_to_tuna == "1") {
+                uris = field_value("URIs")
+                if ((has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) && is_debian_main_uri(uris)) {
+                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian")
+                } else if (has_word(suites, "bullseye-security") && is_debian_security_uri(uris)) {
+                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian-security")
+                }
+            }
+            print
+        }
+    ' "${source_file}" >"${temporary_file}"
+
+    replace_apt_source_file "${source_file}" "${temporary_file}"
+}
+
+configure_debian_apt_sources() {
+    log "配置 Debian APT 源"
+    printf '%s\n' '请选择 Debian 基础仓镜像：'
+    printf '%s\n' '  1) 切换到清华大学镜像源'
+    printf '%s\n' '  2) 保持当前镜像源'
+    printf '%s\n' '无论选择哪项，都会禁用系统镜像自带的失效 bullseye-backports。'
+
+    while :; do
+        printf '%s' '请输入 1 或 2 [2]：'
+        if ! IFS= read -r apt_mirror_choice; then
+            apt_mirror_choice="2"
+            printf '\n'
+        fi
+        case "${apt_mirror_choice}" in
+            1|2|"") break ;;
+            *) warn "请输入 1 或 2。" ;;
+        esac
+    done
+
+    case "${apt_mirror_choice:-2}" in
+        1) log "将 Debian 基础仓切换到清华大学镜像源" ;;
+        *) apt_mirror_choice="2"; log "保留当前 Debian 基础仓镜像" ;;
+    esac
+
+    APT_SOURCE_BACKUP_TIMESTAMP="$(date +%Y%m%d%H%M%S)"
+    apt_source_list="${WORK_DIR}/apt-source-files"
+    apt_source_files >"${apt_source_list}"
+    while IFS= read -r source_file; do
+        case "${source_file}" in
+            *.list) rewrite_debian_list_file "${source_file}" "${apt_mirror_choice}" ;;
+            *.sources) rewrite_debian_deb822_file "${source_file}" "${apt_mirror_choice}" ;;
+        esac
+    done <"${apt_source_list}"
+}
+
 trap cleanup EXIT HUP INT TERM
 
 for argument in "$@"; do
@@ -55,6 +294,7 @@ for argument in "$@"; do
 用法：sudo ./teslabox-install.sh [--skip-mt7922]
 
 默认安装 TeslaBox、FFmpeg/MPP/RGA、systemd、udev 和在线升级组件。
+安装 Debian 运行依赖前会询问是否切换到清华大学镜像源；两种选择都会禁用失效的 bullseye-backports。
 安装末尾会单独询问是否安装 MT7922 测试内核，默认不安装。
 EOF
             exit 0
@@ -185,6 +425,7 @@ done
 log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
 install_radxa_archive_keyring
+configure_debian_apt_sources
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
