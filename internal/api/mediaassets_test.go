@@ -71,6 +71,14 @@ func TestMediaAssetUploadRouteStreamsAndHidesStagingName(t *testing.T) {
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"needs_apply":true`) {
 		t.Fatalf("status = %d, %s", status.Code, status.Body.String())
 	}
+
+	directDelete := httptest.NewRecorder()
+	directDeleteRequest := httptest.NewRequest(http.MethodPost, "/api/v1/media-assets/external-delete", strings.NewReader(`{"id":"0123456789abcdef0123456789abcdef","category":"music","files":[]}`))
+	directDeleteRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(directDelete, directDeleteRequest)
+	if directDelete.Code != http.StatusBadRequest || !strings.Contains(directDelete.Body.String(), "OTG") {
+		t.Fatalf("external delete without OTG confirmation = %d, %s", directDelete.Code, directDelete.Body.String())
+	}
 }
 
 func testPNG(t *testing.T, width, height int) []byte {

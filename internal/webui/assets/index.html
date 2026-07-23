@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260722-6">
-  <script src="/app.js?v=20260722-9" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260723-4">
+  <script src="/app.js?v=20260723-6" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -135,11 +135,11 @@
 
     <div id="media-page" class="page media-page app-page" hidden>
       <section class="settings-hero media-hero">
-        <div><p class="eyebrow">TESLA MEDIA</p><h1>媒体中心</h1><p class="hero-copy">把锁车音效、喷漆车间皮肤、自定义灯光秀和音乐整理到车机可识别的目录。上传会先安全暂存；点击应用时才写入虚拟盘。</p></div>
+        <div><p class="eyebrow">TESLA MEDIA</p><h1>媒体中心</h1><p class="hero-copy">展示 TeslaBox 管理的文件，以及电脑或车机直接写入的可识别媒体。上传会先安全暂存；点击应用时才写入虚拟盘。</p></div>
         <button id="media-refresh" class="secondary" type="button">刷新媒体</button>
       </section>
       <div id="media-notice" class="notice" role="status" aria-live="polite"></div>
-      <div class="settings-warning">应用变更前，必须先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。</div>
+        <div id="media-maintenance-warning" class="settings-warning">默认模式下，应用变更前必须先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。</div>
 
       <section class="media-grid" aria-label="Tesla 媒体分类">
         <article class="settings-card media-card">
@@ -167,13 +167,17 @@
           <div class="media-card-head"><div><p class="eyebrow">MUSIC</p><h2>音乐</h2><p>批量写入可选 FAT32 音乐分区。若初始化时未创建 MUSIC 分区，应用时会给出明确提示。</p></div><span id="media-music-count" class="badge">0 首</span></div>
           <label class="media-upload-control">选择音乐<input id="media-music-files" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.m4a,.aac,.flac" multiple></label>
           <button id="media-music-upload" class="secondary compact" type="button">暂存音乐</button>
-          <div id="media-music-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+          <div class="media-music-browser">
+            <div class="media-music-toolbar"><div id="media-music-breadcrumb" class="media-music-breadcrumb" aria-label="当前音乐目录"></div><button id="media-music-back" class="ghost compact" type="button">返回上级</button></div>
+            <div id="media-music-list" class="media-asset-list media-music-list"><p class="empty-state">正在读取…</p></div>
+            <div id="media-music-pagination" class="media-music-pagination"><span id="media-music-page-summary" class="muted">正在读取…</span><div><button id="media-music-prev" class="ghost compact" type="button">上一页</button><button id="media-music-next" class="ghost compact" type="button">下一页</button></div></div>
+          </div>
         </article>
       </section>
 
       <section class="settings-section media-apply-section" aria-labelledby="media-apply-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SAFE WRITE</p><h2 id="media-apply-title">应用到车机存储</h2></div><span id="media-apply-status" class="badge">检查中</span></div>
-        <article class="settings-card media-apply-card"><div><h3>待应用变更</h3><p id="media-apply-detail">正在读取媒体变更…</p></div><div class="media-apply-actions"><label class="inline-check"><input id="media-confirm-otg-disconnected" type="checkbox"><span>我确认 OTG 已物理断开</span></label><button id="media-apply" class="primary" type="button">安全应用变更</button></div></article>
+        <article class="settings-card media-apply-card"><div><h3>待应用变更</h3><p id="media-apply-detail">正在读取媒体变更…</p></div><div class="media-apply-actions"><label id="media-confirm-otg-row" class="inline-check"><input id="media-confirm-otg-disconnected" type="checkbox"><span>我确认 OTG 已物理断开</span></label><button id="media-apply" class="primary" type="button">安全应用变更</button></div></article>
       </section>
     </div>
 
@@ -193,13 +197,13 @@
           <div><span>IP 地址</span><strong id="wifi-ip-address">—</strong></div>
         </div>
         <div id="wifi-warning" class="settings-warning" hidden></div>
-        <article class="settings-card">
-          <div class="settings-card-head"><div><h3>已保存的网络</h3><p>密码由 NetworkManager 保存，页面不会读取或显示密码。</p></div></div>
-          <div id="saved-network-list" class="network-list"><p class="empty-state">正在读取…</p></div>
+        <article class="settings-card collapsible-network-card">
+          <div class="settings-card-head"><div><h3>已保存的网络</h3><p>密码由 NetworkManager 保存，页面不会读取或显示密码。</p></div><button id="saved-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="false" aria-controls="saved-network-panel">展开</button></div>
+          <div id="saved-network-panel" hidden><div id="saved-network-list" class="network-list"><p class="empty-state">正在读取…</p></div></div>
         </article>
-        <article class="settings-card">
-          <div class="settings-card-head"><div><h3>当前可用 WiFi</h3><p>列表来自最近一次扫描；同名网络只展示信号最强的接入点。</p></div><button id="wifi-scan" class="secondary compact" type="button">扫描网络</button></div>
-          <div class="network-table-wrap">
+        <article class="settings-card collapsible-network-card">
+          <div class="settings-card-head"><div><h3>当前可用 WiFi</h3><p>列表来自最近一次扫描；同名网络只展示信号最强的接入点。</p></div><div class="network-card-actions"><button id="wifi-scan" class="secondary compact" type="button">扫描网络</button><button id="available-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="false" aria-controls="available-network-panel">展开</button></div></div>
+          <div id="available-network-panel" class="network-table-wrap" hidden>
             <table class="network-table"><thead><tr><th>SSID</th><th>SIGNAL</th><th>BAND</th><th>SECURITY</th><th></th></tr></thead><tbody id="available-network-list"><tr><td colspan="5" class="empty-state">正在读取…</td></tr></tbody></table>
           </div>
         </article>
@@ -228,11 +232,20 @@
 
       <section class="settings-section" aria-labelledby="storage-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-settings-title">外接存储</h2></div><span id="storage-status" class="badge">读取中</span></div>
-        <div class="settings-warning">初始化会擦除目标整盘。系统只允许选择具有稳定序列号的 USB U 盘、USB SSD 或 USB 硬盘，不会列出 TF 系统盘和内部 NVMe。</div>
+        <div class="settings-warning">初始化会擦除目标整盘。系统会列出具有稳定序列号、未被系统使用的 USB 存储设备和 NVMe 数据盘；TF 系统盘、已挂载盘、swap 盘和容量不足的盘不会列出。</div>
         <article class="settings-card">
           <div class="settings-card-head"><div><h3>存储设备</h3><p>已完成初始化的设备会同时登记在 TF 系统盘和数据盘内；插拔后由状态机自动解绑或恢复车机存储。</p></div><button id="storage-refresh" class="secondary compact" type="button">扫描设备</button></div>
           <div id="storage-device-list" class="storage-device-list"><p class="empty-state">正在读取…</p></div>
         </article>
+      </section>
+
+      <section class="settings-section" aria-labelledby="maintenance-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge">读取中</span></div>
+        <article class="settings-card power-card">
+          <div><h3>媒体自动断开与温重启</h3><p>启用后，应用媒体或删除直接写入文件会先由 TeslaBox 断开 USB Gadget，完成写入后自动重启恢复。上传文件本身只会暂存，不会触发重启。</p></div>
+          <div class="power-actions"><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
+        </article>
+        <div class="settings-warning">媒体自动恢复默认关闭，避免改媒体时意外重启。在线更新则默认自动安全断开并整机重启恢复；两种操作都会让车机或电脑短暂失去 USB 存储。</div>
       </section>
 
       <section class="settings-section security-section" aria-labelledby="security-title">
@@ -255,7 +268,7 @@
           <p id="update-notice" class="notice" role="status" aria-live="polite" hidden></p>
           <div class="power-actions"><button id="update-check" class="secondary" type="button">检查更新</button><button id="update-download" class="secondary" type="button" hidden>下载更新</button><button id="update-install" class="primary" type="button" hidden>安装并重启</button></div>
         </article>
-		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。安装前请先物理拔掉车机 OTG，页面会安全解绑 USB Gadget；更新后必须预先插好 OTG，再通过冷启动恢复。</div>
+		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
       </section>
 
       <section class="settings-section power-section" aria-labelledby="power-title">
@@ -297,7 +310,7 @@
           <div><p class="eyebrow">SYSTEM JOURNAL</p><h2 id="system-logs-title">系统日志</h2></div>
           <div class="logs-actions">
             <label>条数<select id="logs-lines"><option value="100">100</option><option value="200" selected>200</option><option value="500">500</option></select></label>
-            <label class="inline-check"><input id="logs-auto-refresh" type="checkbox"><span>每 10 秒刷新</span></label>
+            <button id="logs-auto-refresh" class="state-toggle compact" type="button" aria-pressed="false"><i aria-hidden="true"></i><span>自动刷新：已关闭</span></button>
             <button id="logs-copy" class="secondary compact" type="button">复制日志</button>
           </div>
         </div>
@@ -317,6 +330,23 @@
 
   <section id="wifi-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="wifi-modal-title" hidden>
     <div class="action-modal-backdrop" data-close-wifi></div><form id="wifi-connect-form" class="action-modal-card"><p class="eyebrow">CONNECT</p><h2 id="wifi-modal-title">连接 WiFi</h2><p id="wifi-modal-detail" class="muted"></p><label id="wifi-password-label">WiFi 密码<input id="wifi-password" type="password" minlength="8" maxlength="63" autocomplete="new-password"></label><label class="inline-check"><input id="wifi-autoconnect" type="checkbox" checked><span>设备启动或网络恢复后自动连接</span></label><div class="modal-actions"><button class="secondary" type="button" data-close-wifi>取消</button><button class="primary" type="submit">连接</button></div></form>
+  </section>
+
+  <section id="wifi-ipv4-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="wifi-ipv4-modal-title" hidden>
+    <div class="action-modal-backdrop" data-close-wifi-ipv4></div>
+    <form id="wifi-ipv4-form" class="action-modal-card wifi-ipv4-form">
+      <p class="eyebrow">IPV4 SETTINGS</p><h2 id="wifi-ipv4-modal-title">WiFi IPv4 设置</h2>
+      <p id="wifi-ipv4-modal-detail" class="muted"></p>
+      <label class="wifi-ipv4-mode-field">地址获取方式<select id="wifi-ipv4-mode"><option value="dhcp">DHCP（自动获取）</option><option value="static">静态 IPv4</option></select></label>
+      <div id="wifi-ipv4-static-fields" class="form-grid wifi-ipv4-static-fields" hidden>
+        <label>IP 地址<input id="wifi-ipv4-address" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.20"></label>
+        <label>子网掩码<input id="wifi-ipv4-mask" inputmode="decimal" autocomplete="off" placeholder="例如 255.255.255.0"></label>
+        <label>网关<input id="wifi-ipv4-gateway" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.1"></label>
+        <label>DNS 服务器<input id="wifi-ipv4-dns" autocomplete="off" placeholder="多个地址用逗号分隔"></label>
+      </div>
+      <p class="muted wifi-ipv4-help">配置按当前已保存的 WiFi 网络单独记忆。修改当前连接的地址会让本页面短暂断开，请通过新 IP 或 TeslaBox 热点重新访问。</p>
+      <div class="modal-actions"><button class="secondary" type="button" data-close-wifi-ipv4>取消</button><button class="primary" type="submit">保存 IPv4 设置</button></div>
+    </form>
   </section>
 
   <section id="confirm-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
@@ -363,10 +393,9 @@
         <div class="player-head-actions">
           <label class="quality-control">画质
             <select id="player-quality" aria-label="播放画质">
-              <option value="auto">自动（当前原画）</option>
-              <option value="smooth">流畅（480p · 20 FPS）</option>
-              <option value="standard">标准（720p · 24 FPS）</option>
-              <option value="high">高清（720p · 30 FPS）</option>
+              <option value="auto-high">自动（高清）</option>
+              <option value="auto-standard">自动（标准）</option>
+              <option value="auto-smooth">自动（流畅）</option>
               <option value="original">原画</option>
             </select>
           </label>

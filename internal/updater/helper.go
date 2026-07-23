@@ -29,6 +29,8 @@ type HelperConfig struct {
 	Timeout     time.Duration
 }
 
+const latestBackupName = "teslabox.previous.backup"
+
 // RunHelper 重新验证本地发布物后原子替换程序，并在健康检查失败时自动回滚。
 func RunHelper(ctx context.Context, config HelperConfig) error {
 	request, err := readInstallRequest(config.RequestPath)
@@ -48,9 +50,12 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 	if err := os.MkdirAll(config.BackupDir, 0o700); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("创建备份目录: %w", err))
 	}
-	backupPath := filepath.Join(config.BackupDir, "teslabox-"+strings.TrimPrefix(request.Version, "v")+".backup")
+	backupPath := filepath.Join(config.BackupDir, latestBackupName)
 	if err := copyFileAtomic(config.TargetPath, backupPath, 0o700); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("备份当前程序: %w", err))
+	}
+	if err := cleanupVersionBackups(config.BackupDir); err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("清理过期更新备份: %w", err))
 	}
 	if err := copyFileAtomic(packagePath, config.TargetPath, 0o755); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("安装新程序: %w", err))
@@ -70,7 +75,18 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 		}
 		return finishInstall(config.ResultPath, request.Version, "failed", message)
 	}
-	return finishInstall(config.ResultPath, request.Version, "success", nil)
+	if err := finishInstall(config.ResultPath, request.Version, "success", nil); err != nil {
+		return err
+	}
+	if !request.RebootAfterInstall {
+		return nil
+	}
+	rebootCtx, rebootCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer rebootCancel()
+	if err := exec.CommandContext(rebootCtx, "systemctl", "reboot").Run(); err != nil {
+		return fmt.Errorf("提交更新后的自动重启: %w", err)
+	}
+	return nil
 }
 
 func readInstallRequest(path string) (InstallRequest, error) {
@@ -187,6 +203,30 @@ func copyFileAtomic(source, target string, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(temporaryPath, target)
+}
+
+func cleanupVersionBackups(directory string) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == latestBackupName || !strings.HasPrefix(name, "teslabox-") || !strings.HasSuffix(name, ".backup") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func restartAndWaitHealthy(ctx context.Context, service, healthURL string) error {

@@ -352,6 +352,7 @@ fi
 
 log "首次安装完成"
 printf '%s\n' "管理页面：http://$(hostname -I 2>/dev/null | awk '{print $1}')/"
+printf '%s\n' 'mDNS 管理地址：http://teslabox.local/（若客户端不支持 mDNS，请使用上方 IP 地址）'
 printf '%s\n' '初始管理密码：teslabox（首次登录后必须修改）'
 if [ -n "${AP_INITIAL_PASSWORD}" ]; then
     printf '%s\n' '热点名称：TeslaBox-5G'

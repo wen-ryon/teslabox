@@ -194,6 +194,7 @@ func TestManagerCheckDownloadAndSubmitInstall(t *testing.T) {
 		PublicKey:   base64.StdEncoding.EncodeToString(publicKey), Channel: "stable", Board: "radxa-rock-3a", Arch: "arm64",
 		CurrentVersion: "0.1.0", CurrentCommit: "test", DownloadDir: filepath.Join(root, "updates"),
 		RequestPath: filepath.Join(root, "request.json"), ResultPath: filepath.Join(root, "result.json"), MaximumSize: 1024,
+		AutoReboot: func() bool { return true },
 	}, starter)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +219,7 @@ func TestManagerCheckDownloadAndSubmitInstall(t *testing.T) {
 		t.Fatalf("Install() = %+v, %v, started=%v", status, err, starter.started.Load())
 	}
 	request, err := readInstallRequest(filepath.Join(root, "request.json"))
-	if err != nil || request.SHA256 != manifest.SHA256 || request.PackageName != "teslabox-1.2.3-linux-arm64" {
+	if err != nil || request.SHA256 != manifest.SHA256 || request.PackageName != "teslabox-1.2.3-linux-arm64" || !request.RebootAfterInstall {
 		t.Fatalf("install request = %+v, %v", request, err)
 	}
 }

@@ -43,11 +43,21 @@ func (e *InputError) Error() string { return e.Message }
 
 // SavedNetwork 是不包含密码的 NetworkManager 客户端连接摘要。
 type SavedNetwork struct {
-	Name        string `json:"name"`
-	UUID        string `json:"uuid"`
-	SSID        string `json:"ssid"`
-	Active      bool   `json:"active"`
-	AutoConnect bool   `json:"auto_connect"`
+	Name        string       `json:"name"`
+	UUID        string       `json:"uuid"`
+	SSID        string       `json:"ssid"`
+	Active      bool         `json:"active"`
+	AutoConnect bool         `json:"auto_connect"`
+	IPv4        IPv4Settings `json:"ipv4"`
+}
+
+// IPv4Settings 描述已保存 WiFi 的 IPv4 配置；DHCP 模式不会返回临时租约地址。
+type IPv4Settings struct {
+	Mode       string   `json:"mode"`
+	Address    string   `json:"address,omitempty"`
+	SubnetMask string   `json:"subnet_mask,omitempty"`
+	Gateway    string   `json:"gateway,omitempty"`
+	DNS        []string `json:"dns"`
 }
 
 // AccessPoint 是扫描结果中按 SSID 去重后的当前连接或最强接入点。
@@ -121,6 +131,16 @@ type ConnectRequest struct {
 type AutoConnectUpdate struct {
 	UUID    string `json:"uuid"`
 	Enabled bool   `json:"enabled"`
+}
+
+// IPv4Update 描述单个已保存 WiFi 的 IPv4 获取方式；静态模式只接受 IPv4 地址。
+type IPv4Update struct {
+	UUID       string   `json:"uuid"`
+	Mode       string   `json:"mode"`
+	Address    string   `json:"address,omitempty"`
+	SubnetMask string   `json:"subnet_mask,omitempty"`
+	Gateway    string   `json:"gateway,omitempty"`
+	DNS        []string `json:"dns"`
 }
 
 // APUpdate 描述允许从管理页面修改的热点字段。
@@ -222,7 +242,7 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		}
 		status.SavedNetworks = append(status.SavedNetworks, SavedNetwork{
 			Name: profile.Name, UUID: profile.UUID, SSID: profile.SSID,
-			Active: profile.Active, AutoConnect: profile.AutoConnect,
+			Active: profile.Active, AutoConnect: profile.AutoConnect, IPv4: profileIPv4Settings(profile),
 		})
 	}
 	if status.APActive {
@@ -537,6 +557,66 @@ func (m *Manager) setAutoConnect(ctx context.Context, uuid string, enabled bool)
 	return nil
 }
 
+// UpdateIPv4 将 DHCP 或静态 IPv4 设置保存到指定 WiFi 配置；当前连接会立即重新激活以应用新地址。
+func (m *Manager) UpdateIPv4(ctx context.Context, update IPv4Update) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validUUID(update.UUID) {
+		return invalidInput("连接 UUID 无效")
+	}
+	normalized, err := normalizeIPv4Update(update)
+	if err != nil {
+		return err
+	}
+	profiles, err := m.wirelessProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	selected := profile{}
+	for _, item := range profiles {
+		if item.UUID == update.UUID {
+			selected = item
+			break
+		}
+	}
+	if selected.UUID == "" || selected.Mode == "ap" {
+		return invalidInput("未找到可管理的已保存 WiFi")
+	}
+	args := []string{"connection", "modify", "uuid", update.UUID}
+	if normalized.Mode == "dhcp" {
+		args = append(args,
+			"ipv4.method", "auto",
+			"ipv4.addresses", "",
+			"ipv4.gateway", "",
+			"ipv4.dns", "",
+			"ipv4.ignore-auto-dns", "no",
+		)
+	} else {
+		prefix, _ := subnetMaskPrefix(normalized.SubnetMask)
+		args = append(args,
+			"ipv4.method", "manual",
+			"ipv4.addresses", normalized.Address+"/"+strconv.Itoa(prefix),
+			"ipv4.gateway", normalized.Gateway,
+			"ipv4.dns", strings.Join(normalized.DNS, ","),
+			"ipv4.ignore-auto-dns", "yes",
+		)
+	}
+	if _, err := m.run(ctx, "nmcli", args...); err != nil {
+		return fmt.Errorf("保存 WiFi IPv4 设置: %w", err)
+	}
+	if !selected.Active {
+		return nil
+	}
+	wifiInterface, _ := m.networkInterfaces(ctx, profiles)
+	if wifiInterface == "" {
+		return errors.New("无法识别当前 WiFi 接口，IPv4 设置已保存但尚未应用")
+	}
+	if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", update.UUID, "ifname", wifiInterface); err != nil {
+		return fmt.Errorf("应用当前 WiFi IPv4 设置: %w", err)
+	}
+	return nil
+}
+
 // Forget 删除指定的客户端连接配置，但不允许删除 AP 配置。
 func (m *Manager) Forget(ctx context.Context, uuid string) error {
 	m.mu.Lock()
@@ -760,6 +840,8 @@ func (m *Manager) SchedulePower(action string) error {
 
 type profile struct {
 	Name, UUID, SSID, Mode, Band, Security, Address, IPv4Method string
+	Gateway                                                     string
+	DNS                                                         []string
 	Device, ConfiguredDevice                                    string
 	Channel                                                     int
 	Active, AutoConnect                                         bool
@@ -805,7 +887,43 @@ func (m *Manager) profileDetails(ctx context.Context, item profile) (profile, er
 	item.Security = lines[4]
 	item.IPv4Method = lines[5]
 	item.Address = lines[6]
+	item.Gateway, item.DNS, err = m.profileIPv4Details(ctx, item.UUID)
+	if err != nil {
+		return profile{}, err
+	}
 	return item, nil
+}
+
+func (m *Manager) profileIPv4Details(ctx context.Context, uuid string) (string, []string, error) {
+	output, err := m.run(ctx, "nmcli", "-g", "ipv4.gateway,ipv4.dns", "connection", "show", "uuid", uuid)
+	if err != nil {
+		return "", nil, fmt.Errorf("读取无线连接 IPv4 配置: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(lines) == 0 {
+		return "", []string{}, nil
+	}
+	gateway := strings.TrimSpace(lines[0])
+	dns := parseIPv4List(strings.Join(lines[1:], ","))
+	return gateway, dns, nil
+}
+
+func profileIPv4Settings(item profile) IPv4Settings {
+	settings := IPv4Settings{Mode: "dhcp", DNS: []string{}}
+	if strings.ToLower(strings.TrimSpace(item.IPv4Method)) != "manual" {
+		return settings
+	}
+	settings.Mode = "static"
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(strings.Split(item.Address, ",")[0]))
+	if err == nil && prefix.Addr().Is4() {
+		settings.Address = prefix.Addr().String()
+		settings.SubnetMask = subnetMaskFromPrefix(prefix.Bits())
+	}
+	if gateway, err := netip.ParseAddr(strings.TrimSpace(item.Gateway)); err == nil && gateway.Is4() {
+		settings.Gateway = gateway.String()
+	}
+	settings.DNS = append(settings.DNS, item.DNS...)
+	return settings
 }
 
 func (m *Manager) profileInterface(ctx context.Context, uuid string) string {
@@ -972,6 +1090,121 @@ func validatePassword(value string) error {
 		return invalidInput("WiFi 密码必须是 8 到 63 字节")
 	}
 	return nil
+}
+
+func normalizeIPv4Update(update IPv4Update) (IPv4Update, error) {
+	update.Mode = strings.ToLower(strings.TrimSpace(update.Mode))
+	switch update.Mode {
+	case "dhcp":
+		update.Address, update.SubnetMask, update.Gateway, update.DNS = "", "", "", []string{}
+		return update, nil
+	case "static":
+	default:
+		return IPv4Update{}, invalidInput("IPv4 获取方式仅支持 DHCP 或静态地址")
+	}
+	address, err := parseUsableIPv4(update.Address, "IP 地址")
+	if err != nil {
+		return IPv4Update{}, err
+	}
+	prefix, err := subnetMaskPrefix(update.SubnetMask)
+	if err != nil {
+		return IPv4Update{}, err
+	}
+	if !isUsableHostAddress(address, prefix) {
+		return IPv4Update{}, invalidInput("IP 地址不能是当前子网的网络地址或广播地址")
+	}
+	gateway, err := parseUsableIPv4(update.Gateway, "网关")
+	if err != nil {
+		return IPv4Update{}, err
+	}
+	if !netip.PrefixFrom(address, prefix).Contains(gateway) || !isUsableHostAddress(gateway, prefix) || gateway == address {
+		return IPv4Update{}, invalidInput("网关必须是与 IP 地址同一子网内的可用地址")
+	}
+	dns := make([]string, 0, len(update.DNS))
+	if len(update.DNS) > 4 {
+		return IPv4Update{}, invalidInput("最多可配置 4 个 DNS 服务器")
+	}
+	for _, value := range update.DNS {
+		address, err := parseUsableIPv4(value, "DNS 服务器")
+		if err != nil {
+			return IPv4Update{}, err
+		}
+		dns = append(dns, address.String())
+	}
+	update.Address = address.String()
+	update.SubnetMask = subnetMaskFromPrefix(prefix)
+	update.Gateway = gateway.String()
+	update.DNS = dns
+	return update, nil
+}
+
+func parseUsableIPv4(value, field string) (netip.Addr, error) {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !address.Is4() || address.IsUnspecified() || address.IsLoopback() || address.IsMulticast() || address.IsLinkLocalUnicast() {
+		return netip.Addr{}, invalidInput(field + "必须是可用的 IPv4 地址")
+	}
+	return address, nil
+}
+
+func subnetMaskPrefix(value string) (int, error) {
+	mask, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !mask.Is4() {
+		return 0, invalidInput("子网掩码必须是 IPv4 地址")
+	}
+	bytes := mask.As4()
+	prefix := 0
+	seenZero := false
+	for _, value := range bytes {
+		for bit := 7; bit >= 0; bit-- {
+			one := value&(1<<bit) != 0
+			if !one {
+				seenZero = true
+				continue
+			}
+			if seenZero {
+				return 0, invalidInput("子网掩码必须连续")
+			}
+			prefix++
+		}
+	}
+	if prefix < 1 || prefix > 30 {
+		return 0, invalidInput("子网掩码仅支持 /1 到 /30")
+	}
+	return prefix, nil
+}
+
+func subnetMaskFromPrefix(prefix int) string {
+	if prefix < 0 || prefix > 32 {
+		return ""
+	}
+	mask := uint32(0)
+	if prefix > 0 {
+		mask = ^uint32(0) << (32 - prefix)
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", byte(mask>>24), byte(mask>>16), byte(mask>>8), byte(mask))
+}
+
+func isUsableHostAddress(address netip.Addr, prefix int) bool {
+	if prefix >= 31 {
+		return true
+	}
+	bytes := address.As4()
+	value := uint32(bytes[0])<<24 | uint32(bytes[1])<<16 | uint32(bytes[2])<<8 | uint32(bytes[3])
+	mask := ^uint32(0) << (32 - prefix)
+	network := value & mask
+	broadcast := network | ^mask
+	return value != network && value != broadcast
+}
+
+func parseIPv4List(value string) []string {
+	items := make([]string, 0)
+	for _, raw := range strings.FieldsFunc(value, func(char rune) bool { return char == ',' || char == ';' || char == ' ' || char == '\t' || char == '\n' }) {
+		address, err := netip.ParseAddr(strings.TrimSpace(raw))
+		if err == nil && address.Is4() {
+			items = append(items, address.String())
+		}
+	}
+	return items
 }
 
 func validUUID(value string) bool {

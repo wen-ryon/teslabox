@@ -82,7 +82,7 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 	if !ok {
 		return nil, &InputError{Message: "不支持的播放画质"}
 	}
-	tiles, err := layoutTiles(request.Layout, profile.width, profile.height)
+	tiles, err := teslaLayoutTiles(request.Layout, profile.height)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +105,8 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 	for index, tile := range tiles {
 		label := fmt.Sprintf("v%d", index)
 		filters = append(filters, fmt.Sprintf(
-			"[%d:v]fps=%d,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=decrease:force_divisible_by=2,hwdownload,format=nv12,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black[%s]",
-			index, profile.fps, tile.width, tile.height, tile.width, tile.height, label,
+			"[%d:v]fps=%d,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12[%s]",
+			index, profile.fps, tile.width, tile.height, label,
 		))
 		labels = append(labels, "["+label+"]")
 		layout = append(layout, strconv.Itoa(tile.x)+"_"+strconv.Itoa(tile.y))
@@ -125,55 +125,6 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		"-f", "mp4", "pipe:1",
 	)
 	return args, nil
-}
-
-func layoutTiles(layout string, width, height int) ([]compositeTile, error) {
-	switch layout {
-	case "composite6":
-		columns := evenParts(width, 3)
-		rows := evenParts(height, 2)
-		return gridTiles([]string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"}, columns, rows), nil
-	case "composite4a":
-		return gridTiles([]string{"front", "back", "left_repeater", "right_repeater"}, evenParts(width, 2), evenParts(height, 2)), nil
-	case "composite4b":
-		rows := evenParts(height, 4)
-		topHeight := rows[0] + rows[1] + rows[2]
-		bottomHeight := height - topHeight
-		columns := evenParts(width, 3)
-		return []compositeTile{
-			{camera: "front", width: width, height: topHeight},
-			{camera: "right_repeater", y: topHeight, width: columns[0], height: bottomHeight},
-			{camera: "back", x: columns[0], y: topHeight, width: columns[1], height: bottomHeight},
-			{camera: "left_repeater", x: columns[0] + columns[1], y: topHeight, width: columns[2], height: bottomHeight},
-		}, nil
-	case "composite3":
-		rows := evenParts(height, 3)
-		topHeight := rows[0] + rows[1]
-		bottomHeight := height - topHeight
-		columns := evenParts(width, 2)
-		return []compositeTile{
-			{camera: "front", width: width, height: topHeight},
-			{camera: "right_repeater", y: topHeight, width: columns[0], height: bottomHeight},
-			{camera: "left_repeater", x: columns[0], y: topHeight, width: columns[1], height: bottomHeight},
-		}, nil
-	default:
-		return nil, &InputError{Message: "不支持的合成布局"}
-	}
-}
-
-func evenParts(total, count int) []int {
-	parts := make([]int, count)
-	remaining := total
-	for index := range parts {
-		if index == len(parts)-1 {
-			parts[index] = remaining
-			break
-		}
-		part := (remaining / (count - index)) &^ 1
-		parts[index] = part
-		remaining -= part
-	}
-	return parts
 }
 
 func gridTiles(cameras []string, columns, rows []int) []compositeTile {

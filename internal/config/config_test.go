@@ -11,6 +11,8 @@ func TestLoad(t *testing.T) {
 	t.Setenv("TESLABOX_DATA_UUID", "data-uuid")
 	t.Setenv("TESLABOX_DATA_MOUNT_PATH", "/mnt/teslabox-data")
 	t.Setenv("TESLABOX_SCAN_INTERVAL", "45s")
+	t.Setenv("TESLABOX_SNAPSHOT_IDLE_INTERVAL", "6m")
+	t.Setenv("TESLABOX_SNAPSHOT_ACTIVE_WINDOW", "3m")
 	t.Setenv("TESLABOX_MIN_FREE_BYTES", "1073741824")
 	t.Setenv("TESLABOX_MIN_FREE_PERCENT", "7")
 
@@ -30,6 +32,9 @@ func TestLoad(t *testing.T) {
 	if cfg.ScanInterval != 45*time.Second {
 		t.Errorf("ScanInterval = %s", cfg.ScanInterval)
 	}
+	if cfg.SnapshotIdleInterval != 6*time.Minute || cfg.SnapshotActiveWindow != 3*time.Minute {
+		t.Errorf("snapshot cadence = idle %s, active window %s", cfg.SnapshotIdleInterval, cfg.SnapshotActiveWindow)
+	}
 	if cfg.MinFreeBytes != 1073741824 || cfg.MinFreePercent != 7 {
 		t.Errorf("free-space thresholds = %d bytes, %d percent", cfg.MinFreeBytes, cfg.MinFreePercent)
 	}
@@ -41,6 +46,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {
 		t.Errorf("WebAuthStatePath = %q", cfg.WebAuthStatePath)
+	}
+	if cfg.MaintenanceStatePath != "/var/lib/teslabox-system/maintenance.json" || cfg.TeslaTimeZone != "Asia/Shanghai" {
+		t.Errorf("maintenance/timezone config = %q, %q", cfg.MaintenanceStatePath, cfg.TeslaTimeZone)
 	}
 	if cfg.WiFiInterface != "" || cfg.APInterface != "ap0" {
 		t.Errorf("network interfaces = %q, %q", cfg.WiFiInterface, cfg.APInterface)
@@ -111,6 +119,8 @@ func TestConfigValidate(t *testing.T) {
 		ReleaseGadget:        "radxa-otgutils",
 		APInterface:          "ap0",
 		ScanInterval:         time.Second,
+		SnapshotIdleInterval: time.Minute,
+		SnapshotActiveWindow: time.Minute,
 		PollInterval:         time.Second,
 		OperationTimeout:     time.Second,
 		SnapshotTimeout:      time.Minute,
@@ -140,10 +150,14 @@ func TestConfigValidate(t *testing.T) {
 		{name: "relative snapshot mount path", mutate: func(cfg *Config) { cfg.SnapshotMountPath = "run/teslabox/snapshots" }, wantErr: true},
 		{name: "relative registry path", mutate: func(cfg *Config) { cfg.RegistryPath = "var/lib/registry.json" }, wantErr: true},
 		{name: "relative web auth path", mutate: func(cfg *Config) { cfg.WebAuthStatePath = "var/lib/web-auth.json" }, wantErr: true},
+		{name: "relative maintenance path", mutate: func(cfg *Config) { cfg.MaintenanceStatePath = "var/lib/maintenance.json" }, wantErr: true},
+		{name: "invalid Tesla time zone", mutate: func(cfg *Config) { cfg.TeslaTimeZone = "Asia/NotAZone" }, wantErr: true},
 		{name: "relative gadget pause path", mutate: func(cfg *Config) { cfg.GadgetPauseStatePath = "var/lib/gadget-paused" }, wantErr: true},
 		{name: "relative boot id path", mutate: func(cfg *Config) { cfg.BootIDPath = "proc/sys/kernel/random/boot_id" }, wantErr: true},
 		{name: "relative ffmpeg path", mutate: func(cfg *Config) { cfg.FFmpegPath = "ffmpeg" }, wantErr: true},
 		{name: "zero media probe timeout", mutate: func(cfg *Config) { cfg.MediaProbeTimeout = 0 }, wantErr: true},
+		{name: "zero idle snapshot interval", mutate: func(cfg *Config) { cfg.SnapshotIdleInterval = 0 }, wantErr: true},
+		{name: "zero active snapshot window", mutate: func(cfg *Config) { cfg.SnapshotActiveWindow = 0 }, wantErr: true},
 		{name: "excessive export queue", mutate: func(cfg *Config) { cfg.ExportQueueSize = 17 }, wantErr: true},
 		{name: "missing selector", mutate: func(cfg *Config) { cfg.DataLabel = "" }, wantErr: true},
 		{name: "unsafe gadget name", mutate: func(cfg *Config) { cfg.GadgetName = "../gadget" }, wantErr: true},

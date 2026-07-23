@@ -19,9 +19,10 @@ import (
 )
 
 type fakeController struct {
-	state    service.Snapshot
-	acquired func()
-	released func()
+	state     service.Snapshot
+	acquired  func()
+	released  func()
+	activated func()
 }
 
 func (c fakeController) Snapshot() service.Snapshot {
@@ -47,6 +48,13 @@ func (c fakeController) Scan(context.Context) error {
 	return nil
 }
 
+func (c fakeController) ActivateMedia(context.Context) error {
+	if c.activated != nil {
+		c.activated()
+	}
+	return nil
+}
+
 func TestVideoListFiltersAndPaginates(t *testing.T) {
 	controller := fakeController{state: service.Snapshot{Videos: []teslacam.Video{
 		{ID: "1", ClipType: "recent", Camera: "front", RecordedAt: time.Date(2026, 7, 15, 10, 0, 0, 0, time.Local)},
@@ -68,6 +76,22 @@ func TestVideoListFiltersAndPaginates(t *testing.T) {
 	}
 	if payload.Total != 1 || len(payload.Items) != 1 || payload.Items[0].ID != "1" {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestVideoSessionsActivateMedia(t *testing.T) {
+	var activations int
+	handler := NewHandler(fakeController{
+		state:     service.Snapshot{},
+		activated: func() { activations++ },
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/video-sessions", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || activations != 1 {
+		t.Fatalf("status = %d, activations = %d", response.Code, activations)
 	}
 }
 

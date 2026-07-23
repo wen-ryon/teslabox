@@ -22,6 +22,8 @@ const (
 	defaultExportPath      = "exports"
 	defaultRegistryPath    = "/var/lib/teslabox-system/storage-registry.json"
 	defaultWebAuthPath     = "/var/lib/teslabox-system/web-auth.json"
+	defaultMaintenancePath = "/var/lib/teslabox-system/maintenance.json"
+	defaultTeslaTimeZone   = "Asia/Shanghai"
 	defaultUpdateDir       = "/var/lib/teslabox-system/updates"
 	defaultUpdateRequest   = "/var/lib/teslabox-system/update-request.json"
 	defaultUpdateResult    = "/var/lib/teslabox-system/update-result.json"
@@ -34,6 +36,8 @@ const (
 	defaultReleaseGadget   = "radxa-otgutils"
 	defaultAPInterface     = "ap0"
 	defaultScanInterval    = 30 * time.Second
+	defaultSnapshotIdle    = 5 * time.Minute
+	defaultSnapshotWindow  = 2 * time.Minute
 	defaultPollInterval    = 3 * time.Second
 	defaultOperationLimit  = 15 * time.Second
 	defaultSnapshotLimit   = 2 * time.Minute
@@ -62,6 +66,8 @@ type Config struct {
 	ExportPath           string
 	RegistryPath         string
 	WebAuthStatePath     string
+	MaintenanceStatePath string
+	TeslaTimeZone        string
 	UpdateManifestURL    string
 	UpdatePublicKey      string
 	UpdateChannel        string
@@ -81,6 +87,8 @@ type Config struct {
 	WiFiInterface        string
 	APInterface          string
 	ScanInterval         time.Duration
+	SnapshotIdleInterval time.Duration
+	SnapshotActiveWindow time.Duration
 	PollInterval         time.Duration
 	OperationTimeout     time.Duration
 	SnapshotTimeout      time.Duration
@@ -101,6 +109,14 @@ type Config struct {
 // Load 从环境变量加载并校验配置，保证错误在启动阶段暴露。
 func Load() (Config, error) {
 	scanInterval, err := envDuration("TESLABOX_SCAN_INTERVAL", defaultScanInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	snapshotIdleInterval, err := envDuration("TESLABOX_SNAPSHOT_IDLE_INTERVAL", defaultSnapshotIdle)
+	if err != nil {
+		return Config{}, err
+	}
+	snapshotActiveWindow, err := envDuration("TESLABOX_SNAPSHOT_ACTIVE_WINDOW", defaultSnapshotWindow)
 	if err != nil {
 		return Config{}, err
 	}
@@ -162,6 +178,8 @@ func Load() (Config, error) {
 		ExportPath:           envString("TESLABOX_EXPORT_PATH", defaultExportPath),
 		RegistryPath:         envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		WebAuthStatePath:     envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
+		MaintenanceStatePath: envString("TESLABOX_MAINTENANCE_STATE", defaultMaintenancePath),
+		TeslaTimeZone:        envString("TESLABOX_TESLA_TIME_ZONE", defaultTeslaTimeZone),
 		UpdateManifestURL:    strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_MANIFEST_URL")),
 		UpdatePublicKey:      strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_PUBLIC_KEY")),
 		UpdateChannel:        envString("TESLABOX_UPDATE_CHANNEL", "stable"),
@@ -181,6 +199,8 @@ func Load() (Config, error) {
 		WiFiInterface:        strings.TrimSpace(os.Getenv("TESLABOX_WIFI_INTERFACE")),
 		APInterface:          envString("TESLABOX_AP_INTERFACE", defaultAPInterface),
 		ScanInterval:         scanInterval,
+		SnapshotIdleInterval: snapshotIdleInterval,
+		SnapshotActiveWindow: snapshotActiveWindow,
 		PollInterval:         pollInterval,
 		OperationTimeout:     operationTimeout,
 		SnapshotTimeout:      snapshotTimeout,
@@ -247,6 +267,16 @@ func (c Config) Validate() error {
 	if !isSafeAbsolutePath(c.WebAuthStatePath) {
 		return fmt.Errorf("TESLABOX_WEB_AUTH_STATE 必须是非根目录的绝对路径")
 	}
+	if c.MaintenanceStatePath != "" && !isSafeAbsolutePath(c.MaintenanceStatePath) {
+		return fmt.Errorf("TESLABOX_MAINTENANCE_STATE 必须是非根目录的绝对路径")
+	}
+	timeZone := strings.TrimSpace(c.TeslaTimeZone)
+	if timeZone == "" {
+		timeZone = defaultTeslaTimeZone
+	}
+	if _, err := time.LoadLocation(timeZone); err != nil {
+		return fmt.Errorf("TESLABOX_TESLA_TIME_ZONE 无效: %w", err)
+	}
 	for name, value := range map[string]string{
 		"TESLABOX_UPDATE_DOWNLOAD_DIR": c.UpdateDownloadDir,
 		"TESLABOX_UPDATE_REQUEST_PATH": c.UpdateRequestPath,
@@ -277,7 +307,7 @@ func (c Config) Validate() error {
 	if c.GadgetName == "" || c.GadgetSerial == "" {
 		return fmt.Errorf("Gadget 名称和序列号不能为空")
 	}
-	if c.ScanInterval <= 0 || c.PollInterval <= 0 || c.OperationTimeout <= 0 || c.SnapshotTimeout <= 0 || c.SnapshotRetryMax <= 0 || c.MediaProbeTimeout <= 0 || c.ExportMaxDuration <= 0 || c.ShutdownTimeout <= 0 {
+	if c.ScanInterval <= 0 || c.SnapshotIdleInterval <= 0 || c.SnapshotActiveWindow <= 0 || c.PollInterval <= 0 || c.OperationTimeout <= 0 || c.SnapshotTimeout <= 0 || c.SnapshotRetryMax <= 0 || c.MediaProbeTimeout <= 0 || c.ExportMaxDuration <= 0 || c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("时间间隔必须大于零")
 	}
 	if c.ExportQueueSize <= 0 || c.ExportQueueSize > 16 {

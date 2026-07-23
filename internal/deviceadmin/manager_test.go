@@ -119,6 +119,102 @@ func TestParseInterfaceDetails(t *testing.T) {
 	}
 }
 
+func TestWiFiStatusIncludesSavedStaticIPv4Settings(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "Home:22222222-2222-2222-2222-222222222222:802-11-wireless:wlan0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nmanual\n192.0.2.20/24\n",
+		"nmcli -g ipv4.gateway,ipv4.dns connection show uuid 22222222-2222-2222-2222-222222222222":                                                                                                                               "192.0.2.1\n223.5.5.5\n1.1.1.1\n",
+		"nmcli --escape no -g GENERAL.HWADDR,IP4.ADDRESS device show wlan0":                                                                                                                                                      "AA:BB:CC:DD:EE:10\n192.0.2.20/24\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.SavedNetworks) != 1 {
+		t.Fatalf("saved networks = %#v", status.SavedNetworks)
+	}
+	settings := status.SavedNetworks[0].IPv4
+	if settings.Mode != "static" || settings.Address != "192.0.2.20" || settings.SubnetMask != "255.255.255.0" || settings.Gateway != "192.0.2.1" || len(settings.DNS) != 2 {
+		t.Fatalf("static ipv4 settings = %#v", settings)
+	}
+}
+
+func TestUpdateIPv4PersistsStaticProfileAndReactivatesCurrentWiFi(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "Home:22222222-2222-2222-2222-222222222222:802-11-wireless:wlan0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := IPv4Update{
+		UUID: "22222222-2222-2222-2222-222222222222", Mode: "static",
+		Address: "192.0.2.20", SubnetMask: "255.255.255.0", Gateway: "192.0.2.1", DNS: []string{"223.5.5.5", "1.1.1.1"},
+	}
+	if err := manager.UpdateIPv4(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"nmcli connection modify uuid 22222222-2222-2222-2222-222222222222 ipv4.method manual ipv4.addresses 192.0.2.20/24 ipv4.gateway 192.0.2.1 ipv4.dns 223.5.5.5,1.1.1.1 ipv4.ignore-auto-dns yes",
+		"nmcli --wait 15 connection up uuid 22222222-2222-2222-2222-222222222222 ifname wlan0",
+	} {
+		if !containsCall(runner.calls, want) {
+			t.Fatalf("missing call %q in %#v", want, runner.calls)
+		}
+	}
+}
+
+func TestUpdateIPv4RestoresDHCPWithoutReconnectingInactiveWiFi(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "Home:22222222-2222-2222-2222-222222222222:802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nmanual\n192.0.2.20/24\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := manager.UpdateIPv4(context.Background(), IPv4Update{
+		UUID: "22222222-2222-2222-2222-222222222222", Mode: "dhcp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const want = "nmcli connection modify uuid 22222222-2222-2222-2222-222222222222 ipv4.method auto ipv4.addresses  ipv4.gateway  ipv4.dns  ipv4.ignore-auto-dns no"
+	if !containsCall(runner.calls, want) {
+		t.Fatalf("missing call %q in %#v", want, runner.calls)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "connection up uuid") {
+			t.Fatalf("inactive WiFi should not reconnect: %#v", runner.calls)
+		}
+	}
+}
+
+func TestNormalizeIPv4UpdateRejectsInvalidStaticNetwork(t *testing.T) {
+	t.Parallel()
+	base := IPv4Update{Mode: "static", Address: "192.0.2.20", SubnetMask: "255.255.255.0", Gateway: "192.0.2.1", DNS: []string{"223.5.5.5"}}
+	for _, test := range []struct {
+		name   string
+		mutate func(*IPv4Update)
+	}{
+		{name: "non-contiguous mask", mutate: func(value *IPv4Update) { value.SubnetMask = "255.0.255.0" }},
+		{name: "gateway outside subnet", mutate: func(value *IPv4Update) { value.Gateway = "192.168.121.1" }},
+		{name: "network address", mutate: func(value *IPv4Update) { value.Address = "192.0.2.0" }},
+		{name: "ipv6 dns", mutate: func(value *IPv4Update) { value.DNS = []string{"2001:4860:4860::8888"} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := base
+			value.DNS = append([]string{}, base.DNS...)
+			test.mutate(&value)
+			if _, err := normalizeIPv4Update(value); err == nil {
+				t.Fatal("normalizeIPv4Update() error = nil")
+			}
+		})
+	}
+	dhcp, err := normalizeIPv4Update(IPv4Update{Mode: "dhcp", Address: "192.0.2.20", DNS: []string{"223.5.5.5"}})
+	if err != nil || dhcp.Address != "" || len(dhcp.DNS) != 0 {
+		t.Fatalf("dhcp normalization = %#v, %v", dhcp, err)
+	}
+}
+
 func TestWiFiStatusReportsRealAPSTAConcurrency(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{

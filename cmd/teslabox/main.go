@@ -20,6 +20,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/driveinit"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
+	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/platform"
@@ -33,6 +34,7 @@ import (
 	buildversion "github.com/wen-ryon/teslabox/internal/version"
 	"github.com/wen-ryon/teslabox/internal/webauth"
 	"github.com/wen-ryon/teslabox/internal/webui"
+	"github.com/wen-ryon/teslabox/internal/writeback"
 )
 
 func main() {
@@ -44,6 +46,20 @@ func main() {
 	if err != nil {
 		logger.Error("加载配置失败", "error", err)
 		os.Exit(1)
+	}
+	teslaTimeLocation, err := time.LoadLocation(cfg.TeslaTimeZone)
+	if err != nil {
+		logger.Error("加载车辆录像时区失败", "time_zone", cfg.TeslaTimeZone, "error", err)
+		os.Exit(1)
+	}
+	if err := writeback.ApplyDefault(); err != nil {
+		logger.Warn("无法应用稳定写入阈值，将使用系统默认写回策略", "error", err)
+	} else {
+		logger.Info(
+			"已应用稳定写入阈值",
+			"background_bytes", writeback.DefaultBackgroundBytes,
+			"dirty_bytes", writeback.DefaultDirtyBytes,
+		)
 	}
 
 	runner := system.NewOSRunner()
@@ -116,7 +132,7 @@ func main() {
 		MinFreeBytes:   cfg.MinFreeBytes,
 		MinFreePercent: cfg.MinFreePercent,
 	})
-	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(), logger)
+	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(teslaTimeLocation), logger)
 	driveInspector := driveinit.NewLSBLKInspector(runner)
 	storageAdmin := storageadmin.New(storageadmin.Config{
 		DataRoot:   cfg.DataMountPath,
@@ -132,6 +148,11 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("初始化 Web 管理认证失败", "error", err)
+		os.Exit(1)
+	}
+	maintenanceSettings, err := maintenancemode.New(cfg.MaintenanceStatePath)
+	if err != nil {
+		logger.Error("初始化自动维护设置失败", "error", err)
 		os.Exit(1)
 	}
 	deviceAdmin := deviceadmin.New(runner, logger, deviceadmin.NetworkConfig{
@@ -166,7 +187,7 @@ func main() {
 		StatePath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath)),
 		StagingPath: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath), "media-staging"),
 		MountPath:   "/run/teslabox/media-assets",
-	}, runner, manager)
+	}, runner, manager, manager)
 	if err != nil {
 		logger.Error("初始化媒体中心失败，拒绝以不完整写入保护启动", "error", err)
 		os.Exit(1)
@@ -186,6 +207,8 @@ func main() {
 			}
 			return nil
 		},
+		// 在线更新应独立于媒体写入策略自动重启，避免更新后 Gadget 停留在安全断开状态。
+		AutoReboot: func() bool { return maintenanceSettings.Settings().UpdateAutoRecovery },
 	}, updater.NewSystemdStarter(runner))
 	if err != nil {
 		logger.Error("在线更新配置无效，TeslaUSB 主链路继续运行", "error", err)
@@ -205,6 +228,7 @@ func main() {
 		api.WithMediaCompositor(mediaCompositor),
 		api.WithExportAdmin(mediaExporter),
 		api.WithUpdateAdmin(updateManager),
+		api.WithMaintenanceAutomation(maintenanceSettings),
 		api.WithDiagnostics(diagnostics.New(runner)),
 	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)

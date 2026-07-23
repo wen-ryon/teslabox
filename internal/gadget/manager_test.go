@@ -3,6 +3,7 @@ package gadget
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,6 +80,13 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(manager.gadgetPath(), "configs", "c.1", "mass_storage.0")); err != nil {
 		t.Fatalf("mass storage link: %v", err)
+	}
+	nofua, err := os.ReadFile(manager.lunPath("nofua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(nofua)); got != "1" {
+		t.Fatalf("nofua = %q, want %q", got, "1")
 	}
 }
 

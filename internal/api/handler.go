@@ -18,6 +18,7 @@ import (
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
+	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/service"
@@ -32,6 +33,7 @@ type Controller interface {
 	AcquireMediaSnapshot() (service.Snapshot, func())
 	Refresh(ctx context.Context) error
 	Scan(ctx context.Context) error
+	ActivateMedia(ctx context.Context) error
 }
 
 // DeviceAdmin 定义设置中心需要的无线和电源管理能力。
@@ -40,6 +42,7 @@ type DeviceAdmin interface {
 	Scan(context.Context) ([]deviceadmin.AccessPoint, error)
 	Connect(context.Context, deviceadmin.ConnectRequest) error
 	SetAutoConnect(context.Context, deviceadmin.AutoConnectUpdate) error
+	UpdateIPv4(context.Context, deviceadmin.IPv4Update) error
 	Forget(context.Context, string) error
 	APSettings(context.Context) (deviceadmin.APSettings, error)
 	UpdateAP(context.Context, deviceadmin.APUpdate) error
@@ -64,6 +67,12 @@ type PowerAdmin interface {
 	SchedulePower(string) error
 }
 
+// MaintenanceAutomation 保存是否允许由 TeslaBox 自动断开并冷启动恢复 Gadget 的设备策略。
+type MaintenanceAutomation interface {
+	Settings() maintenancemode.Settings
+	SetAutoRecovery(bool) (maintenancemode.Settings, error)
+}
+
 // MediaInspector 定义 API 所需的媒体能力和单文件探测边界。
 type MediaInspector interface {
 	Capabilities(context.Context) (media.Capabilities, error)
@@ -75,6 +84,7 @@ type MediaAssetsAdmin interface {
 	Status(context.Context) (mediaassets.Status, error)
 	UploadStream(context.Context, mediaassets.Category, func(func(mediaassets.UploadFile) error) error) ([]mediaassets.Asset, error)
 	Delete(context.Context, string) (mediaassets.Status, error)
+	DeleteExternal(context.Context, mediaassets.Asset) (mediaassets.Status, error)
 	Apply(context.Context) (mediaassets.Status, error)
 	OpenPreview(context.Context, string) (*os.File, mediaassets.Asset, error)
 }
@@ -115,6 +125,7 @@ type handlerOptions struct {
 	exportAdmin     ExportAdmin
 	updateAdmin     UpdateAdmin
 	diagnostics     Diagnostics
+	automation      MaintenanceAutomation
 }
 
 // Option 配置可选的 API 能力。
@@ -165,6 +176,11 @@ func WithDiagnostics(manager Diagnostics) Option {
 	return func(options *handlerOptions) { options.diagnostics = manager }
 }
 
+// WithMaintenanceAutomation 启用设备级自动维护恢复设置。
+func WithMaintenanceAutomation(automation MaintenanceAutomation) Option {
+	return func(options *handlerOptions) { options.automation = automation }
+}
+
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
 func NewHandler(controller Controller, logger *slog.Logger, options ...Option) http.Handler {
 	settings := handlerOptions{}
@@ -181,28 +197,35 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		writeJSON(w, http.StatusOK, state)
 	})
 	mux.HandleFunc("GET /api/v1/videos", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		writeVideoList(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/video-groups", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		writeVideoGroupList(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/video-sessions", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		writeVideoSessionList(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/video-sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		writeVideoSession(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/thumbnails/{id}", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
 		serveThumbnail(w, r, state)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
 		serveVideo(w, r, state, false)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/download", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
 		serveVideo(w, r, state, true)
@@ -241,7 +264,7 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		registerMediaRoutes(mux, controller, settings.mediaInspector, logger)
 	}
 	if settings.mediaAssets != nil {
-		registerMediaAssetRoutes(mux, settings.mediaAssets, logger)
+		registerMediaAssetRoutes(mux, settings.mediaAssets, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
 	}
 	if settings.mediaCompositor != nil {
 		registerCompositeRoutes(mux, controller, settings.mediaCompositor, logger)
@@ -250,12 +273,21 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		registerExportRoutes(mux, controller, settings.exportAdmin, logger)
 	}
 	if settings.updateAdmin != nil {
-		registerUpdateRoutes(mux, settings.updateAdmin, logger)
+		registerUpdateRoutes(mux, settings.updateAdmin, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
+	}
+	if settings.automation != nil {
+		registerMaintenanceRoutes(mux, settings.automation, logger)
 	}
 	if settings.diagnostics != nil {
 		registerDiagnosticsRoutes(mux, settings.diagnostics, logger)
 	}
 	return requestLogger(mux, logger)
+}
+
+func activateMedia(controller Controller, logger *slog.Logger, ctx context.Context) {
+	if err := controller.ActivateMedia(ctx); err != nil && !errors.Is(err, service.ErrSnapshotUnavailable) {
+		logger.Warn("API 激活媒体浏览失败", "error", err)
+	}
 }
 
 func registerGadgetAdminRoutes(mux *http.ServeMux, admin GadgetAdmin, power PowerAdmin, logger *slog.Logger) {
@@ -347,7 +379,7 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 	})
 }
 
-func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, logger *slog.Logger) {
+func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAdmin, power PowerAdmin, automation MaintenanceAutomation, logger *slog.Logger) {
 	mux.HandleFunc("GET /api/v1/update", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.Status())
 	})
@@ -369,9 +401,39 @@ func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, logger *slog.Lo
 		writeJSON(w, http.StatusAccepted, status)
 	})
 	mux.HandleFunc("POST /api/v1/update/install", func(w http.ResponseWriter, r *http.Request) {
+		automatic := automaticUpdateRecoveryEnabled(automation)
+		if automatic {
+			if admin.Status().State != updater.StateDownloaded {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "请先完成更新包下载后再执行自动维护安装"})
+				return
+			}
+			if power == nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "自动维护重启不可用；请关闭自动恢复或手工拔掉 OTG 后更新"})
+				return
+			}
+			if err := beginAutomaticMaintenance(r.Context(), gadget); err != nil {
+				logger.Warn("更新前自动断开 USB Gadget 失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
+				return
+			}
+			if _, err := gadget.ResumeGadget(r.Context()); err != nil {
+				logger.Warn("更新前准备自动温重启恢复失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法准备自动温重启恢复；请在日志中心手工恢复"})
+				return
+			}
+		}
 		status, err := admin.Install(r.Context())
 		if err != nil {
 			logger.Warn("提交在线更新安装失败", "error", err)
+			if automatic {
+				if restartErr := power.SchedulePower("reboot"); restartErr != nil {
+					logger.Warn("更新提交失败后自动温重启恢复失败", "error", restartErr)
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "更新未提交，且自动温重启恢复失败；请在日志中心手工执行温重启恢复"})
+					return
+				}
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "更新未提交，但已安排温重启恢复 USB Gadget；请等待设备重新上线"})
+				return
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
@@ -485,6 +547,7 @@ func writeExportError(w http.ResponseWriter, logger *slog.Logger, message string
 
 func registerCompositeRoutes(mux *http.ServeMux, controller Controller, compositor MediaCompositor, logger *slog.Logger) {
 	mux.HandleFunc("GET /api/v1/video-groups/{id}/composite", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
 		if state.MediaSnapshot == nil {
@@ -546,6 +609,7 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 		writeJSON(w, http.StatusOK, capabilities)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/metadata", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
 		if state.MediaSnapshot == nil {
@@ -579,7 +643,7 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 
 const maximumMediaUploadRequestBytes int64 = 512 * 1024 * 1024
 
-func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, logger *slog.Logger) {
+func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, gadget GadgetAdmin, power PowerAdmin, automation MaintenanceAutomation, logger *slog.Logger) {
 	mux.HandleFunc("GET /api/v1/media-assets", func(w http.ResponseWriter, r *http.Request) {
 		status, err := admin.Status(r.Context())
 		if err != nil {
@@ -641,6 +705,53 @@ func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, logger
 		}
 		writeJSON(w, http.StatusOK, status)
 	})
+	mux.HandleFunc("POST /api/v1/media-assets/external-delete", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ID                     string               `json:"id"`
+			Category               mediaassets.Category `json:"category"`
+			Files                  []mediaassets.File   `json:"files"`
+			ConfirmOTGDisconnected bool                 `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		automatic := automaticMediaRecoveryEnabled(automation)
+		if !input.ConfirmOTGDisconnected && !automatic {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认删除直接写入的媒体"})
+			return
+		}
+		if automatic {
+			if err := beginAutomaticMaintenance(r.Context(), gadget); err != nil {
+				logger.Warn("自动断开 USB Gadget 失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
+				return
+			}
+		}
+		status, err := admin.DeleteExternal(r.Context(), mediaassets.Asset{
+			ID:       input.ID,
+			Category: input.Category,
+			Files:    input.Files,
+			Applied:  true,
+			External: true,
+		})
+		if automatic {
+			if recoveryErr := finishAutomaticMaintenance(r.Context(), gadget, power); recoveryErr != nil {
+				logger.Warn("提交自动温重启恢复失败", "error", recoveryErr)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体删除结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
+				return
+			}
+		}
+		if err != nil {
+			logger.Warn("删除直接写入媒体资源失败", "error", err)
+			if automatic {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "删除直接写入媒体失败，但已安排温重启恢复 USB Gadget；请等待设备重新上线后查看结果"})
+				return
+			}
+			writeMediaAssetError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
 	mux.HandleFunc("POST /api/v1/media-assets/apply", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
@@ -648,13 +759,32 @@ func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, logger
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		if !input.ConfirmOTGDisconnected {
+		automatic := automaticMediaRecoveryEnabled(automation)
+		if !input.ConfirmOTGDisconnected && !automatic {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认应用媒体变更"})
 			return
 		}
+		if automatic {
+			if err := beginAutomaticMaintenance(r.Context(), gadget); err != nil {
+				logger.Warn("自动断开 USB Gadget 失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
+				return
+			}
+		}
 		status, err := admin.Apply(r.Context())
+		if automatic {
+			if recoveryErr := finishAutomaticMaintenance(r.Context(), gadget, power); recoveryErr != nil {
+				logger.Warn("提交自动温重启恢复失败", "error", recoveryErr)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体应用结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
+				return
+			}
+		}
 		if err != nil {
 			logger.Warn("应用媒体变更失败", "error", err)
+			if automatic {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "应用媒体变更失败，但已安排温重启恢复 USB Gadget；请等待设备重新上线后查看日志"})
+				return
+			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "应用媒体变更失败；请确认 OTG 已物理断开、没有视频播放或导出任务，并在日志中心查看详情"})
 			return
 		}
@@ -696,6 +826,69 @@ func writeMediaAssetError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
+
+var automaticMaintenanceDisconnectDelay = 2 * time.Second
+
+func automaticMediaRecoveryEnabled(automation MaintenanceAutomation) bool {
+	return automation != nil && automation.Settings().AutoRecovery
+}
+
+func automaticUpdateRecoveryEnabled(automation MaintenanceAutomation) bool {
+	return automation != nil && automation.Settings().UpdateAutoRecovery
+}
+
+func beginAutomaticMaintenance(ctx context.Context, gadget GadgetAdmin) error {
+	if gadget == nil {
+		return errors.New("USB Gadget 自动维护不可用")
+	}
+	if _, err := gadget.PauseGadget(ctx); err != nil {
+		return err
+	}
+	timer := time.NewTimer(automaticMaintenanceDisconnectDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func finishAutomaticMaintenance(ctx context.Context, gadget GadgetAdmin, power PowerAdmin) error {
+	if gadget == nil || power == nil {
+		return errors.New("USB Gadget 自动温重启恢复不可用")
+	}
+	if _, err := gadget.ResumeGadget(ctx); err != nil {
+		return err
+	}
+	return power.SchedulePower("reboot")
+}
+
+func registerMaintenanceRoutes(mux *http.ServeMux, automation MaintenanceAutomation, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/maintenance", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, automation.Settings())
+	})
+	mux.HandleFunc("POST /api/v1/maintenance", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			AutoRecovery bool `json:"auto_recovery"`
+			ConfirmRisk  bool `json:"confirm_risk"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if input.AutoRecovery && !input.ConfirmRisk {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "启用自动恢复前请确认车机或电脑会在维护期间短暂断开 USB 存储"})
+			return
+		}
+		settings, err := automation.SetAutoRecovery(input.AutoRecovery)
+		if err != nil {
+			logger.Warn("保存自动维护设置失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法保存自动维护设置"})
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
 }
 
 func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *slog.Logger) {
@@ -784,6 +977,17 @@ func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *sl
 		}
 		if err := admin.SetAutoConnect(r.Context(), input); err != nil {
 			writeDeviceAdminError(w, logger, "更新 WiFi 自动连接设置失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+	})
+	mux.HandleFunc("POST /api/v1/network/wifi/ipv4", func(w http.ResponseWriter, r *http.Request) {
+		var input deviceadmin.IPv4Update
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := admin.UpdateIPv4(r.Context(), input); err != nil {
+			writeDeviceAdminError(w, logger, "更新 WiFi IPv4 设置失败", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})

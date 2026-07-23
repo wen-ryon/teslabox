@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -38,7 +39,7 @@ type InputError struct{ Message string }
 // Error 返回面向用户的初始化校验说明。
 func (e *InputError) Error() string { return e.Message }
 
-// Candidate 是设置页面展示的 USB 存储整盘状态。
+// Candidate 是设置页面展示的可用数据整盘状态。
 type Candidate struct {
 	StablePath            string `json:"stable_path"`
 	DevicePath            string `json:"device_path"`
@@ -88,7 +89,7 @@ type Controller interface {
 	BeginStorageMaintenance(context.Context) (func(), error)
 }
 
-// DeviceLister 只列出有稳定 by-id 路径的 USB 整盘。
+// DeviceLister 只列出有稳定 by-id 路径且不是系统盘的整盘。
 type DeviceLister interface {
 	List(context.Context) ([]driveinit.Device, error)
 }
@@ -128,7 +129,7 @@ func New(config Config, runner system.Runner, registry *storage.FileRegistry, li
 	return &Manager{config: config, runner: runner, registry: registry, lister: lister, driveInit: driveInitializer, imageInit: imageInitializer, controller: controller}
 }
 
-// Status 读取登记册并分类当前插入的 USB 存储设备，不执行挂载或格式化。
+// Status 读取登记册并分类当前可用的数据盘，不执行挂载或格式化。
 func (m *Manager) Status(ctx context.Context) (Status, error) {
 	devices, err := m.lister.List(ctx)
 	if err != nil {
@@ -155,7 +156,7 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 		}
 		status.Devices = append(status.Devices, Candidate{
 			StablePath: record.StablePath, Model: record.Model, Serial: record.Serial,
-			SizeBytes: record.SizeBytes, Transport: "usb", State: record.Status,
+			SizeBytes: record.SizeBytes, State: record.Status,
 			CanCancel: true, LastError: record.LastError,
 			Reason: "初始化设备当前未插入；可以重新插入后继续，或取消任务以恢复原存储设备",
 		})
@@ -173,8 +174,8 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	if !request.ConfirmOTGDisconnected {
 		return Candidate{}, &InputError{Message: "必须先物理拔掉车机或电脑 OTG 线"}
 	}
-	if !strings.HasPrefix(request.StablePath, "/dev/disk/by-id/usb-") || strings.Contains(request.StablePath, "-part") {
-		return Candidate{}, &InputError{Message: "目标必须是 USB 整盘稳定路径"}
+	if !driveinit.IsWholeDiskStablePath(request.StablePath) {
+		return Candidate{}, &InputError{Message: "目标必须是 /dev/disk/by-id/ 下的整盘稳定路径"}
 	}
 	status, err := m.Status(ctx)
 	if err != nil {
@@ -182,7 +183,7 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	}
 	candidate, found := candidateByPath(status.Devices, request.StablePath)
 	if !found {
-		return Candidate{}, &InputError{Message: "未找到目标 USB 存储设备，请重新扫描"}
+		return Candidate{}, &InputError{Message: "未找到目标存储设备，请重新扫描"}
 	}
 	if candidate.Serial == "" || candidate.Serial != request.ConfirmSerial {
 		return Candidate{}, &InputError{Message: "输入的设备序列号不匹配"}
@@ -472,11 +473,6 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 		candidate.CanReinitialize = safeForManagedReinitialize(device, dataRoot, dataLabel)
 		return candidate
 	}
-	if device.Transport != "usb" {
-		candidate.State = "unsupported"
-		candidate.Reason = "只允许初始化通过 USB 接入的外置存储设备"
-		return candidate
-	}
 	if device.Serial == "" {
 		candidate.State = "unsafe"
 		candidate.Reason = "设备没有稳定序列号，无法防止误认盘"
@@ -619,37 +615,81 @@ func writeDeviceMarker(path string, record storage.DeviceRecord) (resultErr erro
 }
 
 // OSDeviceLister 从 /dev/disk/by-id 枚举整盘并通过 lsblk 核实真实设备树。
-type OSDeviceLister struct{ inspector *driveinit.LSBLKInspector }
-
-// NewOSDeviceLister 创建只读 USB 整盘枚举器。
-func NewOSDeviceLister(inspector *driveinit.LSBLKInspector) *OSDeviceLister {
-	return &OSDeviceLister{inspector: inspector}
+type OSDeviceLister struct {
+	inspector   driveinit.Inspector
+	stablePaths func() ([]string, error)
 }
 
-// List 去重同一整盘的多个稳定链接，不返回分区链接。
-func (l *OSDeviceLister) List(ctx context.Context) ([]driveinit.Device, error) {
-	paths, err := filepath.Glob("/dev/disk/by-id/usb-*")
-	if err != nil {
-		return nil, fmt.Errorf("枚举 USB 稳定路径: %w", err)
+// NewOSDeviceLister 创建只读整盘枚举器，支持 USB、NVMe 和其他有稳定身份的设备。
+func NewOSDeviceLister(inspector driveinit.Inspector) *OSDeviceLister {
+	return &OSDeviceLister{
+		inspector: inspector,
+		stablePaths: func() ([]string, error) {
+			return filepath.Glob("/dev/disk/by-id/*")
+		},
 	}
-	slices.Sort(paths)
+}
+
+// List 去重同一整盘的多个稳定链接，不返回系统盘或分区链接。
+func (l *OSDeviceLister) List(ctx context.Context) ([]driveinit.Device, error) {
+	if l == nil || l.inspector == nil || l.stablePaths == nil {
+		return nil, errors.New("存储设备枚举器未初始化")
+	}
+	paths, err := l.stablePaths()
+	if err != nil {
+		return nil, fmt.Errorf("枚举存储稳定路径: %w", err)
+	}
+	slices.SortFunc(paths, func(left, right string) int {
+		leftRank := stablePathRank(left)
+		rightRank := stablePathRank(right)
+		if leftRank != rightRank {
+			return leftRank - rightRank
+		}
+		return strings.Compare(left, right)
+	})
 	devices := make([]driveinit.Device, 0, len(paths))
-	resolved := make(map[string]bool)
+	resolved := make(map[string]bool, len(paths))
 	for _, path := range paths {
-		if strings.Contains(filepath.Base(path), "-part") {
+		if !driveinit.IsWholeDiskStablePath(path) {
 			continue
 		}
 		device, err := l.inspector.Inspect(ctx, path)
 		if err != nil {
 			continue
 		}
-		if resolved[device.ResolvedPath] {
+		if device.Type != "disk" || systemDisk(device) || resolved[device.ResolvedPath] {
 			continue
 		}
 		resolved[device.ResolvedPath] = true
 		devices = append(devices, device)
 	}
 	return devices, nil
+}
+
+func stablePathRank(name string) int {
+	base := path.Base(name)
+	switch {
+	case strings.HasPrefix(base, "usb-"):
+		return 0
+	case strings.HasPrefix(base, "nvme-"):
+		return 1
+	case strings.HasPrefix(base, "wwn-"), strings.HasPrefix(base, "ata-"), strings.HasPrefix(base, "scsi-"):
+		return 2
+	default:
+		return 3
+	}
+}
+
+func systemDisk(device driveinit.Device) bool {
+	if path.Clean(device.MountPoint) == "/" {
+		return true
+	}
+	for _, child := range device.Children {
+		if systemDisk(child) {
+			return true
+		}
+	}
+	return false
 }
 
 var _ DeviceLister = (*OSDeviceLister)(nil)

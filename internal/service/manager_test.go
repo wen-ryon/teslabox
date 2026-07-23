@@ -297,16 +297,16 @@ func TestManagerMediaLeaseDefersRetiredSnapshotCleanup(t *testing.T) {
 	if err := manager.Scan(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshotter.removed) != 0 {
-		t.Fatalf("removed while leased = %#v", snapshotter.removed)
+	if len(snapshotter.removed) != 1 || snapshotter.removed[0].ID != second.ID {
+		t.Fatalf("removed while snapshot-1 is leased = %#v", snapshotter.removed)
 	}
 
 	release()
 	release()
-	if err := manager.cleanupRetiredUntil(t.Context(), 1); err != nil {
+	if err := manager.cleanupRetiredUntil(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshotter.removed) != 1 || snapshotter.removed[0].ID != first.ID {
+	if len(snapshotter.removed) != 2 || snapshotter.removed[1].ID != first.ID {
 		t.Fatalf("removed after release = %#v", snapshotter.removed)
 	}
 }
@@ -831,6 +831,59 @@ func TestManagerAutomaticSnapshotUsesFailureBackoff(t *testing.T) {
 	manager.snapshotWithTimeout(t.Context())
 	if snapshotter.createCalls != 2 {
 		t.Fatalf("retry create calls = %d, want 2", snapshotter.createCalls)
+	}
+}
+
+func TestManagerAutomaticSnapshotUsesIdleAndActiveCadence(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	snapshotter := &fakeSnapshotter{}
+	manager := NewManager(
+		config.Config{
+			ScanInterval:         30 * time.Second,
+			SnapshotIdleInterval: 5 * time.Minute,
+			SnapshotActiveWindow: 2 * time.Minute,
+			SnapshotTimeout:      time.Second,
+			SnapshotRetryMax:     10 * time.Minute,
+		},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	now := time.Date(2026, 7, 23, 17, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 1 {
+		t.Fatalf("initial create calls = %d", snapshotter.createCalls)
+	}
+	now = now.Add(4*time.Minute + 59*time.Second)
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 1 {
+		t.Fatalf("idle create calls before interval = %d", snapshotter.createCalls)
+	}
+	now = now.Add(time.Second)
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 2 {
+		t.Fatalf("idle create calls at interval = %d", snapshotter.createCalls)
+	}
+
+	now = now.Add(time.Minute)
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotter.createCalls != 3 {
+		t.Fatalf("media activation create calls = %d", snapshotter.createCalls)
+	}
+	now = now.Add(30 * time.Second)
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 4 {
+		t.Fatalf("active create calls = %d", snapshotter.createCalls)
 	}
 }
 

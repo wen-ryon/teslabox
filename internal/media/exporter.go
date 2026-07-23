@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -616,56 +615,7 @@ func exportTiles(request ExportRequest, profile compositeProfile) ([]compositeTi
 		}
 		return []compositeTile{{camera: request.Cameras[0], width: width, height: profile.height}}, nil
 	}
-	return exportLayoutTiles(request.Layout, profile.height)
-}
-
-// exportLayoutTiles 复用播放器的源画面比例，避免固定 16:9 画布给每个格子补出大面积黑边。
-func exportLayoutTiles(layout string, height int) ([]compositeTile, error) {
-	if height <= 0 || height%12 != 0 {
-		return nil, &InputError{Message: "导出画布高度无效"}
-	}
-	switch layout {
-	case "composite6":
-		rowHeight := height / 2
-		columnWidth := teslaAspectWidth(rowHeight)
-		return gridTiles(
-			[]string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"},
-			[]int{columnWidth, columnWidth, columnWidth}, []int{rowHeight, rowHeight},
-		), nil
-	case "composite4a":
-		rowHeight := height / 2
-		columnWidth := teslaAspectWidth(rowHeight)
-		return gridTiles(
-			[]string{"front", "back", "left_repeater", "right_repeater"},
-			[]int{columnWidth, columnWidth}, []int{rowHeight, rowHeight},
-		), nil
-	case "composite4b":
-		bottomHeight := height / 4
-		topHeight := height - bottomHeight
-		columnWidth := teslaAspectWidth(bottomHeight)
-		return []compositeTile{
-			{camera: "front", width: columnWidth * 3, height: topHeight},
-			{camera: "right_repeater", y: topHeight, width: columnWidth, height: bottomHeight},
-			{camera: "back", x: columnWidth, y: topHeight, width: columnWidth, height: bottomHeight},
-			{camera: "left_repeater", x: columnWidth * 2, y: topHeight, width: columnWidth, height: bottomHeight},
-		}, nil
-	case "composite3":
-		bottomHeight := height / 3
-		topHeight := height - bottomHeight
-		columnWidth := teslaAspectWidth(bottomHeight)
-		return []compositeTile{
-			{camera: "front", width: columnWidth * 2, height: topHeight},
-			{camera: "right_repeater", y: topHeight, width: columnWidth, height: bottomHeight},
-			{camera: "left_repeater", x: columnWidth, y: topHeight, width: columnWidth, height: bottomHeight},
-		}, nil
-	default:
-		return nil, &InputError{Message: "不支持的导出视角布局"}
-	}
-}
-
-func teslaAspectWidth(height int) int {
-	// 焕新版 Model 3 六路文件均为 724:469；对齐到偶数是 MPP 编码器的硬性要求。
-	return int(math.Round(float64(height)*724/469)) &^ 1
+	return teslaLayoutTiles(request.Layout, profile.height)
 }
 
 func maxTime(values ...time.Time) time.Time {

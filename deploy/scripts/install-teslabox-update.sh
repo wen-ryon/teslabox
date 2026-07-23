@@ -46,8 +46,9 @@ if [ -f "${HELPER_SOURCE}" ] || [ -f "${UNIT_SOURCE}" ]; then
     systemctl daemon-reload
 fi
 
-BACKUP="${TARGET}.backup.$(date +%Y%m%d%H%M%S)"
-cp -a "${TARGET}" "${BACKUP}"
+BACKUP="${TARGET}.backup"
+cp -a "${TARGET}" "${BACKUP}.new"
+mv -f "${BACKUP}.new" "${BACKUP}"
 install -m 0755 "${SOURCE}" "${TARGET}.new"
 mv "${TARGET}.new" "${TARGET}"
 
@@ -72,4 +73,4 @@ if ! systemctl restart "${SERVICE}" || ! systemctl is-active --quiet "${SERVICE}
     exit 1
 fi
 
-echo "TeslaBox 已更新，旧版本备份在 ${BACKUP}"
+echo "TeslaBox 已更新，已保留上一版本备份：${BACKUP}"

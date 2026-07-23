@@ -4,6 +4,7 @@ package mediaassets
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -21,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -63,6 +66,12 @@ type Maintenance interface {
 	BeginMediaMaintenance(context.Context) (func(), error)
 }
 
+// SnapshotSource 提供已冻结的只读媒体视图，避免扫描直接读取仍由 USB 主机写入的原始镜像。
+type SnapshotSource interface {
+	Scan(context.Context) error
+	AcquireMediaSnapshotView() (*mediasnapshot.View, func())
+}
+
 // UploadFile 仅在一次 HTTP 上传处理期间持有输入流，调用方不得在 Upload 返回后继续使用它。
 type UploadFile struct {
 	Role     string
@@ -88,6 +97,7 @@ type Asset struct {
 	Pending          bool      `json:"pending"`
 	PendingDelete    bool      `json:"pending_delete"`
 	PreviewAvailable bool      `json:"preview_available"`
+	External         bool      `json:"external,omitempty"`
 }
 
 // Status 是媒体中心可安全展示的资源清单。
@@ -109,6 +119,7 @@ type Manager struct {
 	cfg         Config
 	runner      system.Runner
 	maintenance Maintenance
+	snapshots   SnapshotSource
 	now         func() time.Time
 	mu          sync.Mutex
 }
@@ -130,7 +141,7 @@ type lightStaging struct {
 }
 
 // New 创建媒体资源管理器，并在启动阶段拒绝不安全的固定路径。
-func New(cfg Config, runner system.Runner, maintenance Maintenance) (*Manager, error) {
+func New(cfg Config, runner system.Runner, maintenance Maintenance, snapshots ...SnapshotSource) (*Manager, error) {
 	for name, value := range map[string]string{
 		"镜像路径": cfg.ImagePath, "状态目录": cfg.StatePath, "暂存目录": cfg.StagingPath, "挂载目录": cfg.MountPath,
 	} {
@@ -141,28 +152,253 @@ func New(cfg Config, runner system.Runner, maintenance Maintenance) (*Manager, e
 	if runner == nil || maintenance == nil {
 		return nil, errors.New("媒体资源管理器依赖不能为空")
 	}
-	return &Manager{cfg: cfg, runner: runner, maintenance: maintenance, now: time.Now}, nil
+	if len(snapshots) > 1 {
+		return nil, errors.New("媒体快照来源不能重复配置")
+	}
+	manager := &Manager{cfg: cfg, runner: runner, maintenance: maintenance, now: time.Now}
+	if len(snapshots) == 1 {
+		manager.snapshots = snapshots[0]
+	}
+	return manager, nil
 }
 
-// Status 返回当前 TeslaBox 管理的媒体；原始镜像不存在时仍返回可解释的空状态。
-func (m *Manager) Status(_ context.Context) (Status, error) {
+// Status 返回 TeslaBox 管理和从车机存储直接发现的媒体；原始镜像不存在时仍返回可解释的空状态。
+func (m *Manager) Status(ctx context.Context) (Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	assets, err := m.loadAssets()
 	if err != nil {
 		return Status{}, err
 	}
-	status := Status{Available: true, ImageAvailable: regularFile(m.cfg.ImagePath), Assets: publicAssets(assets)}
-	for _, asset := range assets {
-		if asset.Pending || asset.PendingDelete {
-			status.NeedsApply = true
-			break
+	return m.statusWithDiscoveredAssets(ctx, assets), nil
+}
+
+func (m *Manager) statusWithDiscoveredAssets(ctx context.Context, assets []Asset) Status {
+	status := m.statusLocked(assets)
+	if !status.ImageAvailable || m.snapshots == nil {
+		return status
+	}
+	if err := m.snapshots.Scan(ctx); err != nil {
+		status.Message = "媒体快照暂不可用，已显示 TeslaBox 管理的文件；稍后刷新可读取电脑或车机直接写入的文件。"
+		return status
+	}
+	view, release := m.snapshots.AcquireMediaSnapshotView()
+	defer release()
+	if view == nil {
+		status.Message = "媒体快照正在准备，已显示 TeslaBox 管理的文件；稍后刷新可读取电脑或车机直接写入的文件。"
+		return status
+	}
+	discovered, err := m.discoverSnapshotAssets(ctx, *view)
+	if err != nil {
+		status.Message = "媒体快照读取不完整，已显示 TeslaBox 管理的文件；稍后刷新可重试。"
+		return status
+	}
+	status.Assets = publicAssets(mergeAssets(assets, discovered))
+	return status
+}
+
+func (m *Manager) discoverSnapshotAssets(ctx context.Context, view mediasnapshot.View) ([]Asset, error) {
+	assets, err := scanPrimaryAssets(view.MountPath)
+	if err != nil {
+		return nil, err
+	}
+	// 快照租约已保证该 loop 在本次扫描结束前不会被回收；复用它可避免再次探测分区丢失 p2。
+	if !loopDevicePattern.MatchString(view.LoopDevice) {
+		return assets, nil
+	}
+	music, musicPresent, err := m.scanSnapshotMusic(ctx, view.LoopDevice)
+	if err != nil {
+		return nil, err
+	}
+	if musicPresent {
+		assets = append(assets, music...)
+	}
+	return assets, nil
+}
+
+func scanPrimaryAssets(root string) ([]Asset, error) {
+	if _, err := trustedDirectory(root); err != nil {
+		return nil, fmt.Errorf("检查媒体快照主分区: %w", err)
+	}
+	assets := make([]Asset, 0)
+	for _, entry := range []struct {
+		category  Category
+		directory string
+	}{
+		{category: CategoryBoombox, directory: "Boombox"},
+		{category: CategoryWrap, directory: "Wraps"},
+		{category: CategoryLightShow, directory: "LightShow"},
+	} {
+		categoryAssets, err := scanCategoryDirectory(filepath.Join(root, entry.directory), entry.category)
+		if err != nil {
+			return nil, err
+		}
+		assets = append(assets, categoryAssets...)
+	}
+	return assets, nil
+}
+
+func (m *Manager) scanSnapshotMusic(ctx context.Context, loopDevice string) (assets []Asset, present bool, resultErr error) {
+	if !loopDevicePattern.MatchString(loopDevice) {
+		return nil, false, fmt.Errorf("媒体快照音乐分区 loop 设备无效: %q", loopDevice)
+	}
+	musicDevice := loopDevice + "p2"
+	if _, err := m.runner.Run(ctx, "blkid", "-s", "TYPE", "-o", "value", musicDevice); err != nil {
+		return nil, false, nil
+	}
+	mountPath := filepath.Join(filepath.Dir(m.cfg.MountPath), "media-assets-scan", "music")
+	if err := os.MkdirAll(mountPath, 0o750); err != nil {
+		return nil, false, fmt.Errorf("创建媒体快照音乐挂载点: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, "mount", "--options", "ro,nosuid,nodev,noexec", "--", musicDevice, mountPath); err != nil {
+		return nil, false, fmt.Errorf("只读挂载媒体快照音乐分区: %w", err)
+	}
+	defer func() {
+		if _, err := m.runner.Run(context.WithoutCancel(ctx), "umount", "--", mountPath); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("卸载媒体快照音乐分区: %w", err))
+		}
+	}()
+	assets, resultErr = scanMusicDirectory(mountPath)
+	return assets, true, resultErr
+}
+
+// scanMusicDirectory 递归读取 MUSIC 分区中的音频文件。
+// 用户通过电脑直接写入时通常会保留歌单的分类目录，因此不能只扫描分区根目录。
+func scanMusicDirectory(directory string) ([]Asset, error) {
+	if _, err := trustedDirectory(directory); err != nil {
+		return nil, fmt.Errorf("检查 MUSIC 分区: %w", err)
+	}
+	assets := make([]Asset, 0)
+	err := filepath.WalkDir(directory, func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("读取 MUSIC 文件: %w", walkErr)
+		}
+		if name == directory {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, err := filepath.Rel(directory, name)
+		if err != nil {
+			return fmt.Errorf("计算 MUSIC 文件相对路径: %w", err)
+		}
+		if entry.IsDir() {
+			if !safeMusicDirectoryPath(relative) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		if !safeMusicRelativePath(relative) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("读取 MUSIC 文件 %s: %w", relative, err)
+		}
+		file := File{Name: relative, SizeBytes: info.Size()}
+		assets = append(assets, Asset{
+			ID: externalAssetID(CategoryMusic, []File{file}), Category: CategoryMusic, Name: relative, Files: []File{file},
+			CreatedAt: info.ModTime().UTC(), Applied: true, External: true,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(assets, func(left, right Asset) int { return strings.Compare(left.Name, right.Name) })
+	return assets, nil
+}
+
+func scanCategoryDirectory(directory string, category Category) ([]Asset, error) {
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Asset{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取媒体目录 %s: %w", filepath.Base(directory), err)
+	}
+	assets := make([]Asset, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() || !safeTargetName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("读取媒体文件 %s: %w", entry.Name(), err)
+		}
+		file := File{Name: entry.Name(), SizeBytes: info.Size()}
+		assets = append(assets, Asset{
+			ID: externalAssetID(category, []File{file}), Category: category, Name: entry.Name(), Files: []File{file},
+			CreatedAt: info.ModTime().UTC(), Applied: true, External: true,
+		})
+	}
+	slices.SortFunc(assets, func(left, right Asset) int { return strings.Compare(left.Name, right.Name) })
+	return assets, nil
+}
+
+func mergeAssets(managed, discovered []Asset) []Asset {
+	merged := make([]Asset, 0, len(managed)+len(discovered))
+	knownFiles := make(map[string]struct{}, len(managed))
+	for _, asset := range managed {
+		merged = append(merged, asset)
+		if !asset.Applied && !asset.PendingDelete {
+			continue
+		}
+		for _, file := range asset.Files {
+			knownFiles[assetFileKey(asset.Category, file.Name)] = struct{}{}
 		}
 	}
-	if !status.ImageAvailable {
-		status.Message = "TeslaCam 虚拟盘尚未初始化；可先选择外接存储完成初始化。"
+	for _, asset := range discovered {
+		allKnown := len(asset.Files) > 0
+		for _, file := range asset.Files {
+			if _, found := knownFiles[assetFileKey(asset.Category, file.Name)]; !found {
+				allKnown = false
+				break
+			}
+		}
+		if !allKnown {
+			merged = append(merged, asset)
+		}
 	}
-	return status, nil
+	return merged
+}
+
+func assetFileKey(category Category, name string) string {
+	return string(category) + "\x00" + strings.ToLower(name)
+}
+
+func externalAssetID(category Category, files []File) string {
+	var value strings.Builder
+	value.WriteString(string(category))
+	for _, file := range files {
+		value.WriteByte(0)
+		value.WriteString(file.Name)
+	}
+	sum := sha256.Sum256([]byte(value.String()))
+	return hex.EncodeToString(sum[:16])
+}
+
+func validExternalAsset(asset Asset) bool {
+	if !asset.External || !asset.Applied || asset.Pending || asset.PendingDelete || !validCategory(asset.Category) || len(asset.Files) == 0 {
+		return false
+	}
+	if !assetIDPattern.MatchString(asset.ID) || asset.ID != externalAssetID(asset.Category, asset.Files) {
+		return false
+	}
+	for _, file := range asset.Files {
+		if !safeExternalFileName(asset.Category, file.Name) || file.Staged != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // Upload 校验并暂存上传内容，上传完成后不会立刻触碰正在提供给车机的虚拟盘。
@@ -354,6 +590,33 @@ func (m *Manager) Delete(_ context.Context, id string) (Status, error) {
 		if err := m.saveAssets(assets); err != nil {
 			return Status{}, err
 		}
+	}
+	return m.statusLocked(assets), nil
+}
+
+// DeleteExternal 在独占维护窗口内删除电脑或车机直接写入的媒体文件。
+// 文件名和目标目录均会再次校验，避免把浏览器输入解释为任意主机路径。
+func (m *Manager) DeleteExternal(ctx context.Context, asset Asset) (Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validExternalAsset(asset) {
+		return Status{}, errors.New("直接写入媒体资源不合法")
+	}
+	if !regularFile(m.cfg.ImagePath) {
+		return Status{}, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	assets, err := m.loadAssets()
+	if err != nil {
+		return Status{}, err
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return Status{}, fmt.Errorf("准备直接删除媒体维护窗口: %w", err)
+	}
+	defer release()
+	asset.PendingDelete = true
+	if err := m.applyLocked(ctx, []Asset{asset}); err != nil {
+		return Status{}, fmt.Errorf("删除直接写入媒体: %w", err)
 	}
 	return m.statusLocked(assets), nil
 }
@@ -651,10 +914,10 @@ func (m *Manager) removeAsset(mounts map[int]string, asset Asset) error {
 		return err
 	}
 	for _, file := range asset.Files {
-		if !safeTargetName(file.Name) {
-			return errors.New("媒体清单文件名不合法")
+		target, err := mediaTargetPath(targetRoot, asset.Category, file.Name)
+		if err != nil {
+			return err
 		}
-		target := filepath.Join(targetRoot, file.Name)
 		info, err := os.Lstat(target)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -1115,6 +1378,56 @@ func regularFile(name string) bool {
 
 func safeTargetName(name string) bool {
 	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, "/\\\x00\r\n") && !strings.HasPrefix(name, ".")
+}
+
+func safeExternalFileName(category Category, name string) bool {
+	if category == CategoryMusic {
+		return safeMusicRelativePath(name)
+	}
+	return safeTargetName(name)
+}
+
+func safeMusicDirectoryPath(name string) bool {
+	return safeMusicPath(filepath.ToSlash(name), false)
+}
+
+func safeMusicRelativePath(name string) bool {
+	return safeMusicPath(name, true)
+}
+
+func safeMusicPath(name string, requireAudioFile bool) bool {
+	if name == "" || strings.ContainsAny(name, "\\\x00\r\n") || strings.HasPrefix(name, "/") {
+		return false
+	}
+	cleaned := path.Clean(name)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || cleaned != name {
+		return false
+	}
+	for _, part := range strings.Split(cleaned, "/") {
+		if !safeTargetName(part) {
+			return false
+		}
+	}
+	return !requireAudioFile || isSupportedMusicFile(cleaned)
+}
+
+func isSupportedMusicFile(name string) bool {
+	return slices.Contains([]string{".mp3", ".wav", ".m4a", ".aac", ".flac"}, strings.ToLower(path.Ext(name)))
+}
+
+func mediaTargetPath(root string, category Category, name string) (string, error) {
+	if !safeExternalFileName(category, name) {
+		return "", errors.New("媒体清单文件名不合法")
+	}
+	if category != CategoryMusic {
+		return filepath.Join(root, name), nil
+	}
+	target := filepath.Join(root, filepath.FromSlash(name))
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("MUSIC 文件路径不合法")
+	}
+	return target, nil
 }
 
 func safeStagedName(name string) bool {

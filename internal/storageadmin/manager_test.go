@@ -161,6 +161,31 @@ func TestManagerInitializeUsesFullCapacityAndMusicLayout(t *testing.T) {
 	}
 }
 
+func TestManagerInitializeAcceptsNVMeCandidate(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	registry := storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json"))
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123", ResolvedPath: "/dev/nvme0n1", Type: "disk",
+		Transport: "nvme", Model: "Samsung SSD 990 PRO", Serial: "S7ABC123", Size: 1_000_000_000_000,
+	}
+	driveInitializer := &fakeDriveInitializer{root: root}
+	manager := New(Config{
+		DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+		DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+	}, fakeRunner{}, registry, fakeLister{devices: []driveinit.Device{device}}, driveInitializer, &fakeImageInitializer{}, &fakeController{})
+
+	result, err := manager.Initialize(t.Context(), InitializeRequest{
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial, ConfirmErase: true, ConfirmOTGDisconnected: true,
+	})
+	if err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if !result.Initialized || result.Transport != "nvme" || driveInitializer.calls != 1 {
+		t.Fatalf("result = %#v, drive calls = %d", result, driveInitializer.calls)
+	}
+}
+
 func TestClassifyReadyManagedDeviceAllowsReinitialize(t *testing.T) {
 	t.Parallel()
 	device := driveinit.Device{
@@ -231,5 +256,57 @@ func TestChooseImageSize(t *testing.T) {
 				t.Fatalf("chooseImageSize() = %d, %v", got, err)
 			}
 		})
+	}
+}
+
+type pathInspector struct{ devices map[string]driveinit.Device }
+
+func (i pathInspector) Inspect(_ context.Context, path string) (driveinit.Device, error) {
+	device, found := i.devices[path]
+	if !found {
+		return driveinit.Device{}, errors.New("not found")
+	}
+	return device, nil
+}
+
+func TestOSDeviceListerListsNVMeAndSkipsSystemDisk(t *testing.T) {
+	t.Parallel()
+	lister := NewOSDeviceLister(pathInspector{devices: map[string]driveinit.Device{
+		"/dev/disk/by-id/mmc-boot": {
+			RequestedPath: "/dev/disk/by-id/mmc-boot", ResolvedPath: "/dev/mmcblk0", Type: "disk", Serial: "BOOT", Size: 64_000_000_000,
+			Children: []driveinit.Device{{ResolvedPath: "/dev/mmcblk0p2", MountPoint: "/"}},
+		},
+		"/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123": {
+			RequestedPath: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123", ResolvedPath: "/dev/nvme0n1", Type: "disk", Transport: "nvme", Serial: "S7ABC123", Size: 1_000_000_000_000,
+		},
+		"/dev/disk/by-id/usb-TESLADRIVE_ABC-0:0": {
+			RequestedPath: "/dev/disk/by-id/usb-TESLADRIVE_ABC-0:0", ResolvedPath: "/dev/sda", Type: "disk", Transport: "usb", Serial: "ABC", Size: 128_000_000_000,
+		},
+		"/dev/disk/by-id/wwn-0xABC": {
+			RequestedPath: "/dev/disk/by-id/wwn-0xABC", ResolvedPath: "/dev/sda", Type: "disk", Transport: "usb", Serial: "ABC", Size: 128_000_000_000,
+		},
+		"/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123-part1": {
+			RequestedPath: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123-part1", ResolvedPath: "/dev/nvme0n1p1", Type: "part",
+		},
+	}})
+	lister.stablePaths = func() ([]string, error) {
+		return []string{
+			"/dev/disk/by-id/wwn-0xABC",
+			"/dev/disk/by-id/mmc-boot",
+			"/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123-part1",
+			"/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123",
+			"/dev/disk/by-id/usb-TESLADRIVE_ABC-0:0",
+		}, nil
+	}
+
+	devices, err := lister.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("devices = %#v", devices)
+	}
+	if devices[0].RequestedPath != "/dev/disk/by-id/usb-TESLADRIVE_ABC-0:0" || devices[1].Transport != "nvme" {
+		t.Fatalf("devices = %#v", devices)
 	}
 }

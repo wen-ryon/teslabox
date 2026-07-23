@@ -10,6 +10,7 @@ func readDiskUsage(path string) *Usage {
 		return nil
 	}
 	total := stats.Blocks * uint64(stats.Bsize)
+	free := stats.Bfree * uint64(stats.Bsize)
 	available := stats.Bavail * uint64(stats.Bsize)
-	return newUsage(total, available)
+	return newFilesystemUsage(total, free, available)
 }

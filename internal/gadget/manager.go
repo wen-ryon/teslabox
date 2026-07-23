@@ -220,7 +220,9 @@ func (m *Manager) Start() (status Status, err error) {
 		{name: m.lunPath("cdrom"), value: "0"},
 		{name: m.lunPath("ro"), value: "0"},
 		{name: m.lunPath("removable"), value: "1"},
-		{name: m.lunPath("nofua"), value: "0"},
+		// Windows 常对可移动盘频繁发送 FUA，小块同步会显著降低连续写入吞吐。
+		// TeslaBox 选择性能优先，异常断电可能丢失尚未落盘的最后少量数据。
+		{name: m.lunPath("nofua"), value: "1"},
 		// backing file 必须最后写入，否则内核会锁定 LUN 属性并返回 EBUSY。
 		{name: m.lunPath("file"), value: imagePath},
 	}

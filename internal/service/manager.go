@@ -24,7 +24,12 @@ var (
 	ErrSnapshotUnavailable   = errors.New("当前状态不能创建媒体快照")
 )
 
-const gadgetEnumerationWait = 5 * time.Second
+const (
+	gadgetEnumerationWait        = 5 * time.Second
+	fallbackSnapshotScanInterval = 30 * time.Second
+	fallbackSnapshotIdleInterval = 5 * time.Minute
+	fallbackSnapshotActiveWindow = 2 * time.Minute
+)
 
 // Phase 是 TeslaUSB 核心状态机对外暴露的稳定状态。
 type Phase string
@@ -117,6 +122,7 @@ type Manager struct {
 	cleanupCh           chan struct{}
 	retired             []mediasnapshot.View
 	mediaLeases         map[string]int
+	mediaActiveUntil    time.Time
 	snapshotRecovered   bool
 	snapshotFailures    int
 	snapshotRetryAt     time.Time
@@ -373,7 +379,28 @@ func (m *Manager) hasMediaLeases() bool {
 
 // Scan 创建新的只读快照，并在扫描成功后原子替换对外媒体索引。
 func (m *Manager) Scan(ctx context.Context) error {
-	return m.refreshSnapshot(ctx)
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	m.extendMediaActivityLocked(m.now())
+	return m.refreshSnapshotLocked(ctx)
+}
+
+// ActivateMedia 在首次进入录像浏览时立即刷新，并在短时间内恢复高频快照。
+func (m *Manager) ActivateMedia(ctx context.Context) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	now := m.now()
+	wasActive := now.Before(m.mediaActiveUntil)
+	m.extendMediaActivityLocked(now)
+	state := m.Snapshot()
+	snapshotFresh := state.MediaSnapshot != nil &&
+		state.LastRefreshAt != nil &&
+		now.Sub(*state.LastRefreshAt) < m.snapshotScanInterval()
+	if wasActive || snapshotFresh {
+		return nil
+	}
+	return m.refreshSnapshotLocked(ctx)
 }
 
 // Snapshot 返回防御性拷贝，避免 API 修改内部设备和媒体状态。
@@ -413,6 +440,13 @@ func (m *Manager) AcquireMediaSnapshot() (Snapshot, func()) {
 			}
 		})
 	}
+}
+
+// AcquireMediaSnapshotView 为只读业务提供当前媒体快照，并在调用方完成后释放租约。
+// 通过租约避免媒体中心扫描时快照被定时任务提前卸载。
+func (m *Manager) AcquireMediaSnapshotView() (*mediasnapshot.View, func()) {
+	state, release := m.AcquireMediaSnapshot()
+	return state.MediaSnapshot, release
 }
 
 func cloneSnapshot(source Snapshot) Snapshot {
@@ -466,20 +500,20 @@ func (m *Manager) Close(ctx context.Context) error {
 }
 
 func (m *Manager) snapshotWithTimeout(parent context.Context) {
-	if !m.shouldRunAutomaticSnapshot() {
-		return
-	}
 	ctx, cancel := context.WithTimeout(parent, m.cfg.SnapshotTimeout)
 	defer cancel()
-	if err := m.refreshSnapshot(ctx); err != nil && !errors.Is(err, ErrSnapshotUnavailable) {
+	if err := m.refreshAutomaticSnapshot(ctx); err != nil && !errors.Is(err, ErrSnapshotUnavailable) {
 		m.logger.Warn("刷新 TeslaCam 媒体快照失败", "error", err)
 	}
 }
 
-func (m *Manager) shouldRunAutomaticSnapshot() bool {
+func (m *Manager) refreshAutomaticSnapshot(ctx context.Context) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
-	return m.snapshotRetryAt.IsZero() || !m.now().Before(m.snapshotRetryAt)
+	if !m.shouldRunAutomaticSnapshotLocked(m.now()) {
+		return nil
+	}
+	return m.refreshSnapshotLocked(ctx)
 }
 
 func (m *Manager) refreshWithTimeout(parent context.Context) {
@@ -700,9 +734,7 @@ func (m *Manager) pollGadgetEnumeration(ctx context.Context, initial gadget.Stat
 	}
 }
 
-func (m *Manager) refreshSnapshot(ctx context.Context) error {
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
+func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -770,7 +802,7 @@ func (m *Manager) refreshSnapshot(ctx context.Context) error {
 	ready.SnapshotSpace = space
 	ready.SnapshotFailures = 0
 	ready.SnapshotRetryAt = nil
-	now := time.Now()
+	now := m.now()
 	ready.LastRefreshAt = &now
 	m.store(ready)
 	m.snapshotFailures = 0
@@ -785,7 +817,7 @@ func (m *Manager) refreshSnapshot(ctx context.Context) error {
 
 func (m *Manager) storeSnapshotFailure(previous Snapshot, cause error) error {
 	m.snapshotFailures++
-	delay := snapshotRetryDelay(m.cfg.ScanInterval, m.cfg.SnapshotRetryMax, m.snapshotFailures)
+	delay := snapshotRetryDelay(m.automaticSnapshotIntervalLocked(m.now()), m.cfg.SnapshotRetryMax, m.snapshotFailures)
 	m.snapshotRetryAt = m.now().Add(delay)
 	degraded := previous
 	degraded.Phase = PhaseDegraded
@@ -824,13 +856,51 @@ func snapshotRetryDelay(interval, maximum time.Duration, failures int) time.Dura
 }
 
 func (m *Manager) cleanupRetired(ctx context.Context) {
-	keep := 0
-	if m.Snapshot().MediaSnapshot != nil {
-		keep = 1
-	}
-	if err := m.cleanupRetiredUntil(ctx, keep); err != nil {
+	if err := m.cleanupRetiredUntil(ctx, 0); err != nil {
 		m.logger.Warn("回收旧 TeslaCam 快照失败", "error", err)
 	}
+}
+
+func (m *Manager) shouldRunAutomaticSnapshotLocked(now time.Time) bool {
+	if !m.snapshotRetryAt.IsZero() && now.Before(m.snapshotRetryAt) {
+		return false
+	}
+	state := m.Snapshot()
+	if state.MediaSnapshot == nil || state.LastRefreshAt == nil {
+		return true
+	}
+	return now.Sub(*state.LastRefreshAt) >= m.automaticSnapshotIntervalLocked(now)
+}
+
+func (m *Manager) automaticSnapshotIntervalLocked(now time.Time) time.Duration {
+	if m.Snapshot().MediaSnapshot == nil {
+		return m.snapshotScanInterval()
+	}
+	if now.Before(m.mediaActiveUntil) {
+		return m.snapshotScanInterval()
+	}
+	if m.cfg.SnapshotIdleInterval > 0 {
+		return m.cfg.SnapshotIdleInterval
+	}
+	return fallbackSnapshotIdleInterval
+}
+
+func (m *Manager) extendMediaActivityLocked(now time.Time) {
+	m.mediaActiveUntil = now.Add(m.snapshotActiveWindow())
+}
+
+func (m *Manager) snapshotScanInterval() time.Duration {
+	if m.cfg.ScanInterval > 0 {
+		return m.cfg.ScanInterval
+	}
+	return fallbackSnapshotScanInterval
+}
+
+func (m *Manager) snapshotActiveWindow() time.Duration {
+	if m.cfg.SnapshotActiveWindow > 0 {
+		return m.cfg.SnapshotActiveWindow
+	}
+	return fallbackSnapshotActiveWindow
 }
 
 func (m *Manager) cleanupRetiredUntil(ctx context.Context, keep int) error {

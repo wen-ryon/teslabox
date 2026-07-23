@@ -55,9 +55,9 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-confirm-otg-disconnected", "app.js?v=20260722-9",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "app.css?v=20260723-4", "app.js?v=20260723-6",
 		"toast-region",
-		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）",
+		"原画（源分辨率 · 36 FPS，仅单路）", "高清（1080p · 30 FPS）", "自动（高清）", "自动（标准）", "自动（流畅）",
 	} {
 		if !bytes.Contains(body, []byte(marker)) {
 			t.Errorf("页面缺少管理功能标记 %q", marker)
@@ -77,7 +77,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "applyMediaAssets"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}
@@ -160,10 +160,10 @@ func TestHandlerServesCompositeLayoutGeometry(t *testing.T) {
 		t.Fatalf("script status = %d, body = %s", scriptRecorder.Code, scriptRecorder.Body.String())
 	}
 	for _, marker := range []string{
-		"applyCompositeFrameGeometry", "layoutFactors", "composite6:3/2", "composite4a:1",
+		"applyCompositeFrameGeometry", "applyServerCompositeFrameGeometry", "compositeLayoutFactor", "composite6:3/2", "composite4a:1",
 		"composite4b:3/4", "composite3:2/3", "fitCompositeFrame", "fitFullscreenCompositeGrid", "isPlayerFullscreen",
 		"if (!composite || serverComposite) resetCompositeFrameGeometry();",
-		`resolvePlaybackQuality(playbackQuality, activeDisplay)`, `return isCompositeDisplay(display) ? "standard" : "original"`,
+		`resolvePlaybackQuality(playbackQuality, activeDisplay)`, "automaticPlaybackQuality", "shouldAutomaticallyDowngrade", "isLocalAccessPath", "auto-standard", "auto-high", "auto-smooth",
 	} {
 		if !strings.Contains(scriptRecorder.Body.String(), marker) {
 			t.Errorf("播放器布局脚本缺少标记 %q", marker)

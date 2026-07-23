@@ -32,3 +32,14 @@ func TestNewUsage(t *testing.T) {
 		t.Fatalf("usage = %#v", usage)
 	}
 }
+
+func TestNewFilesystemUsageExcludesReservedBlocks(t *testing.T) {
+	t.Parallel()
+	usage := newFilesystemUsage(1000, 350, 250)
+	if usage == nil {
+		t.Fatal("usage = nil")
+	}
+	if usage.UsedBytes != 650 || usage.AvailableBytes != 250 || usage.UsedPercent != 65 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}

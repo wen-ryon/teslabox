@@ -7,6 +7,7 @@ const compositeLayouts = {
   composite4b: {label:"四路合成 B", cameras:["front", "right_repeater", "back", "left_repeater"]},
   composite3: {label:"三路合成", cameras:["front", "right_repeater", "left_repeater"]},
 };
+const musicPageSize = 24;
 const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
@@ -17,7 +18,8 @@ const state = {
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
   page: initialPage, mustChangePassword: false,
-  wifi: null, ap: null, storage: null, update: null, mediaAssets: null, uiFont: savedUIFont,
+  wifi: null, ap: null, storage: null, update: null, maintenance: null, mediaAssets: null, uiFont: savedUIFont,
+  musicPath: "", musicPage: 0,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -43,6 +45,7 @@ let allSessions = [];
 let compositeTracks = new Map();
 let lastCompositeSync = 0;
 let pendingWiFi = null;
+let pendingWiFiIPv4Network = null;
 let pendingStorage = null;
 let confirmResolver = null;
 let playbackQuality = savedPlaybackQuality;
@@ -172,7 +175,7 @@ $("refresh-button").addEventListener("click", refreshAll);
 $("settings-refresh").addEventListener("click", loadSettings);
 $("logs-refresh").addEventListener("click", loadLogs);
 $("logs-lines").addEventListener("change", loadLogs);
-$("logs-auto-refresh").addEventListener("change", scheduleLogsRefresh);
+$("logs-auto-refresh").addEventListener("click", toggleLogsAutoRefresh);
 $("logs-copy").addEventListener("click", copyLogs);
 $("media-refresh").addEventListener("click", loadMediaAssets);
 $("media-boombox-upload").addEventListener("click", () => uploadMediaFiles("boombox"));
@@ -180,6 +183,31 @@ $("media-wrap-upload").addEventListener("click", () => uploadMediaFiles("wrap"))
 $("media-lightshow-upload").addEventListener("click", () => uploadMediaFiles("lightshow"));
 $("media-music-upload").addEventListener("click", () => uploadMediaFiles("music"));
 $("media-apply").addEventListener("click", applyMediaAssets);
+$("media-music-back").addEventListener("click", () => {
+  if (!state.musicPath) return;
+  const parts = state.musicPath.split("/");
+  parts.pop();
+  state.musicPath = parts.join("/");
+  state.musicPage = 0;
+  renderMusicBrowser(musicAssets());
+});
+$("media-music-prev").addEventListener("click", () => {
+  if (state.musicPage <= 0) return;
+  state.musicPage -= 1;
+  renderMusicBrowser(musicAssets());
+});
+$("media-music-next").addEventListener("click", () => {
+  state.musicPage += 1;
+  renderMusicBrowser(musicAssets());
+});
+$("media-music-breadcrumb").addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  const target = event.target.closest("button[data-music-path]");
+  if (!target) return;
+  state.musicPath = target.dataset.musicPath || "";
+  state.musicPage = 0;
+  renderMusicBrowser(musicAssets());
+});
 $("usb-gadget-disconnect").addEventListener("click", disconnectGadget);
 $("usb-gadget-reconnect").addEventListener("click", reconnectGadget);
 $("usb-gadget-warm-restart").addEventListener("click", warmRestartGadget);
@@ -190,17 +218,23 @@ document.querySelectorAll("[data-log-source]").forEach((button) => button.addEve
 }));
 $("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
 $("wifi-scan").addEventListener("click", scanWiFi);
+$("saved-network-toggle").addEventListener("click", () => toggleNetworkPanel("saved-network-panel", "saved-network-toggle"));
+$("available-network-toggle").addEventListener("click", () => toggleNetworkPanel("available-network-panel", "available-network-toggle"));
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
 $("ap-form").addEventListener("submit", saveAPSettings);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
+$("wifi-ipv4-form").addEventListener("submit", saveWiFiIPv4Settings);
+$("wifi-ipv4-mode").addEventListener("change", renderWiFiIPv4Fields);
 $("storage-refresh").addEventListener("click", loadStorageDevices);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
 $("storage-music-enabled").addEventListener("change", renderStoragePartitionPreview);
 $("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
+$("maintenance-auto-recovery").addEventListener("click", toggleMaintenanceAutoRecovery);
 $("password-change-open").addEventListener("click", () => openPasswordModal(false));
 $("password-change-form").addEventListener("submit", changeManagementPassword);
 document.querySelectorAll("[data-close-password]").forEach((element) => element.addEventListener("click", () => closePasswordModal(false)));
 document.querySelectorAll("[data-close-wifi]").forEach((element) => element.addEventListener("click", closeWiFiModal));
+document.querySelectorAll("[data-close-wifi-ipv4]").forEach((element) => element.addEventListener("click", closeWiFiIPv4Modal));
 document.querySelectorAll("[data-close-storage]").forEach((element) => element.addEventListener("click", closeStorageModal));
 document.querySelectorAll("[data-close-confirm]").forEach((element) => element.addEventListener("click", () => resolveConfirmation(false)));
 $("confirm-submit").addEventListener("click", () => resolveConfirmation(true));
@@ -397,8 +431,9 @@ async function loadMediaAssets() {
 
 function renderMediaAssets(payload) {
   const assets = Array.isArray(payload.assets) ? payload.assets : [];
-  const categories = ["boombox", "wrap", "lightshow", "music"];
+  const categories = ["boombox", "wrap", "lightshow"];
   categories.forEach((category) => renderMediaCategory(category, assets.filter((asset) => asset.category === category)));
+  renderMusicBrowser(assets.filter((asset) => asset.category === "music"));
   const status = $("media-apply-status");
   status.className = `badge${payload.needs_apply ? " error" : " ok"}`;
   status.textContent = payload.needs_apply ? "有待应用变更" : "已同步";
@@ -406,14 +441,14 @@ function renderMediaAssets(payload) {
   if (!payload.image_available) {
     $("media-apply-detail").textContent = payload.message || "TeslaCam 虚拟盘尚未初始化。";
   } else if (payload.needs_apply) {
-    $("media-apply-detail").textContent = "已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。";
+    $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。`;
   } else {
-    $("media-apply-detail").textContent = "当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。";
+    $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。`;
   }
 }
 
 function renderMediaUnavailable(message) {
-  ["boombox", "wrap", "lightshow", "music"].forEach((category) => {
+  ["boombox", "wrap", "lightshow"].forEach((category) => {
     const list = $(`media-${category}-list`);
     list.replaceChildren();
     const empty = document.createElement("p");
@@ -421,6 +456,16 @@ function renderMediaUnavailable(message) {
     empty.textContent = message;
     list.append(empty);
   });
+  $("media-music-count").textContent = "0 首";
+  $("media-music-breadcrumb").replaceChildren();
+  const musicEmpty = document.createElement("p");
+  musicEmpty.className = "empty-state";
+  musicEmpty.textContent = message;
+  $("media-music-list").replaceChildren(musicEmpty);
+  $("media-music-page-summary").textContent = "无法读取";
+  $("media-music-back").disabled = true;
+  $("media-music-prev").disabled = true;
+  $("media-music-next").disabled = true;
   $("media-apply-status").textContent = "不可用";
   $("media-apply-status").className = "badge error";
   $("media-apply").disabled = true;
@@ -429,58 +474,155 @@ function renderMediaUnavailable(message) {
 function renderMediaCategory(category, assets) {
   const list = $(`media-${category}-list`);
   const count = $(`media-${category}-count`);
-  count.textContent = category === "wrap" ? `${assets.length} / 10` : category === "music" ? `${assets.length} 首` : `${assets.length} 个`;
+  count.textContent = category === "wrap" ? `${assets.length} / 10` : `${assets.length} 个`;
   list.replaceChildren();
   if (!assets.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "暂无通过 TeslaBox 管理的文件。";
+    empty.textContent = "暂无可识别媒体文件。";
     list.append(empty);
     return;
   }
-  assets.forEach((asset) => {
-    const row = document.createElement("article");
-    row.className = "media-asset-row";
-    const main = document.createElement("div");
-    main.className = "media-asset-main";
-    const name = document.createElement("strong");
-    name.textContent = asset.name || "未命名媒体";
-    const detail = document.createElement("small");
-    const files = Array.isArray(asset.files) ? asset.files : [];
-    detail.textContent = files.map((file) => `${file.name} · ${formatBytes(file.size_bytes)}`).join(" · ") || "文件详情不可用";
-    main.append(name, detail);
-    if (asset.preview_available && !asset.pending_delete) {
-      const previewPath = `/api/v1/media-assets/${encodeURIComponent(asset.id)}/preview`;
-      if (category === "wrap") {
-        const preview = document.createElement("img");
-        preview.className = "media-wrap-preview";
-        preview.loading = "lazy";
-        preview.alt = `${asset.name || "皮肤"} 预览`;
-        preview.src = previewPath;
-        main.append(preview);
-      } else if (category === "boombox") {
-        const preview = document.createElement("audio");
-        preview.className = "media-audio-preview";
-        preview.controls = true;
-        preview.preload = "none";
-        preview.src = previewPath;
-        main.append(preview);
-      }
+  assets.forEach((asset) => list.append(createMediaAssetRow(category, asset)));
+}
+
+function musicAssets() {
+  const assets = state.mediaAssets?.assets;
+  return Array.isArray(assets) ? assets.filter((asset) => asset.category === "music") : [];
+}
+
+function renderMusicBrowser(assets) {
+  const list = $("media-music-list");
+  $("media-music-count").textContent = `${assets.length} 首`;
+  renderMusicBreadcrumb();
+  $("media-music-back").disabled = !state.musicPath;
+  const entries = musicDirectoryEntries(assets, state.musicPath);
+  const pageCount = Math.max(1, Math.ceil(entries.length / musicPageSize));
+  state.musicPage = Math.min(Math.max(state.musicPage, 0), pageCount - 1);
+  const start = state.musicPage * musicPageSize;
+  const visible = entries.slice(start, start + musicPageSize);
+  list.replaceChildren();
+  if (!visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = state.musicPath ? "此目录没有可识别的歌曲。" : "暂无可识别歌曲。";
+    list.append(empty);
+  }
+  visible.forEach((entry) => {
+    if (entry.kind === "directory") {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "media-directory-row";
+      const main = document.createElement("span");
+      main.className = "media-asset-main";
+      const name = document.createElement("strong");
+      name.textContent = `文件夹 · ${entry.name}`;
+      const detail = document.createElement("small");
+      detail.textContent = `${entry.songCount} 首歌曲`;
+      main.append(name, detail);
+      const arrow = document.createElement("span");
+      arrow.className = "media-directory-arrow";
+      arrow.textContent = "›";
+      row.append(main, arrow);
+      row.addEventListener("click", () => {
+        state.musicPath = entry.path;
+        state.musicPage = 0;
+        renderMusicBrowser(musicAssets());
+      });
+      list.append(row);
+      return;
     }
-    const actions = document.createElement("div");
-    actions.className = "media-asset-actions";
-    const stateBadge = document.createElement("span");
-    stateBadge.className = `badge${asset.pending_delete ? " error" : asset.applied ? " ok" : ""}`;
-    stateBadge.textContent = asset.pending_delete ? "待删除" : asset.pending ? "待应用" : "已应用";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "ghost compact";
-    remove.textContent = "删除";
-    remove.addEventListener("click", () => deleteMediaAsset(asset));
-    actions.append(stateBadge, remove);
-    row.append(main, actions);
-    list.append(row);
+    list.append(createMediaAssetRow("music", entry.asset));
   });
+  $("media-music-page-summary").textContent = entries.length ? `第 ${state.musicPage + 1} / ${pageCount} 页 · ${entries.length} 项` : "0 项";
+  $("media-music-prev").disabled = state.musicPage === 0;
+  $("media-music-next").disabled = state.musicPage >= pageCount - 1;
+}
+
+function renderMusicBreadcrumb() {
+  const breadcrumb = $("media-music-breadcrumb");
+  breadcrumb.replaceChildren();
+  const parts = state.musicPath ? state.musicPath.split("/") : [];
+  const items = ["MUSIC", ...parts];
+  let currentPath = "";
+  items.forEach((name, index) => {
+    if (index > 0) currentPath = currentPath ? `${currentPath}/${name}` : name;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost compact";
+    button.dataset.musicPath = currentPath;
+    button.textContent = name;
+    breadcrumb.append(button);
+    if (index < items.length - 1) breadcrumb.append(document.createTextNode("/"));
+  });
+}
+
+function musicDirectoryEntries(assets, currentPath) {
+  const prefix = currentPath ? currentPath.split("/") : [];
+  const directories = new Map();
+  const files = [];
+  assets.forEach((asset) => {
+    const file = Array.isArray(asset.files) ? asset.files[0] : null;
+    const relative = String(file?.name || asset.name || "").replaceAll("\\", "/");
+    const parts = relative.split("/").filter(Boolean);
+    if (parts.length <= prefix.length || prefix.some((part, index) => part !== parts[index])) return;
+    if (parts.length === prefix.length + 1) {
+      files.push({kind:"file", name:parts[parts.length - 1], asset});
+      return;
+    }
+    const name = parts[prefix.length];
+    const path = [...prefix, name].join("/");
+    const directory = directories.get(path) || {kind:"directory", name, path, songCount:0};
+    directory.songCount += 1;
+    directories.set(path, directory);
+  });
+  const order = (left, right) => left.name.localeCompare(right.name, "zh-CN", {numeric:true, sensitivity:"base"});
+  return [...directories.values()].sort(order).concat(files.sort(order));
+}
+
+function createMediaAssetRow(category, asset) {
+  const row = document.createElement("article");
+  row.className = "media-asset-row";
+  const main = document.createElement("div");
+  main.className = "media-asset-main";
+  const name = document.createElement("strong");
+  name.textContent = asset.name || "未命名媒体";
+  const detail = document.createElement("small");
+  const files = Array.isArray(asset.files) ? asset.files : [];
+  detail.textContent = files.map((file) => `${file.name} · ${formatBytes(file.size_bytes)}`).join(" · ") || "文件详情不可用";
+  main.append(name, detail);
+  if (asset.preview_available && !asset.pending_delete) {
+    const previewPath = `/api/v1/media-assets/${encodeURIComponent(asset.id)}/preview`;
+    if (category === "wrap") {
+      const preview = document.createElement("img");
+      preview.className = "media-wrap-preview";
+      preview.loading = "lazy";
+      preview.alt = `${asset.name || "皮肤"} 预览`;
+      preview.src = previewPath;
+      main.append(preview);
+    } else if (category === "boombox") {
+      const preview = document.createElement("audio");
+      preview.className = "media-audio-preview";
+      preview.controls = true;
+      preview.preload = "none";
+      preview.src = previewPath;
+      main.append(preview);
+    }
+  }
+  const actions = document.createElement("div");
+  actions.className = "media-asset-actions";
+  const stateBadge = document.createElement("span");
+  stateBadge.className = `badge${asset.pending_delete ? " error" : asset.applied ? " ok" : ""}`;
+  stateBadge.textContent = asset.external ? "直接写入" : asset.pending_delete ? "待删除" : asset.pending ? "待应用" : "已应用";
+  actions.append(stateBadge);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "ghost compact";
+  remove.textContent = "删除";
+  remove.addEventListener("click", () => deleteMediaAsset(asset));
+  actions.append(remove);
+  row.append(main, actions);
+  return row;
 }
 
 async function uploadMediaFiles(category) {
@@ -516,7 +658,11 @@ async function uploadMediaFiles(category) {
   try {
     const result = await request(`/api/v1/media-assets/upload?category=${encodeURIComponent(category)}`, {method:"POST", body:form});
     const count = Array.isArray(result.assets) ? result.assets.length : 0;
-    setMediaNotice(`已安全暂存 ${count} 个媒体资源；待确认 OTG 已断开后再应用。`, false);
+    if (category === "music") {
+      state.musicPath = "";
+      state.musicPage = 0;
+    }
+    setMediaNotice(state.maintenance?.auto_recovery ? `已安全暂存 ${count} 个媒体资源；可直接应用，TeslaBox 会自动维护恢复。` : `已安全暂存 ${count} 个媒体资源；待确认 OTG 已断开后再应用。`, false);
     if (category === "lightshow") {
       $("media-lightshow-sequence").value = "";
       $("media-lightshow-audio").value = "";
@@ -533,6 +679,10 @@ async function uploadMediaFiles(category) {
 }
 
 async function deleteMediaAsset(asset) {
+  if (asset.external) {
+    await deleteExternalMediaAsset(asset);
+    return;
+  }
   const confirmed = await askConfirmation(
     "删除媒体文件",
     asset.applied ? "文件会标记为待删除，确认应用变更后才从车机虚拟盘移除。" : "这会丢弃尚未应用到车机的暂存文件。",
@@ -548,24 +698,52 @@ async function deleteMediaAsset(asset) {
   }
 }
 
+async function deleteExternalMediaAsset(asset) {
+  const automatic = Boolean(state.maintenance?.auto_recovery);
+  if (!automatic && !$("media-confirm-otg-disconnected").checked) {
+    setMediaNotice("请先物理拔掉 OTG 线，并勾选确认项。", true);
+    return;
+  }
+  const confirmed = await askConfirmation(
+    "删除直接写入的媒体",
+    automatic ? "文件会立刻从虚拟盘删除。TeslaBox 会自动断开 USB Gadget，并在完成后自动温重启恢复。" : "文件会立刻从虚拟盘删除。TeslaBox 将暂停 USB Gadget；完成后请插回 OTG，并到日志中心执行温重启恢复。",
+    "确认删除", true,
+  );
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/media-assets/external-delete", {
+      id: asset.id,
+      category: asset.category,
+      files: Array.isArray(asset.files) ? asset.files : [],
+      confirm_otg_disconnected: !automatic,
+    });
+    $("media-confirm-otg-disconnected").checked = false;
+    setMediaNotice(automatic ? "已删除直接写入的媒体，自动温重启恢复已提交。" : "已从虚拟盘删除直接写入的媒体。请插回 OTG 后到日志中心执行温重启恢复。", false);
+    if (!automatic) await Promise.allSettled([loadMediaAssets(), loadStatus()]);
+  } catch (error) {
+    setMediaNotice(error.message, true);
+  }
+}
+
 async function applyMediaAssets() {
-  if (!$("media-confirm-otg-disconnected").checked) {
+  const automatic = Boolean(state.maintenance?.auto_recovery);
+  if (!automatic && !$("media-confirm-otg-disconnected").checked) {
     setMediaNotice("请先物理拔掉 OTG 线，并勾选确认项。", true);
     return;
   }
   const confirmed = await askConfirmation(
     "安全应用媒体变更",
-    "TeslaBox 将暂停 USB Gadget 并写入虚拟盘。本次运行不会重新绑定 OTG；完成后请插回 OTG，再到日志中心执行温重启恢复。",
+    automatic ? "TeslaBox 会先自动断开 USB Gadget，再写入虚拟盘；完成后将自动温重启恢复。车机或电脑会短暂失去 USB 存储。" : "TeslaBox 将暂停 USB Gadget 并写入虚拟盘。本次运行不会重新绑定 OTG；完成后请插回 OTG，再到日志中心执行温重启恢复。",
     "确认应用", true,
   );
   if (!confirmed) return;
   const button = $("media-apply");
   button.disabled = true;
   try {
-    await postJSON("/api/v1/media-assets/apply", {confirm_otg_disconnected:true});
+    await postJSON("/api/v1/media-assets/apply", {confirm_otg_disconnected:!automatic});
     $("media-confirm-otg-disconnected").checked = false;
-    setMediaNotice("媒体变更已写入虚拟盘。请插回 OTG 后到日志中心执行温重启恢复。", false);
-    await Promise.allSettled([loadMediaAssets(), loadStatus()]);
+    setMediaNotice(automatic ? "媒体变更已写入虚拟盘，自动温重启恢复已提交。" : "媒体变更已写入虚拟盘。请插回 OTG 后到日志中心执行温重启恢复。", false);
+    if (!automatic) await Promise.allSettled([loadMediaAssets(), loadStatus()]);
   } catch (error) {
     setMediaNotice(error.message, true);
   } finally {
@@ -710,8 +888,20 @@ function renderGadgetServiceState(elementID, service) {
 function scheduleLogsRefresh() {
   window.clearTimeout(logsRefreshTimer);
   logsRefreshTimer = 0;
-  if (state.page !== "logs" || appView.hidden || !$("logs-auto-refresh").checked) return;
+  if (state.page !== "logs" || appView.hidden || !logsAutoRefreshEnabled()) return;
   logsRefreshTimer = window.setTimeout(loadLogs, 10000);
+}
+
+function logsAutoRefreshEnabled() {
+  return $("logs-auto-refresh").getAttribute("aria-pressed") === "true";
+}
+
+function toggleLogsAutoRefresh() {
+  const button = $("logs-auto-refresh");
+  const enabled = !logsAutoRefreshEnabled();
+  button.setAttribute("aria-pressed", String(enabled));
+  button.lastElementChild.textContent = enabled ? "自动刷新：每 10 秒" : "自动刷新：已关闭";
+  scheduleLogsRefresh();
 }
 
 async function copyLogs() {
@@ -743,8 +933,8 @@ async function postJSON(path, body) {
 
 async function loadSettings() {
   setSettingsNotice("正在读取网络设置…", false, false);
-  const [wifiResult, apResult, storageResult, updateResult] = await Promise.allSettled([
-    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"),
+  const [wifiResult, apResult, storageResult, updateResult, maintenanceResult] = await Promise.allSettled([
+    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"),
   ]);
   if (wifiResult.status === "fulfilled") {
     state.wifi = wifiResult.value;
@@ -770,8 +960,67 @@ async function loadSettings() {
   } else {
     renderUpdateUnavailable(updateResult.reason.message);
   }
+  if (maintenanceResult.status === "fulfilled") {
+    state.maintenance = maintenanceResult.value;
+    renderMaintenanceSettings(state.maintenance);
+  } else {
+    renderMaintenanceUnavailable(maintenanceResult.reason.message);
+  }
   if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false, false);
   else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
+}
+
+function renderMaintenanceSettings(settings) {
+  const enabled = Boolean(settings.auto_recovery);
+  const toggle = $("maintenance-auto-recovery");
+  toggle.disabled = false;
+  toggle.setAttribute("aria-pressed", String(enabled));
+  $("maintenance-toggle-title").textContent = enabled ? "媒体自动恢复已开启" : "媒体自动恢复已禁用";
+  $("maintenance-toggle-detail").textContent = enabled ? "点击后切换为手动维护" : "点击后启用";
+  $("maintenance-status").textContent = enabled ? "媒体自动恢复" : "媒体手动恢复";
+  $("maintenance-status").className = `badge${enabled ? " ok" : ""}`;
+  $("media-confirm-otg-row").hidden = enabled;
+  $("media-maintenance-warning").textContent = enabled
+    ? "自动维护恢复已启用。应用媒体或删除直接写入文件时，TeslaBox 会自动解绑 USB Gadget、完成写入后温重启；车机或电脑会短暂失去 USB 存储。"
+    : "媒体变更默认需要先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。在线更新仍会自动重启恢复。";
+}
+
+function renderMaintenanceUnavailable(message) {
+  state.maintenance = null;
+  const toggle = $("maintenance-auto-recovery");
+  toggle.setAttribute("aria-pressed", "false");
+  toggle.disabled = true;
+  $("maintenance-toggle-title").textContent = "媒体自动恢复不可用";
+  $("maintenance-toggle-detail").textContent = "请检查设备状态";
+  $("maintenance-status").textContent = "不可用";
+  $("maintenance-status").className = "badge error";
+  $("media-confirm-otg-row").hidden = false;
+  $("media-maintenance-warning").textContent = "自动维护设置暂不可用。应用变更前必须先物理拔掉连接车机或电脑的 OTG 线，并在完成后手动温重启恢复。";
+  setSettingsNotice(`自动维护设置不可用：${message}`, true);
+}
+
+async function toggleMaintenanceAutoRecovery() {
+  const toggle = $("maintenance-auto-recovery");
+  const enabled = !Boolean(state.maintenance?.auto_recovery);
+  if (enabled) {
+    const confirmed = await askConfirmation(
+      "启用媒体自动恢复",
+      "以后应用媒体或删除直接写入文件时，TeslaBox 会自动断开 USB Gadget 并温重启。车机或电脑会短暂失去存储设备；仅在已验证可稳定重新枚举时启用。",
+      "确认启用", true,
+    );
+    if (!confirmed) return;
+  }
+  toggle.disabled = true;
+  try {
+    state.maintenance = await postJSON("/api/v1/maintenance", {auto_recovery:enabled, confirm_risk:enabled});
+    renderMaintenanceSettings(state.maintenance);
+    setSettingsNotice(enabled ? "媒体自动恢复已启用" : "媒体已恢复为手动维护模式", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+    await loadSettings();
+  } finally {
+    toggle.disabled = false;
+  }
 }
 
 function renderUpdate(update) {
@@ -860,23 +1109,26 @@ async function downloadUpdate() {
 }
 
 async function installUpdate() {
+  const automatic = Boolean(state.maintenance?.update_auto_recovery);
   const confirmed = await askConfirmation(
     "安装系统更新",
-		`将安装 ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
-    "确认已拔线并安装", true,
+		automatic ? `将安装 ${state.update?.latest_version || "已下载版本"}。TeslaBox 会自动断开 USB Gadget，安装健康检查通过后自动重启恢复；车机或电脑会短暂失去 USB 存储。` : `将安装 ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
+    automatic ? "确认自动维护安装" : "确认已拔线并安装", true,
   );
   if (!confirmed) return;
   try {
-    const storage = await request("/api/v1/storage");
-    if (storage.gadget_status?.bound) {
-      setUpdateNotice("已确认 OTG 物理断开，正在安全解绑 USB Gadget…", false);
-      await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
+    if (!automatic) {
+      const storage = await request("/api/v1/storage");
+      if (storage.gadget_status?.bound) {
+        setUpdateNotice("已确认 OTG 物理断开，正在安全解绑 USB Gadget…", false);
+        await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
+      }
     }
     state.update = await postJSON("/api/v1/update/install", {});
     renderUpdate(state.update);
-		setUpdateNotice("安装请求已提交。服务重启后 Gadget 会继续保持安全断开；请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。", false);
+		setUpdateNotice(automatic ? "安装请求已提交。新程序健康检查通过后，设备会自动重启恢复 USB Gadget。" : "安装请求已提交。服务重启后 Gadget 会继续保持安全断开；请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。", false);
 	} catch (error) {
-		setUpdateNotice(`${error.message}。USB Gadget 会继续保持安全断开；请先插入 OTG 线，再到日志中心准备下次冷启动。`, true);
+		setUpdateNotice(automatic ? `${error.message}。自动维护未完成，请在日志中心确认 USB Gadget 状态。` : `${error.message}。USB Gadget 会继续保持安全断开；请先插入 OTG 线，再到日志中心准备下次冷启动。`, true);
   }
 }
 
@@ -942,7 +1194,7 @@ function renderSavedNetworks(networks) {
     const title = document.createElement("strong");
     title.textContent = network.ssid || network.name;
     const detail = document.createElement("small");
-    detail.textContent = `${network.active ? "当前已连接" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"}`;
+    detail.textContent = `${network.active ? "当前已连接" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"} · ${formatWiFiIPv4Summary(network.ipv4)}`;
     identity.append(title, detail);
     const actions = document.createElement("div");
     actions.className = "network-actions";
@@ -962,16 +1214,30 @@ function renderSavedNetworks(networks) {
     connect.textContent = network.active ? "已连接" : "连接";
     connect.disabled = network.active;
     connect.addEventListener("click", () => connectSavedWiFi(network));
+    const ipv4 = document.createElement("button");
+    ipv4.type = "button";
+    ipv4.className = "ghost";
+    ipv4.textContent = "IP 设置";
+    ipv4.addEventListener("click", () => openWiFiIPv4Modal(network));
     const forget = document.createElement("button");
     forget.type = "button";
     forget.className = "ghost";
     forget.textContent = "忘记";
     forget.disabled = network.active;
     forget.addEventListener("click", () => forgetWiFi(network));
-    actions.append(autoConnect, connect, forget);
+    actions.append(autoConnect, connect, ipv4, forget);
     row.append(identity, actions);
     list.append(row);
   });
+}
+
+function toggleNetworkPanel(panelID, toggleID) {
+  const panel = $(panelID);
+  const toggle = $(toggleID);
+  const expanded = panel.hidden;
+  panel.hidden = !expanded;
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.textContent = expanded ? "收起" : "展开";
 }
 
 function renderAvailableNetworks(networks) {
@@ -1081,6 +1347,73 @@ function closeWiFiModal() {
   pendingWiFi = null;
   $("wifi-modal").hidden = true;
   $("wifi-password").value = "";
+}
+
+function formatWiFiIPv4Summary(settings) {
+  if (!settings || settings.mode !== "static") return "DHCP";
+  const address = settings.address && settings.subnet_mask ? `${settings.address} / ${settings.subnet_mask}` : "静态 IPv4";
+  return `静态 ${address}`;
+}
+
+function openWiFiIPv4Modal(network) {
+  pendingWiFiIPv4Network = network;
+  const settings = network.ipv4 || {mode:"dhcp", dns:[]};
+  $("wifi-ipv4-modal-title").textContent = `${network.ssid || network.name} 的 IPv4 设置`;
+  $("wifi-ipv4-modal-detail").textContent = network.active ? "当前正在连接此网络，保存后会立即重新获取网络地址。" : "此配置会在下次连接该 WiFi 时自动生效。";
+  $("wifi-ipv4-mode").value = settings.mode === "static" ? "static" : "dhcp";
+  $("wifi-ipv4-address").value = settings.address || "";
+  $("wifi-ipv4-mask").value = settings.subnet_mask || "";
+  $("wifi-ipv4-gateway").value = settings.gateway || "";
+  $("wifi-ipv4-dns").value = Array.isArray(settings.dns) ? settings.dns.join(", ") : "";
+  renderWiFiIPv4Fields();
+  $("wifi-ipv4-modal").hidden = false;
+}
+
+function closeWiFiIPv4Modal() {
+  pendingWiFiIPv4Network = null;
+  $("wifi-ipv4-modal").hidden = true;
+}
+
+function renderWiFiIPv4Fields() {
+  const isStatic = $("wifi-ipv4-mode").value === "static";
+  $("wifi-ipv4-static-fields").hidden = !isStatic;
+  ["wifi-ipv4-address", "wifi-ipv4-mask", "wifi-ipv4-gateway"].forEach((id) => { $(id).required = isStatic; });
+}
+
+async function saveWiFiIPv4Settings(event) {
+  event.preventDefault();
+  if (!pendingWiFiIPv4Network) return;
+  const network = pendingWiFiIPv4Network;
+  const mode = $("wifi-ipv4-mode").value;
+  const payload = {
+    uuid:network.uuid,
+    mode,
+    address:$("wifi-ipv4-address").value.trim(),
+    subnet_mask:$("wifi-ipv4-mask").value.trim(),
+    gateway:$("wifi-ipv4-gateway").value.trim(),
+    dns:$("wifi-ipv4-dns").value.split(/[，,;\s]+/).map((value) => value.trim()).filter(Boolean),
+  };
+  if (network.active) {
+    $("wifi-ipv4-modal").hidden = true;
+    const confirmed = await askConfirmation(
+      "应用当前 WiFi 的 IPv4 设置",
+      "保存后 WiFi 会立即重新连接，当前页面可能断开。请记住新的 IP 地址，或通过 TeslaBox 热点重新进入设置中心。",
+      "确认保存", true,
+    );
+    if (!confirmed) {
+      $("wifi-ipv4-modal").hidden = false;
+      return;
+    }
+  }
+  closeWiFiIPv4Modal();
+  setSettingsNotice(network.active ? "正在应用 IPv4 设置，页面可能短暂断开…" : "正在保存 WiFi IPv4 设置…", false);
+  try {
+    await postJSON("/api/v1/network/wifi/ipv4", payload);
+    setSettingsNotice(network.active ? "IPv4 设置已应用；如页面断开，请使用新 IP 或 TeslaBox 热点重新访问。" : "WiFi IPv4 设置已保存，将在下次连接时生效。", false);
+    if (!network.active) await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
 }
 
 async function connectNewWiFi(event) {
@@ -1863,7 +2196,7 @@ async function loadCompositePosition(position, autoplay) {
   applyCompositeFrameGeometry(nextTracks.get(masterVideo.camera)?.element);
   clearUnusedCompositeTracks(nextTracks);
   compositeTracks = nextTracks;
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${layoutVideos.length} 路可用`;
+  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${layoutVideos.length} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   renderCameraSwitcher();
   if (autoplay) await playCompositeTracks();
@@ -1895,6 +2228,7 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay) {
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   applyDisplayState();
+  applyServerCompositeFrameGeometry();
   renderCameraSwitcher();
   if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
 }
@@ -2261,9 +2595,24 @@ function applyCompositeFrameGeometry(masterElement) {
   }
   const sourceAspect = masterElement?.videoWidth > 0 && masterElement?.videoHeight > 0
     ? masterElement.videoWidth/masterElement.videoHeight
-    : 16/9;
-  const layoutFactors = {composite6:3/2, composite4a:1, composite4b:3/4, composite3:2/3};
-  activeCompositeAspect = sourceAspect*(layoutFactors[activeDisplay] || 1);
+    : 724/469;
+  applyCompositeFrameAspect(sourceAspect*compositeLayoutFactor(activeDisplay));
+}
+
+function applyServerCompositeFrameGeometry() {
+  if (!isCompositeDisplay(activeDisplay)) return;
+  const outputAspect = sessionVideo.videoWidth > 0 && sessionVideo.videoHeight > 0
+    ? sessionVideo.videoWidth/sessionVideo.videoHeight
+    : (724/469)*compositeLayoutFactor(activeDisplay);
+  applyCompositeFrameAspect(outputAspect);
+}
+
+function compositeLayoutFactor(layout) {
+  return ({composite6:3/2, composite4a:1, composite4b:3/4, composite3:2/3})[layout] || 1;
+}
+
+function applyCompositeFrameAspect(aspect) {
+  activeCompositeAspect = aspect;
   mainVideoFrame.style.aspectRatio = String(activeCompositeAspect);
   mainVideoFrame.style.maxHeight = "none";
   mainVideoFrame.style.marginInline = "auto";
@@ -2299,13 +2648,16 @@ function fitFullscreenCompositeGrid() {
   const availableHeight = mainVideoFrame.clientHeight || window.innerHeight;
   const width = Math.min(availableWidth, availableHeight*activeCompositeAspect);
   const height = width/activeCompositeAspect;
-  compositeGrid.style.width = `${Math.floor(width)}px`;
-  compositeGrid.style.height = `${Math.floor(height)}px`;
+  const content = usesServerComposite() ? sessionVideo : compositeGrid;
+  content.style.width = `${Math.floor(width)}px`;
+  content.style.height = `${Math.floor(height)}px`;
 }
 
 function resetFullscreenCompositeGrid() {
   compositeGrid.style.removeProperty("width");
   compositeGrid.style.removeProperty("height");
+  sessionVideo.style.removeProperty("width");
+  sessionVideo.style.removeProperty("height");
 }
 
 function isPlayerFullscreen() {
@@ -2438,7 +2790,8 @@ function setPlaybackQuality(quality) {
   resetPlaybackFallbackState();
   $("player-quality").value = playbackQuality;
   writePreference("teslabox-playback-quality", playbackQuality);
-  if (playbackQuality === "auto") showPlayerMessage("自动画质：多路使用标准合成，单路使用原画");
+  const automaticQuality = automaticPlaybackQuality(playbackQuality);
+  if (automaticQuality) showPlayerMessage(`自动画质：多路优先${qualityLabel(automaticQuality)}合成，卡顿时自动降级；单路保持原画`);
   else hidePlayerMessage();
   if (activeSession && isCompositeDisplay(activeDisplay)) {
     const position = currentSessionPosition();
@@ -2451,7 +2804,9 @@ function setPlaybackQuality(quality) {
 }
 
 function normalizePlaybackQuality(quality) {
-  return ["auto", "smooth", "standard", "high", "original"].includes(quality) ? quality : "auto";
+  if (quality === "auto") return "auto-standard";
+  if (["smooth", "standard", "high"].includes(quality)) return `auto-${quality}`;
+  return ["auto-smooth", "auto-standard", "auto-high", "original"].includes(quality) ? quality : "auto-standard";
 }
 
 function usesServerComposite() {
@@ -2470,8 +2825,18 @@ function resetPlaybackFallbackState() {
 }
 
 function resolvePlaybackQuality(quality, display) {
-  if (quality !== "auto") return quality;
-  return isCompositeDisplay(display) ? "standard" : "original";
+  const automaticQuality = automaticPlaybackQuality(quality);
+  if (!automaticQuality) return quality;
+  if (!isCompositeDisplay(display) || isLocalAccessPath()) return "original";
+  return automaticQuality;
+}
+
+function automaticPlaybackQuality(quality) {
+  return ({"auto-smooth":"smooth", "auto-standard":"standard", "auto-high":"high"})[quality] || "";
+}
+
+function shouldAutomaticallyDowngrade() {
+  return Boolean(automaticPlaybackQuality(playbackQuality)) && !isLocalAccessPath();
 }
 
 function handlePlaybackError() {
@@ -2480,6 +2845,10 @@ function handlePlaybackError() {
 
 function requestPlaybackFallback(reason) {
   if (!activeSession || playbackFallbackInProgress || !isCompositeDisplay(activeDisplay) || !usesServerComposite()) return;
+  if (!shouldAutomaticallyDowngrade()) {
+    if (isLocalAccessPath()) showPlayerMessage(`${reason}，局域网自动模式保持原画，不会自动降级`);
+    return;
+  }
   playbackFallbackInProgress = true;
   recoverPlayback(reason).catch(() => {
     showPlayerMessage("自动降级失败，请手动选择单路原画");
@@ -2614,12 +2983,17 @@ function bufferedSeconds(video) {
 }
 
 function classifyAccessPath() {
+  if (isLocalAccessPath()) return "AP/局域网";
   const hostname = window.location.hostname.toLowerCase();
-  if (hostname.endsWith(".local") || hostname === "localhost" || hostname === "127.0.0.1") return "AP/局域网";
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname)) return "AP/局域网";
   const tailscale = hostname.match(/^100\.(\d+)\./);
   if (tailscale && Number(tailscale[1]) >= 64 && Number(tailscale[1]) <= 127) return "Tailscale";
   return navigator.onLine ? "公网或中继（待服务端确认）" : "浏览器离线";
+}
+
+function isLocalAccessPath() {
+  const hostname = window.location.hostname.toLowerCase();
+  if (hostname.endsWith(".local") || hostname === "localhost" || hostname === "127.0.0.1") return true;
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname);
 }
 
 function releaseVideoElement(element) {

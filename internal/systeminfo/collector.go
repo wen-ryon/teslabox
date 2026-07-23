@@ -222,3 +222,20 @@ func newUsage(total, available uint64) *Usage {
 		UsedPercent: float64(used) / float64(total) * 100,
 	}
 }
+
+func newFilesystemUsage(total, free, available uint64) *Usage {
+	if total == 0 {
+		return nil
+	}
+	if free > total {
+		free = total
+	}
+	if available > free {
+		available = free
+	}
+	used := total - free
+	return &Usage{
+		TotalBytes: total, UsedBytes: used, AvailableBytes: available,
+		UsedPercent: float64(used) / float64(total) * 100,
+	}
+}

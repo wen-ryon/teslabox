@@ -46,11 +46,17 @@ type EventMetadata struct {
 }
 
 // Scanner 只读取目录元数据，不打开视频内容，降低扫描开销。
-type Scanner struct{}
+type Scanner struct {
+	location *time.Location
+}
 
-// NewScanner 创建无状态扫描器。
-func NewScanner() *Scanner {
-	return &Scanner{}
+// NewScanner 创建使用车辆文件名时区的扫描器，避免依赖板子系统时区。
+func NewScanner(locations ...*time.Location) *Scanner {
+	location := time.Local
+	if len(locations) == 1 && locations[0] != nil {
+		location = locations[0]
+	}
+	return &Scanner{location: location}
 }
 
 // Scan 遍历 TeslaCam 和 TeslaTrackMode，并忽略临时及未知文件。
@@ -75,7 +81,7 @@ func (s *Scanner) Scan(root string) ([]Video, error) {
 				return nil
 			}
 			if strings.EqualFold(entry.Name(), "event.json") {
-				metadata, err := readEventMetadata(path)
+				metadata, err := readEventMetadata(path, s.location)
 				if err == nil {
 					events[filepath.Clean(filepath.Dir(path))] = metadata
 				}
@@ -92,7 +98,7 @@ func (s *Scanner) Scan(root string) ([]Video, error) {
 			if !strings.EqualFold(filepath.Ext(entry.Name()), ".mp4") {
 				return nil
 			}
-			video, ok, err := parseVideo(root, path, entry)
+			video, ok, err := parseVideo(root, path, entry, s.location)
 			if err != nil {
 				return err
 			}
@@ -126,7 +132,7 @@ func thumbnailID(relative string) string {
 	return hex.EncodeToString(digest[:8])
 }
 
-func readEventMetadata(path string) (*EventMetadata, error) {
+func readEventMetadata(path string, location *time.Location) (*EventMetadata, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -149,15 +155,15 @@ func readEventMetadata(path string) (*EventMetadata, error) {
 		City: strings.TrimSpace(raw.City), Street: strings.TrimSpace(raw.Street),
 		Reason: strings.TrimSpace(raw.Reason), Camera: strings.TrimSpace(raw.Camera),
 	}
-	metadata.OccurredAt = parseEventTime(strings.TrimSpace(raw.Timestamp))
+	metadata.OccurredAt = parseEventTime(strings.TrimSpace(raw.Timestamp), location)
 	metadata.Latitude = parseCoordinate(raw.EstLat, -90, 90)
 	metadata.Longitude = parseCoordinate(raw.EstLon, -180, 180)
 	return metadata, nil
 }
 
-func parseEventTime(value string) *time.Time {
+func parseEventTime(value string, location *time.Location) *time.Time {
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"} {
-		parsed, err := time.ParseInLocation(layout, value, time.Local)
+		parsed, err := time.ParseInLocation(layout, value, location)
 		if err == nil {
 			return &parsed
 		}
@@ -173,12 +179,12 @@ func parseCoordinate(value string, minimum, maximum float64) *float64 {
 	return &parsed
 }
 
-func parseVideo(root, path string, entry fs.DirEntry) (Video, bool, error) {
+func parseVideo(root, path string, entry fs.DirEntry, location *time.Location) (Video, bool, error) {
 	matches := videoNamePattern.FindStringSubmatch(strings.ToLower(entry.Name()))
 	if len(matches) != 3 {
 		return Video{}, false, nil
 	}
-	recordedAt, err := time.ParseInLocation("2006-01-02_15-04-05", matches[1], time.Local)
+	recordedAt, err := time.ParseInLocation("2006-01-02_15-04-05", matches[1], location)
 	if err != nil {
 		return Video{}, false, nil
 	}

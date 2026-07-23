@@ -102,7 +102,6 @@ func TestRunRejectsUnsafeDevices(t *testing.T) {
 		mutate func(*Device)
 	}{
 		{name: "not disk", mutate: func(d *Device) { d.Type = "part" }},
-		{name: "not usb", mutate: func(d *Device) { d.Transport = "nvme" }},
 		{name: "serial mismatch", mutate: func(d *Device) { d.Serial = "other" }},
 		{name: "too small", mutate: func(d *Device) { d.Size = 1024 }},
 		{name: "mounted child", mutate: func(d *Device) {
@@ -132,12 +131,53 @@ func TestRunRejectsUnsafeDevices(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsNVMeWholeDisk(t *testing.T) {
+	t.Parallel()
+	device := validDevice()
+	device.RequestedPath = "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123"
+	device.ResolvedPath = "/dev/nvme0n1"
+	device.Transport = "nvme"
+	options := validOptions()
+	options.Device = device.RequestedPath
+	options.Execute = true
+	runner := &fakeRunner{}
+
+	result, err := New(fakeInspector{device: device}, runner).Run(t.Context(), options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Partition != "/dev/nvme0n1p1" || !result.WasExecuted {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestRunRejectsPartitionStablePath(t *testing.T) {
 	options := validOptions()
 	options.Device += "-part1"
 	_, err := New(fakeInspector{device: validDevice()}, &fakeRunner{}).Run(context.Background(), options)
 	if err == nil {
 		t.Fatal("Run() error = nil, want stable whole-disk path error")
+	}
+}
+
+func TestIsWholeDiskStablePath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "usb disk", path: "/dev/disk/by-id/usb-TESLADRIVE_ABC-0:0", want: true},
+		{name: "nvme disk", path: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123", want: true},
+		{name: "partition", path: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7ABC123-part1", want: false},
+		{name: "temporary device path", path: "/dev/nvme0n1", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsWholeDiskStablePath(test.path); got != test.want {
+				t.Fatalf("IsWholeDiskStablePath(%q) = %t, want %t", test.path, got, test.want)
+			}
+		})
 	}
 }
 

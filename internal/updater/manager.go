@@ -63,6 +63,7 @@ type Config struct {
 	MaximumSize    int64
 	Logger         *slog.Logger
 	CanInstall     func() error
+	AutoReboot     func() bool
 }
 
 // ServiceStarter 只允许启动预先安装的固定 systemd 单元，避免把远程字段拼进命令。
@@ -276,6 +277,9 @@ func (m *Manager) Install(ctx context.Context) (Status, error) {
 		Version: m.manifest.Version, PackageName: filepath.Base(m.packagePath),
 		SHA256: m.manifest.SHA256, Size: m.manifest.Size,
 	}
+	if m.config.AutoReboot != nil {
+		request.RebootAfterInstall = m.config.AutoReboot()
+	}
 	if err := writeJSONAtomic(m.config.RequestPath, request, 0o600); err != nil {
 		return m.Status(), fmt.Errorf("保存安装请求: %w", err)
 	}
@@ -354,10 +358,11 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 
 // InstallRequest 是主服务和 root 安装助手之间的最小可信请求。
 type InstallRequest struct {
-	Version     string `json:"version"`
-	PackageName string `json:"package_name"`
-	SHA256      string `json:"sha256"`
-	Size        int64  `json:"size"`
+	Version            string `json:"version"`
+	PackageName        string `json:"package_name"`
+	SHA256             string `json:"sha256"`
+	Size               int64  `json:"size"`
+	RebootAfterInstall bool   `json:"reboot_after_install,omitempty"`
 }
 
 // InstallResult 由独立安装助手原子写入，供重启后的页面展示结果。

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
 const minimumDriveSize = 32 * 1000 * 1000 * 1000
+
+var partitionStablePathPattern = regexp.MustCompile(`-part[0-9]+$`)
 
 // Options 保存一次数据盘初始化所需的全部显式约束。
 type Options struct {
@@ -173,8 +176,8 @@ func (i *Initializer) Run(ctx context.Context, options Options) (Result, error) 
 }
 
 func validateOptions(options Options) error {
-	if !strings.HasPrefix(options.Device, "/dev/disk/by-id/usb-") || strings.Contains(options.Device, "-part") {
-		return errors.New("device 必须是 /dev/disk/by-id/usb-* 形式的 USB 整盘稳定路径")
+	if !IsWholeDiskStablePath(options.Device) {
+		return errors.New("device 必须是 /dev/disk/by-id/ 下的整盘稳定路径")
 	}
 	if strings.TrimSpace(options.ConfirmSerial) == "" {
 		return errors.New("confirm-serial 不能为空")
@@ -195,9 +198,6 @@ func validateDevice(device Device, expectedSerial string) error {
 	if device.Type != "disk" {
 		return fmt.Errorf("目标不是整盘: type=%q", device.Type)
 	}
-	if device.Transport != "usb" {
-		return fmt.Errorf("目标不是 USB 设备: tran=%q", device.Transport)
-	}
 	if device.Serial != expectedSerial {
 		return fmt.Errorf("设备序列号不匹配: expected=%q actual=%q", expectedSerial, device.Serial)
 	}
@@ -208,6 +208,18 @@ func validateDevice(device Device, expectedSerial string) error {
 		return fmt.Errorf("目标设备正在被系统使用: %s", reason)
 	}
 	return nil
+}
+
+// IsWholeDiskStablePath 判断路径是否为 /dev/disk/by-id 下的整盘链接。
+// 初始化只接受稳定链接，避免 /dev/sdX 等会在重启或插拔后改变的临时设备名。
+func IsWholeDiskStablePath(name string) bool {
+	cleaned := path.Clean(name)
+	root := "/dev/disk/by-id"
+	if !strings.HasPrefix(cleaned, root+"/") || cleaned == root {
+		return false
+	}
+	base := path.Base(cleaned)
+	return base != "." && base != string(filepath.Separator) && !partitionStablePathPattern.MatchString(base)
 }
 
 func findUnsafeUse(device Device) (bool, string) {

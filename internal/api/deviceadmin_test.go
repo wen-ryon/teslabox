@@ -15,6 +15,7 @@ import (
 type fakeDeviceAdmin struct {
 	status            deviceadmin.WiFiStatus
 	autoConnectUpdate deviceadmin.AutoConnectUpdate
+	ipv4Update        deviceadmin.IPv4Update
 	powerAction       string
 }
 
@@ -27,6 +28,10 @@ func (a *fakeDeviceAdmin) Scan(context.Context) ([]deviceadmin.AccessPoint, erro
 func (a *fakeDeviceAdmin) Connect(context.Context, deviceadmin.ConnectRequest) error { return nil }
 func (a *fakeDeviceAdmin) SetAutoConnect(_ context.Context, update deviceadmin.AutoConnectUpdate) error {
 	a.autoConnectUpdate = update
+	return nil
+}
+func (a *fakeDeviceAdmin) UpdateIPv4(_ context.Context, update deviceadmin.IPv4Update) error {
+	a.ipv4Update = update
 	return nil
 }
 func (a *fakeDeviceAdmin) Forget(context.Context, string) error { return nil }
@@ -65,6 +70,17 @@ func TestDeviceAdminRoutes(t *testing.T) {
 	handler.ServeHTTP(autoConnect, autoConnectRequest)
 	if autoConnect.Code != http.StatusOK || !admin.autoConnectUpdate.Enabled {
 		t.Fatalf("autoconnect status = %d, update = %#v", autoConnect.Code, admin.autoConnectUpdate)
+	}
+
+	ipv4 := httptest.NewRecorder()
+	ipv4Request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/network/wifi/ipv4",
+		strings.NewReader(`{"uuid":"11111111-1111-1111-1111-111111111111","mode":"static","address":"192.0.2.20","subnet_mask":"255.255.255.0","gateway":"192.0.2.1","dns":["223.5.5.5","1.1.1.1"]}`),
+	)
+	handler.ServeHTTP(ipv4, ipv4Request)
+	if ipv4.Code != http.StatusOK || admin.ipv4Update.Mode != "static" || len(admin.ipv4Update.DNS) != 2 {
+		t.Fatalf("ipv4 status = %d, update = %#v", ipv4.Code, admin.ipv4Update)
 	}
 
 	power := httptest.NewRecorder()

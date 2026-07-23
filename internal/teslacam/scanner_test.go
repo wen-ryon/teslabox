@@ -4,7 +4,28 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestScannerUsesConfiguredVehicleTimeZone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	directory := filepath.Join(root, "TeslaCam", "RecentClips")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "2026-07-23_08-00-00-front.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	location := time.FixedZone("UTC+08", 8*60*60)
+	videos, err := NewScanner(location).Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(videos) != 1 || videos[0].RecordedAt.Hour() != 8 || videos[0].RecordedAt.Location() != location {
+		t.Fatalf("recorded time = %#v", videos)
+	}
+}
 
 func TestScannerScan(t *testing.T) {
 	root := t.TempDir()
