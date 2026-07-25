@@ -91,7 +91,7 @@ func main() {
 		logger.Warn("无法迁移旧版 AP 系统组件，主服务继续启动", "error", apMigrationErr)
 	} else if apMigration.Script || apMigration.Unit {
 		logger.Info(
-			"已迁移旧版 AP 系统组件，下次开机或无线网卡热插拔时生效",
+			"已迁移旧版 AP 系统组件，新版接口探测已调度",
 			"script", apMigration.Script,
 			"unit", apMigration.Unit,
 		)

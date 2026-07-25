@@ -25,6 +25,8 @@ var (
 		"e49dbbe68f4402c581238c3d55dc2906bdfc18a5c9f81d3d59ceb2b5a80244b3": {},
 		// v0.1.8 至 v0.1.10 已探测硬件能力，但尚未尊重热点开机自动连接开关。
 		"2089669d49339e1d0ec39b5e78032490b7bea12c9eb382e40043e958528ac11a": {},
+		// v0.1.11 至 v0.1.12-test.1 在热点关闭后不再创建可管理接口，导致设置中心无法重新开启热点。
+		"22d4b3ef82bc4541b0e9f3ee59460d6697435502474ec9da213588a6204f9b7f": {},
 	}
 	legacyAPUnitHashes = map[string]struct{}{
 		// v0.1.7 的 RemainAfterExit=yes 会阻止无线设备重新出现时再次执行探测。
@@ -45,7 +47,8 @@ type APComponentMigration struct {
 }
 
 // UpgradeLegacyAPComponents 只替换已知发行版摘要对应的旧文件。
-// 管理员自行修改的脚本或 unit 不会被覆盖，迁移也不会启动热点或改变当前无线连接。
+// 管理员自行修改的脚本或 unit 不会被覆盖；替换官方脚本后异步探测一次，
+// 让关闭状态只准备接口而不启动热点，已启用状态继续遵循 NetworkManager 自动连接配置。
 func UpgradeLegacyAPComponents(
 	ctx context.Context,
 	paths APComponentPaths,
@@ -95,6 +98,11 @@ func UpgradeLegacyAPComponents(
 		}
 		if _, reloadErr := runner.Run(ctx, "systemctl", "daemon-reload"); reloadErr != nil {
 			return APComponentMigration{Script: scriptChanged, Unit: true}, fmt.Errorf("重新加载 AP unit: %w", reloadErr)
+		}
+	}
+	if scriptChanged {
+		if _, startErr := runner.Run(ctx, "systemctl", "--no-block", "start", "teslabox-ap.service"); startErr != nil {
+			return APComponentMigration{Script: true, Unit: unitChanged}, fmt.Errorf("调度新版 AP 接口探测: %w", startErr)
 		}
 	}
 	return APComponentMigration{Script: scriptChanged, Unit: unitChanged}, nil
