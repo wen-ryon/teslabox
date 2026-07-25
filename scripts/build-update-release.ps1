@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$root = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, ".."))
 $privateKeyPath = (Resolve-Path $PrivateKey).Path
 if ($privateKeyPath.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The release private key must be stored outside the repository."
