@@ -97,26 +97,6 @@ func TestAPSettingsIncludesInterfaceDetails(t *testing.T) {
 	}
 }
 
-func TestAPSettingsKeepsPreparedDisabledHotspotManageable(t *testing.T) {
-	t.Parallel()
-	const apUUID = "11111111-1111-1111-1111-111111111111"
-	runner := &fakeRunner{responses: map[string]string{
-		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless::no\n",
-		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n40\nwpa-psk\nshared\n192.168.88.1/24\n",
-		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
-		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:disconnected\nwlan0:wifi:connected\n",
-	}}
-	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	settings, err := manager.APSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !settings.Available || settings.Enabled || settings.AutoConnect || settings.Interface != "ap0" {
-		t.Fatalf("settings = %#v", settings)
-	}
-}
-
 func TestAPSettingsReportsUnavailableWithoutWirelessDevice(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{

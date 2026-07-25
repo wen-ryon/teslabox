@@ -7,10 +7,9 @@ AP_AUTOCONNECT=$(
 		sed -n '1p' || true
 )
 case "$AP_AUTOCONNECT" in
-	yes|true|1) AP_AUTO_START=true ;;
-	no|false|0) AP_AUTO_START=false ;;
+	yes|true|1) ;;
 	*)
-		echo "teslabox-ap-setup: 未找到可管理的热点配置，跳过热点接口探测" >&2
+		echo "teslabox-ap-setup: 热点未启用开机自动连接，跳过接口创建" >&2
 		exit 0
 		;;
 esac
@@ -57,15 +56,11 @@ while [ -z "$WIFI_INTERFACE" ]; do
 	sleep 1
 done
 
-# 热点需要自动启动时等待上游连接完成，让单射频热点直接落在相同信道；
-# 热点已关闭时只读取一次当前状态，接口准备不能拖慢主服务升级。
+# 优先等待上游自动连接完成，让单射频热点直接落在相同信道；
+# 上游不可用时最多等待 20 秒，不能因此阻止本地管理热点启动。
 attempt=0
 UPSTREAM_CHANNEL=""
-UPSTREAM_WAIT_LIMIT=1
-if [ "$AP_AUTO_START" = "true" ]; then
-	UPSTREAM_WAIT_LIMIT=20
-fi
-while [ "$attempt" -lt "$UPSTREAM_WAIT_LIMIT" ]; do
+while [ "$attempt" -lt 20 ]; do
 	wlan_state=$(/usr/bin/nmcli -g GENERAL.STATE device show "$WIFI_INTERFACE" 2>/dev/null || true)
 	case "$wlan_state" in
 		100*)
@@ -265,11 +260,6 @@ else
 	/usr/bin/nmcli connection modify id "$AP_CONNECTION_NAME" \
 		802-11-wireless.band "$(band_for_channel "$PROFILE_CHANNEL")" \
 		802-11-wireless.channel "$PROFILE_CHANNEL"
-fi
-
-if [ "$AP_AUTO_START" != "true" ]; then
-	echo "teslabox-ap-setup: 热点保持关闭，已准备可管理接口 $AP_INTERFACE" >&2
-	exit 0
 fi
 
 /usr/bin/nmcli --wait 20 connection up id "$AP_CONNECTION_NAME" ifname "$AP_INTERFACE"

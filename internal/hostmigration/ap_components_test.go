@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -96,70 +95,9 @@ func TestUpgradeLegacyAPComponentsStopsExitedUnitWithoutStartingAP(t *testing.T)
 		t.Fatalf("runner calls = %#v", runner.calls)
 	}
 	for _, call := range runner.calls {
-		if strings.Contains(call, " start ") || strings.Contains(call, " restart ") {
+		if call == "systemctl start teslabox-ap.service" || call == "systemctl restart teslabox-ap.service" {
 			t.Fatalf("迁移不应启动热点: %#v", runner.calls)
 		}
-	}
-}
-
-func TestUpgradeLegacyAPComponentsSchedulesProbeAfterKnownScriptReplacement(t *testing.T) {
-	root := t.TempDir()
-	scriptPath := filepath.Join(root, "teslabox-ap-setup.sh")
-	unitPath := filepath.Join(root, "teslabox-ap.service")
-	legacyScript := []byte("#!/bin/sh\n# published release fixture\n")
-	currentUnit, err := managedAPAssets.ReadFile("assets/teslabox-ap.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scriptPath, legacyScript, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(unitPath, currentUnit, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(legacyScript)
-	hash := hex.EncodeToString(digest[:])
-	legacyAPScriptHashes[hash] = struct{}{}
-	defer delete(legacyAPScriptHashes, hash)
-
-	runner := &recordingRunner{}
-	result, err := UpgradeLegacyAPComponents(context.Background(), APComponentPaths{
-		Script: scriptPath,
-		Unit:   unitPath,
-	}, runner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Script || result.Unit {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(runner.calls) != 1 || runner.calls[0] != "systemctl --no-block start teslabox-ap.service" {
-		t.Fatalf("runner calls = %#v", runner.calls)
-	}
-}
-
-func TestManagedAPScriptPreparesDisabledProfileWithoutStartingHotspot(t *testing.T) {
-	t.Parallel()
-	script, err := managedAPAssets.ReadFile("assets/teslabox-ap-setup.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(script)
-	prepareGuard := strings.Index(content, `if [ "$AP_AUTO_START" != "true" ]; then`)
-	connectionUp := strings.LastIndex(content, `/usr/bin/nmcli --wait 20 connection up`)
-	if !strings.Contains(content, "no|false|0) AP_AUTO_START=false") ||
-		prepareGuard < 0 ||
-		connectionUp < 0 ||
-		prepareGuard > connectionUp {
-		t.Fatalf("关闭状态必须完成能力探测和接口准备后，在激活热点前退出")
-	}
-}
-
-func TestPublishedV0112Test1APScriptRemainsMigratable(t *testing.T) {
-	t.Parallel()
-	const publishedHash = "22d4b3ef82bc4541b0e9f3ee59460d6697435502474ec9da213588a6204f9b7f"
-	if _, ok := legacyAPScriptHashes[publishedHash]; !ok {
-		t.Fatalf("缺少已发布 v0.1.12-test.1 AP 脚本摘要")
 	}
 }
 
