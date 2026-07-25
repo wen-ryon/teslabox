@@ -78,7 +78,6 @@ $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
 $binaryChecksum = Join-Path $output "teslabox-linux-arm64.sha256"
 $helperChecksum = Join-Path $output "teslabox-update-helper-linux-arm64.sha256"
-# 发布校验文件固定使用 LF；Windows PowerShell 的 Set-Content 默认会写入 CRLF。
 $binaryChecksumContent = "$binaryHash  teslabox-linux-arm64`n"
 $helperChecksumContent = "$helperHash  teslabox-update-helper-linux-arm64`n"
 [IO.File]::WriteAllText($binaryChecksum, $binaryChecksumContent, [Text.Encoding]::ASCII)
