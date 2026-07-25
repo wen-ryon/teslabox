@@ -294,6 +294,10 @@ func (m *Manager) startNetworkWatcher(ctx context.Context, events chan<- network
 }
 
 func (m *Manager) reconcileForNetworkChange(ctx context.Context, retryTimer *time.Timer) {
+	if !m.recoveryDue() {
+		m.scheduleRecoveryRetry(retryTimer)
+		return
+	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, recoveryTimeout)
 	recovered, ssid, err := m.reconcileAutoConnect(recoveryCtx)
 	cancel()
@@ -308,9 +312,11 @@ func (m *Manager) reconcileForNetworkChange(ctx context.Context, retryTimer *tim
 	if recovered {
 		m.recordRecovery(ssid, true, nil)
 		m.logger.Info("上游 WiFi 已自动恢复", "ssid", ssid)
+		stopTimer(retryTimer)
 		return
 	}
 	m.clearRecoveryFailure()
+	stopTimer(retryTimer)
 }
 
 func (m *Manager) reconcileForFallback(ctx context.Context, retryTimer *time.Timer) {
@@ -466,6 +472,11 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 	if status.APActive && !status.ConcurrentMode {
 		return false, "", nil
 	}
+	if state, stateErr := m.wifiInterfaceState(ctx, status.Interface); stateErr == nil && networkManagerActivationInProgress(state) {
+		// NetworkManager 的启动自动连接可能仍在认证或获取地址；重复 connection up
+		// 会重置同一激活流程，并让短暂的 CLI 等待超时演变成持续断连。
+		return false, "", nil
+	}
 	if current, found := currentAutoConnectNetwork(status); found {
 		available, listErr := m.cachedAccessPoints(ctx, status.Interface, map[string]bool{})
 		if listErr != nil {
@@ -486,6 +497,13 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 				return false, current.SSID, fmt.Errorf("更新 %s BSSID: %w", current.SSID, err)
 			}
 			if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID, "ifname", status.Interface); err != nil {
+				activated, pending := m.activationStateAfterWaitTimeout(ctx, status.Interface, err)
+				if activated {
+					return true, current.SSID, nil
+				}
+				if pending {
+					return false, "", nil
+				}
 				return false, current.SSID, fmt.Errorf("恢复 %s: %w", current.SSID, err)
 			}
 			return true, current.SSID, nil
@@ -506,6 +524,7 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 	}
 	var failures []error
 	visible := false
+	failedSSID := ""
 	for _, candidate := range candidates {
 		target, found := findAccessPoint(available, candidate.network.SSID)
 		if !found {
@@ -515,21 +534,31 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 		if status.APActive && status.ConcurrentMode && status.ChannelCoupled {
 			if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
 				failures = append(failures, fmt.Errorf("同步 %s 热点信道: %w", candidate.network.SSID, err))
+				failedSSID = candidate.network.SSID
 				continue
 			}
 		}
 		if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", candidate.network.UUID, "802-11-wireless.bssid", target.BSSID); err != nil {
 			failures = append(failures, fmt.Errorf("更新 %s BSSID: %w", candidate.network.SSID, err))
+			failedSSID = candidate.network.SSID
 			continue
 		}
 		if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", candidate.network.UUID, "ifname", status.Interface); err != nil {
+			activated, pending := m.activationStateAfterWaitTimeout(ctx, status.Interface, err)
+			if activated {
+				return true, candidate.network.SSID, nil
+			}
+			if pending {
+				return false, "", nil
+			}
 			failures = append(failures, fmt.Errorf("连接 %s: %w", candidate.network.SSID, err))
+			failedSSID = candidate.network.SSID
 			continue
 		}
 		return true, candidate.network.SSID, nil
 	}
 	if len(failures) > 0 {
-		return false, candidates[0].network.SSID, errors.Join(failures...)
+		return false, failedSSID, errors.Join(failures...)
 	}
 	if !visible {
 		return false, candidates[0].network.SSID, errAutoNetworkInvisible
@@ -538,11 +567,44 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 }
 
 func (m *Manager) wifiInterfaceConnected(ctx context.Context, interfaceName string) (bool, error) {
+	state, err := m.wifiInterfaceState(ctx, interfaceName)
+	return state == 100, err
+}
+
+func (m *Manager) wifiInterfaceState(ctx context.Context, interfaceName string) (int, error) {
 	output, err := m.run(ctx, "nmcli", "-g", "GENERAL.STATE", "device", "show", interfaceName)
 	if err != nil {
-		return false, fmt.Errorf("读取 %s 连接状态: %w", interfaceName, err)
+		return 0, fmt.Errorf("读取 %s 连接状态: %w", interfaceName, err)
 	}
-	return strings.HasPrefix(strings.TrimSpace(string(output)), "100"), nil
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("读取 %s 连接状态: 返回为空", interfaceName)
+	}
+	state, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, fmt.Errorf("读取 %s 连接状态: %w", interfaceName, err)
+	}
+	return state, nil
+}
+
+func networkManagerActivationInProgress(state int) bool {
+	return state >= 40 && state < 100 || state == 110
+}
+
+func isNMCLIWaitTimeout(err error) bool {
+	var commandError *system.CommandError
+	return errors.As(err, &commandError) && commandError.Code == 3
+}
+
+func (m *Manager) activationStateAfterWaitTimeout(ctx context.Context, interfaceName string, waitErr error) (bool, bool) {
+	if !isNMCLIWaitTimeout(waitErr) {
+		return false, false
+	}
+	state, err := m.wifiInterfaceState(ctx, interfaceName)
+	if err != nil {
+		return false, false
+	}
+	return state == 100, networkManagerActivationInProgress(state)
 }
 
 func currentAutoConnectNetwork(status WiFiStatus) (SavedNetwork, bool) {
@@ -629,6 +691,12 @@ func (m *Manager) clearRecoveryFailure() {
 	m.recovery.LastError = ""
 	m.recovery.Failures = 0
 	m.recovery.NextAttemptAt = nil
+}
+
+func (m *Manager) recoveryDue() bool {
+	m.recoveryMu.RLock()
+	defer m.recoveryMu.RUnlock()
+	return m.recovery.NextAttemptAt == nil || !time.Now().Before(*m.recovery.NextAttemptAt)
 }
 
 // Scan 手动请求 NetworkManager 扫描，并返回按 SSID 去重后的结果。
