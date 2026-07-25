@@ -58,7 +58,7 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "app.css?v=20260725-2", "app.js?v=20260725-2",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "app.css?v=20260725-2", "app.js?v=20260725-3",
 		"toast-region",
 		"自动（当前：高清）", "流畅（480p · 20 FPS）", "标清（720p · 24 FPS）", "高清（720p · 30 FPS）", "<option value=\"original\">原画</option>",
 	} {
@@ -208,6 +208,9 @@ func TestHandlerServesPlaybackFailureFallback(t *testing.T) {
 		"waitForMetadata(sessionVideo, 15000)", "function waitForMetadata(video, timeout = 4000)",
 		"原画不可用，已自动切换到高清合成", "已自动降至", "已自动切换到单路原画", "播放连续卡顿超过 8 秒", `sessionVideo.addEventListener("error"`,
 		"refreshRecordings", `request("/api/v1/scan"`, "timelinePositionPending", "eventCameraView", "track-segment continuous",
+		"pendingCompositeTracks", "releaseCompositeTrackMap", "token !== loadToken", `element.preload = "metadata"`,
+		"原画多路视频加载失败，请重试或切换“自动”画质", "finishSessionVideoLoad",
+		"reportCompositeLoadFailures", "showCompositeTrackLoadFailure", "已保留其余",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("播放器缺少失败自动降级标记 %q", marker)

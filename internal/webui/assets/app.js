@@ -45,6 +45,7 @@ let activeDisplay = normalizeDisplayMode(readPreference("teslabox-player-layout"
 let recentSessions = [];
 let archivedSessions = [];
 let compositeTracks = new Map();
+let pendingCompositeTracks = new Map();
 let lastCompositeSync = 0;
 let pendingWiFi = null;
 let pendingWiFiIPv4Network = null;
@@ -2295,32 +2296,41 @@ function renderEventMarker() {
 async function loadSessionPosition(position, autoplay) {
   if (!activeSession) return false;
   const requestID = ++timelinePositionRequestID;
+  const token = ++loadToken;
   timelinePositionPending = true;
   requestedPosition = Math.max(0, Math.min(Number(position), Number(activeSession.duration_seconds)));
   try {
-    if (isCompositeDisplay(activeDisplay)) return await loadCompositePosition(requestedPosition, autoplay);
+    if (isCompositeDisplay(activeDisplay)) return await loadCompositePosition(requestedPosition, autoplay, token);
     const selection = selectVideoAtPosition(activeSession, activeCamera, requestedPosition);
     $("session-timeline").value = String(requestedPosition);
     $("current-time").textContent = formatDuration(requestedPosition);
     if (!selection) {
       showPlayerMessage("这个时刻缺少当前视角录像");
-      sessionVideo.pause();
+      releaseCompositeAuxiliaryTracks();
+      releaseVideoElement(sessionVideo);
       return false;
     }
     hidePlayerMessage();
     activeMomentIndex = selection.momentIndex;
     activeVideo = selection.video;
-    if (usesServerTranscode()) return await loadServerSingle(selection, autoplay);
+    if (usesServerTranscode()) return await loadServerSingle(selection, autoplay, token);
     $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
     $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
-    const token = ++loadToken;
     const source = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`;
     delete sessionVideo.dataset.compositeKey;
-    if (sessionVideo.dataset.videoId !== activeVideo.id || sessionVideo.getAttribute("src") !== source) {
+    if (sessionVideo.dataset.videoId !== activeVideo.id || sessionVideo.getAttribute("src") !== source ||
+        sessionVideo.readyState < 1 || sessionVideo.error) {
+      sessionVideo.pause();
+      sessionVideo.dataset.loadingToken = String(token);
       sessionVideo.dataset.videoId = activeVideo.id;
       sessionVideo.src = source;
       sessionVideo.load();
-      if (!await waitForMetadata(sessionVideo)) {
+      const loaded = await waitForMetadata(sessionVideo, 8000);
+      if (token !== loadToken) return false;
+      finishSessionVideoLoad(token);
+      if (!loaded) {
+        reportPlaybackDiagnostic("load_failed", "单路原画视频元数据加载失败");
+        releaseVideoElement(sessionVideo);
         showPlayerMessage("单路视频加载失败，请稍后重试");
         return false;
       }
@@ -2339,11 +2349,12 @@ async function loadSessionPosition(position, autoplay) {
   }
 }
 
-async function loadCompositePosition(position, autoplay) {
+async function loadCompositePosition(position, autoplay, token) {
   const selection = selectMomentAtPosition(activeSession, position);
   if (!selection || selection.moment.videos.length === 0) {
     showPlayerMessage("这个时刻没有可播放的摄像头画面");
-    pauseCompositeTracks();
+    releaseCompositeAuxiliaryTracks();
+    releaseVideoElement(sessionVideo);
     return false;
   }
   hidePlayerMessage();
@@ -2354,62 +2365,86 @@ async function loadCompositePosition(position, autoplay) {
     .filter(Boolean);
   if (layoutVideos.length === 0) {
     showPlayerMessage("这个时刻缺少当前布局需要的摄像头画面");
-    pauseCompositeTracks();
+    releaseCompositeAuxiliaryTracks();
+    releaseVideoElement(sessionVideo);
     return false;
   }
   const masterVideo = layoutVideos.find((video) => video.camera === "front") || layoutVideos[0];
   activeCamera = masterVideo.camera;
   activeVideo = masterVideo;
   if (usesServerComposite()) {
-    return await loadServerComposite(selection, layout, masterVideo, autoplay);
+    return await loadServerComposite(selection, layout, masterVideo, autoplay, token);
   }
   delete sessionVideo.dataset.compositeKey;
-  const token = ++loadToken;
+  // 换段或拖动时先释放上一批 Range 请求，避免旧请求占满浏览器连接并污染新一批播放器。
+  releaseCompositeAuxiliaryTracks();
+  resetCompositePlaceholders();
   const nextTracks = new Map();
-  const preparations = layoutVideos.map(async (video) => {
+  layoutVideos.forEach((video) => {
     const element = video.id === masterVideo.id ? sessionVideo : compositeVideoElement(video.camera);
     element.muted = true;
-    element.preload = "auto";
+    element.preload = "metadata";
     attachCompositeElement(video.camera, element);
-    const loaded = await prepareVideoElement(element, video, selection.absolute);
     nextTracks.set(video.camera, {element, video, lastHardSync: 0});
-    return loaded;
   });
+  pendingCompositeTracks = nextTracks;
+  const preparations = [...nextTracks.values()].map((track) =>
+    prepareVideoElement(track.element, track.video, selection.absolute, token));
   const prepared = await Promise.all(preparations);
-  if (!prepared.every(Boolean)) {
-    nextTracks.forEach((track) => {
-      if (track.element !== sessionVideo) releaseVideoElement(track.element);
-    });
-    sessionVideo.pause();
-    showPlayerMessage("原画多路视频加载失败，正在尝试压缩画质");
-    requestPlaybackFallback("原画多路视频加载失败");
+  // 新一次拖动会接管并释放本批辅助元素，过期任务不得再暂停或清理当前播放器。
+  if (token !== loadToken) return false;
+  if (pendingCompositeTracks === nextTracks) pendingCompositeTracks = new Map();
+  const trackEntries = [...nextTracks.entries()];
+  const failedTracks = trackEntries.filter((_, index) => !prepared[index]);
+  const masterLoaded = prepared[trackEntries.findIndex(([camera]) => camera === masterVideo.camera)];
+  if (!masterLoaded || (failedTracks.length > 0 && canAutomaticallyFallback())) {
+    reportCompositeLoadFailures(failedTracks);
+    releaseCompositeTrackMap(nextTracks);
+    releaseVideoElement(sessionVideo);
+    if (canAutomaticallyFallback()) {
+      showPlayerMessage("原画多路视频加载失败，正在尝试压缩画质");
+      requestPlaybackFallback("原画多路视频加载失败");
+    } else {
+      showPlayerMessage("原画多路视频加载失败，请重试或切换“自动”画质");
+    }
     return false;
   }
-  if (token !== loadToken) return false;
+  if (failedTracks.length > 0) {
+    reportCompositeLoadFailures(failedTracks);
+    failedTracks.forEach(([camera, track]) => {
+      releaseVideoElement(track.element);
+      nextTracks.delete(camera);
+      showCompositeTrackLoadFailure(camera);
+    });
+    showPlayerMessage(`部分原画视角加载失败，已保留其余 ${nextTracks.size} 路；切换布局或再次拖动可重试`);
+  }
   applyCompositeFrameGeometry(nextTracks.get(masterVideo.camera)?.element);
   clearUnusedCompositeTracks(nextTracks);
   compositeTracks = nextTracks;
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${layoutVideos.length} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
+  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   renderCameraSwitcher();
   if (autoplay) await playCompositeTracks();
   return true;
 }
 
-async function loadServerComposite(selection, layout, masterVideo, autoplay) {
+async function loadServerComposite(selection, layout, masterVideo, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
-  const token = ++loadToken;
   const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}`;
   const sourceKey = `${selection.moment.id}:${activeDisplay}:${effectivePlaybackQuality}`;
-  if (sessionVideo.dataset.compositeKey !== sourceKey) {
+  if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
     sessionVideo.pause();
+    sessionVideo.dataset.loadingToken = String(token);
     sessionVideo.dataset.compositeKey = sourceKey;
     sessionVideo.dataset.videoId = masterVideo.id;
     sessionVideo.src = source;
     sessionVideo.load();
     const loaded = await waitForMetadata(sessionVideo, 15000);
+    if (token !== loadToken) return false;
+    finishSessionVideoLoad(token);
     if (!loaded) {
       reportPlaybackDiagnostic("load_failed", "板端合成视频元数据加载失败");
+      releaseVideoElement(sessionVideo);
       requestPlaybackFallback("板端合成视频加载失败");
       return false;
     }
@@ -2429,19 +2464,23 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay) {
   return true;
 }
 
-async function loadServerSingle(selection, autoplay) {
+async function loadServerSingle(selection, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
-  const token = ++loadToken;
   const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=single&camera=${encodeURIComponent(activeCamera)}&quality=${encodeURIComponent(effectivePlaybackQuality)}`;
   const sourceKey = `${selection.moment.id}:single:${activeCamera}:${effectivePlaybackQuality}`;
   delete sessionVideo.dataset.videoId;
-  if (sessionVideo.dataset.compositeKey !== sourceKey) {
+  if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
     sessionVideo.pause();
+    sessionVideo.dataset.loadingToken = String(token);
     sessionVideo.dataset.compositeKey = sourceKey;
     sessionVideo.src = source;
     sessionVideo.load();
-    if (!await waitForMetadata(sessionVideo, 15000)) {
+    const loaded = await waitForMetadata(sessionVideo, 15000);
+    if (token !== loadToken) return false;
+    finishSessionVideoLoad(token);
+    if (!loaded) {
       reportPlaybackDiagnostic("load_failed", "单路转码视频元数据加载失败");
+      releaseVideoElement(sessionVideo);
       showPlayerMessage("单路转码视频加载失败，请稍后重试");
       return false;
     }
@@ -2520,6 +2559,13 @@ function ensureCompositeTiles() {
   });
 }
 
+function resetCompositePlaceholders() {
+  ensureCompositeTiles();
+  compositeGrid.querySelectorAll(".composite-tile-placeholder").forEach((placeholder) => {
+    placeholder.textContent = "该分钟缺少画面";
+  });
+}
+
 function attachCompositeElement(camera, element) {
   ensureCompositeTiles();
   const tile = compositeGrid.querySelector(`[data-camera="${camera}"]`);
@@ -2528,18 +2574,35 @@ function attachCompositeElement(camera, element) {
   element.hidden = false;
 }
 
-async function prepareVideoElement(element, video, absolute) {
+function showCompositeTrackLoadFailure(camera) {
+  const placeholder = compositeGrid.querySelector(`[data-camera="${camera}"] .composite-tile-placeholder`);
+  if (!placeholder) return;
+  placeholder.textContent = "画面加载失败，可切换布局重试";
+  placeholder.hidden = false;
+}
+
+function reportCompositeLoadFailures(failedTracks) {
+  const details = failedTracks.map(([camera, track]) =>
+    `${cameraLabel(camera)}(错误 ${track.element.error?.code || 0}/状态 ${track.element.readyState || 0})`);
+  reportPlaybackDiagnostic("load_failed", `原画多路视频元数据加载失败${details.length ? `：${details.join("、")}` : ""}`);
+}
+
+async function prepareVideoElement(element, video, absolute, token) {
   const source = `/api/v1/videos/${encodeURIComponent(video.id)}/content`;
-  if (element.dataset.videoId !== video.id || element.getAttribute("src") !== source) {
+  if (element.dataset.videoId !== video.id || element.getAttribute("src") !== source ||
+      element.readyState < 1 || element.error) {
     element.pause();
+    if (element === sessionVideo) element.dataset.loadingToken = String(token);
     element.dataset.videoId = video.id;
     element.src = source;
     element.load();
-    if (!await waitForMetadata(element)) return false;
-  } else if (element.readyState < 1) {
-    element.load();
-    if (!await waitForMetadata(element)) return false;
+    const loaded = await waitForMetadata(element, 12000);
+    if (token !== loadToken || element.dataset.videoId !== video.id ||
+        element.getAttribute("src") !== source) return false;
+    if (element === sessionVideo) finishSessionVideoLoad(token);
+    if (!loaded) return false;
   }
+  if (token !== loadToken) return false;
   const localTime = Math.max(0, (absolute-new Date(video.recorded_at).getTime())/1000);
   element.currentTime = Number.isFinite(element.duration)
     ? Math.min(localTime, Math.max(0, element.duration-.05))
@@ -2657,6 +2720,7 @@ function updatePlayButton() {
 }
 
 function currentSessionPosition() {
+  if (timelinePositionPending) return requestedPosition;
   if (!activeSession || !activeVideo) return requestedPosition;
   const moment = activeSession.moments[activeMomentIndex];
   if (!moment) return requestedPosition;
@@ -2945,10 +3009,16 @@ function pauseCompositeTracks() {
 }
 
 function releaseCompositeAuxiliaryTracks() {
-  compositeTracks.forEach((track) => {
+  releaseCompositeTrackMap(compositeTracks);
+  if (pendingCompositeTracks !== compositeTracks) releaseCompositeTrackMap(pendingCompositeTracks);
+  compositeTracks.clear();
+  pendingCompositeTracks.clear();
+}
+
+function releaseCompositeTrackMap(tracks) {
+  tracks.forEach((track) => {
     if (track.element !== sessionVideo) releaseVideoElement(track.element);
   });
-  compositeTracks.clear();
 }
 
 function synchronizeCompositeTracks() {
@@ -3021,10 +3091,7 @@ function closePlayerMedia() {
   timelinePositionRequestID++;
   timelinePositionPending = false;
   pauseCompositeTracks();
-  compositeTracks.forEach((track) => {
-    if (track.element !== sessionVideo) releaseVideoElement(track.element);
-  });
-  compositeTracks.clear();
+  releaseCompositeAuxiliaryTracks();
   releaseVideoElement(sessionVideo);
   compositeGrid.replaceChildren();
   resetCompositeFrameGeometry();
@@ -3111,13 +3178,15 @@ function canAutomaticallyFallback() {
 }
 
 function handlePlaybackError() {
+  // 设置新媒体源期间的错误由对应加载任务判定，避免旧源的迟到事件触发错误降级。
+  if (!sessionVideo.getAttribute("src") || sessionVideo.dataset.loadingToken) return;
   reportPlaybackDiagnostic("media_error", "浏览器触发视频元素错误");
   requestPlaybackFallback("视频流播放失败");
 }
 
 function requestPlaybackFallback(reason) {
-  reportPlaybackDiagnostic("fallback_requested", reason);
   if (!activeSession || playbackFallbackInProgress || !canAutomaticallyFallback()) return;
+  reportPlaybackDiagnostic("fallback_requested", reason);
   playbackFallbackInProgress = true;
   recoverPlayback(reason).catch(() => {
     showPlayerMessage("自动降级失败，请手动选择单路原画");
@@ -3321,9 +3390,14 @@ function releaseVideoElement(element) {
   element.removeAttribute("src");
   element.removeAttribute("data-video-id");
   element.removeAttribute("data-composite-key");
+  element.removeAttribute("data-loading-token");
   element.load();
   if (element !== sessionVideo) element.remove();
   if (placeholder) placeholder.hidden = false;
+}
+
+function finishSessionVideoLoad(token) {
+  if (sessionVideo.dataset.loadingToken === String(token)) delete sessionVideo.dataset.loadingToken;
 }
 
 function closePlayer() {
