@@ -215,6 +215,36 @@ func TestUpdateAPClosesActiveHotspotAfterResponseDelay(t *testing.T) {
 	}
 }
 
+func TestUpdateAPClearsChannelForAutomaticSelection(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	err := manager.UpdateAP(context.Background(), APUpdate{
+		Enabled: true, SSID: "TeslaBox-5G", Band: "a", Channel: 0, AutoConnect: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAP() error = %v", err)
+	}
+	modifyCall := "nmcli connection modify uuid " + apUUID +
+		" 802-11-wireless.ssid TeslaBox-5G 802-11-wireless.band a" +
+		" 802-11-wireless.channel  connection.autoconnect yes ipv4.method shared"
+	if !containsCall(runner.calls, modifyCall) {
+		t.Fatalf("自动信道必须清空 NetworkManager 信道属性: calls = %v", runner.calls)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "802-11-wireless.channel 0") {
+			t.Fatalf("自动信道不能把 0 写入 NetworkManager: calls = %v", runner.calls)
+		}
+	}
+}
+
 func TestUpdateAPDoesNotRunStaleDisableAfterReenable(t *testing.T) {
 	t.Parallel()
 	const apUUID = "11111111-1111-1111-1111-111111111111"

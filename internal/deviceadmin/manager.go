@@ -1162,10 +1162,15 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 		return invalidInput("未找到可管理的 AP 配置")
 	}
 	autoConnect := update.Enabled && update.AutoConnect
+	channelValue := ""
+	if update.Channel != 0 {
+		channelValue = strconv.Itoa(update.Channel)
+	}
 	args := []string{"connection", "modify", "uuid", settings.UUID,
 		"802-11-wireless.ssid", update.SSID,
 		"802-11-wireless.band", update.Band,
-		"802-11-wireless.channel", strconv.Itoa(update.Channel),
+		// NetworkManager 用空属性表示自动选信道，数值 0 会被 nmcli 判定为非法信道。
+		"802-11-wireless.channel", channelValue,
 		// 关闭热点必须同时禁止开机自动连接，否则旧连接会在重启后重新激活，表现为无法永久关闭。
 		"connection.autoconnect", yesNo(autoConnect),
 		"ipv4.method", "shared",
