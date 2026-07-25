@@ -76,8 +76,16 @@ Copy-Item -Force $manifest $versionManifest
 
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
+$binaryChecksum = Join-Path $output "$(Split-Path -Leaf $binary).sha256"
+$helperChecksum = Join-Path $output "$(Split-Path -Leaf $helper).sha256"
 # 发布校验文件固定使用 LF；Windows PowerShell 的 Set-Content 默认会写入 CRLF。
-[IO.File]::WriteAllText("$binary.sha256", "$binaryHash  $(Split-Path -Leaf $binary)`n", [Text.Encoding]::ASCII)
-[IO.File]::WriteAllText("$helper.sha256", "$helperHash  $(Split-Path -Leaf $helper)`n", [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText($binaryChecksum, "$binaryHash  $(Split-Path -Leaf $binary)`n", [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText($helperChecksum, "$helperHash  $(Split-Path -Leaf $helper)`n", [Text.Encoding]::ASCII)
+foreach ($checksum in @($binaryChecksum, $helperChecksum)) {
+    if (-not (Test-Path -LiteralPath $checksum -PathType Leaf) -or (Get-Item -LiteralPath $checksum).Length -eq 0) {
+        throw "Failed to create update checksum file: $checksum"
+    }
+}
 
-Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest, $versionManifest | Format-Table Path, Hash
+Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest, $versionManifest, $binaryChecksum, $helperChecksum |
+    Format-Table Path, Hash
