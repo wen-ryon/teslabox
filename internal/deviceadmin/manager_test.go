@@ -191,7 +191,7 @@ func TestUpdateAPClosesActiveHotspotAfterResponseDelay(t *testing.T) {
 	}
 
 	err := manager.UpdateAP(context.Background(), APUpdate{
-		Enabled: false, SSID: "TeslaBox-5G", Band: "a", Channel: 161, AutoConnect: false,
+		Enabled: false, SSID: "TeslaBox-5G", Band: "a", Channel: 161, AutoConnect: true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateAP() error = %v", err)
@@ -202,6 +202,12 @@ func TestUpdateAPClosesActiveHotspotAfterResponseDelay(t *testing.T) {
 	}
 	if scheduled == nil {
 		t.Fatal("AP close operation was not scheduled")
+	}
+	modifyCall := "nmcli connection modify uuid " + apUUID +
+		" 802-11-wireless.ssid TeslaBox-5G 802-11-wireless.band a" +
+		" 802-11-wireless.channel 161 connection.autoconnect no ipv4.method shared"
+	if !containsCall(runner.calls, modifyCall) {
+		t.Fatalf("关闭热点必须同步关闭开机自动连接: calls = %v", runner.calls)
 	}
 	scheduled()
 	if !containsCall(runner.calls, downCall) {

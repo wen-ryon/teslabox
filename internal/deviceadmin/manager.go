@@ -1161,11 +1161,13 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	if !settings.Available || !validUUID(settings.UUID) {
 		return invalidInput("未找到可管理的 AP 配置")
 	}
+	autoConnect := update.Enabled && update.AutoConnect
 	args := []string{"connection", "modify", "uuid", settings.UUID,
 		"802-11-wireless.ssid", update.SSID,
 		"802-11-wireless.band", update.Band,
 		"802-11-wireless.channel", strconv.Itoa(update.Channel),
-		"connection.autoconnect", yesNo(update.AutoConnect),
+		// 关闭热点必须同时禁止开机自动连接，否则旧连接会在重启后重新激活，表现为无法永久关闭。
+		"connection.autoconnect", yesNo(autoConnect),
 		"ipv4.method", "shared",
 	}
 	if update.Password != "" {

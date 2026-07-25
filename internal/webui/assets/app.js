@@ -1671,14 +1671,14 @@ async function saveAPSettings(event) {
     enabled ? "应用热点设置" : "关闭无线热点",
     enabled
       ? "保存后热点会重新启动，当前连接可能断开。请确认已经记住新的热点名称和密码。"
-      : "关闭后，通过该热点打开的页面会断开。需要重新开启时，请通过其他网络访问设置中心；如果仍启用开机自启动，也可以重启设备。",
+      : "关闭后会同时关闭开机自动启动，通过该热点打开的页面会断开。需要重新开启时，请通过其他网络访问设置中心。",
     enabled ? "保存并应用" : "确认关闭",
     !enabled,
   );
   if (!confirmed) return;
   const payload = {
     enabled, ssid:$("ap-ssid").value, password:$("ap-password").value,
-    band:$("ap-band").value, channel:Number($("ap-channel").value), auto_connect:$("ap-autoconnect").checked,
+    band:$("ap-band").value, channel:Number($("ap-channel").value), auto_connect:enabled && $("ap-autoconnect").checked,
   };
   setSettingsNotice(enabled ? "正在应用热点设置，页面可能断开…" : "正在提交关闭指令…", false);
   try {
@@ -1688,6 +1688,7 @@ async function saveAPSettings(event) {
       $("ap-status").textContent = "正在关闭";
       $("ap-status").className = "hardware-value";
       $("ap-enabled").checked = false;
+      $("ap-autoconnect").checked = false;
       setSettingsNotice("关闭指令已提交，热点将在 1 秒后关闭", false);
       return;
     }
