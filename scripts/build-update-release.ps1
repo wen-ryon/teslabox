@@ -79,14 +79,18 @@ $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
 $binaryChecksum = Join-Path $output "teslabox-linux-arm64.sha256"
 $helperChecksum = Join-Path $output "teslabox-update-helper-linux-arm64.sha256"
 # 发布校验文件固定使用 LF；Windows PowerShell 的 Set-Content 默认会写入 CRLF。
-$binaryChecksumContent = [Text.Encoding]::ASCII.GetBytes("$binaryHash  teslabox-linux-arm64`n")
-$helperChecksumContent = [Text.Encoding]::ASCII.GetBytes("$helperHash  teslabox-update-helper-linux-arm64`n")
-[IO.File]::WriteAllBytes($binaryChecksum, $binaryChecksumContent)
-[IO.File]::WriteAllBytes($helperChecksum, $helperChecksumContent)
-foreach ($checksum in @($binaryChecksum, $helperChecksum)) {
+$binaryChecksumContent = "$binaryHash  teslabox-linux-arm64`n"
+$helperChecksumContent = "$helperHash  teslabox-update-helper-linux-arm64`n"
+[IO.File]::WriteAllText($binaryChecksum, $binaryChecksumContent, [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText($helperChecksum, $helperChecksumContent, [Text.Encoding]::ASCII)
+foreach ($expected in @(
+    @{ Path = $binaryChecksum; Content = $binaryChecksumContent },
+    @{ Path = $helperChecksum; Content = $helperChecksumContent }
+)) {
+    $checksum = $expected.Path
     if (-not (Test-Path -LiteralPath $checksum -PathType Leaf) -or
-        (Get-Item -LiteralPath $checksum).Length -eq 0) {
-        throw "Failed to create update checksum file: $checksum"
+        [IO.File]::ReadAllText($checksum, [Text.Encoding]::ASCII) -cne $expected.Content) {
+        throw "Failed to create or verify update checksum file: $checksum"
     }
 }
 
