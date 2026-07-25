@@ -19,6 +19,7 @@ import (
 
 const (
 	defaultAPInterface      = "ap0"
+	managedUpstreamPrefix   = "TeslaBox-Upstream-"
 	apDisableDelay          = time.Second
 	commandTimeout          = 20 * time.Second
 	recoveryTimeout         = 50 * time.Second
@@ -212,6 +213,9 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 // Run 订阅 NetworkManager 事件，并只在上游 WiFi 状态、BSSID 或信道实际变化时恢复 AP+STA。
 // 正常待机不执行轮询，避免车载供电下反复唤醒无线芯片。
 func (m *Manager) Run(ctx context.Context) {
+	if err := m.clearManagedProfileBSSIDLocks(ctx); err != nil {
+		m.logger.Warn("清理旧版上游 WiFi BSSID 锁定失败", "error", err)
+	}
 	events := make(chan networkEvent, 1)
 	watchErrors := make(chan error, 1)
 	eventTimer := stoppedTimer()
@@ -794,12 +798,15 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 		}
 	}
 	if request.UUID != "" {
-		if target.BSSID != "" {
-			if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", request.UUID, "802-11-wireless.bssid", target.BSSID); err != nil {
-				return fmt.Errorf("锁定上游 WiFi 接入点: %w", err)
-			}
+		if err := m.clearProfileBSSIDLock(ctx, request.UUID); err != nil {
+			return fmt.Errorf("清除上游 WiFi BSSID 锁定: %w", err)
 		}
-		_, err = m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", request.UUID, "ifname", status.Interface)
+		activationArgs := []string{"--wait", "15", "connection", "up", "uuid", request.UUID, "ifname", status.Interface}
+		if target.BSSID != "" {
+			// 只约束本次激活，不能把接入点地址写进配置，否则路由器漫游或更换射频后将无法自动连接。
+			activationArgs = append(activationArgs, "ap", target.BSSID)
+		}
+		_, err = m.run(ctx, "nmcli", activationArgs...)
 		if err != nil {
 			return fmt.Errorf("连接已保存网络: %w", err)
 		}
@@ -812,7 +819,7 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 		return err
 	}
 	security := normalizeSecurity(request.Security)
-	profileName := "TeslaBox-Upstream-" + request.SSID
+	profileName := managedUpstreamPrefix + request.SSID
 	args := []string{"--wait", "15", "device", "wifi", "connect", request.SSID}
 	if target.BSSID != "" {
 		args = append(args, "bssid", target.BSSID)
@@ -834,7 +841,12 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	if request.AutoConnect != nil {
 		autoConnect = *request.AutoConnect
 	}
-	saveArgs := []string{"connection", "modify", "id", profileName, "connection.autoconnect", yesNo(autoConnect)}
+	saveArgs := []string{
+		"connection", "modify", "id", profileName,
+		"connection.autoconnect", yesNo(autoConnect),
+		// device wifi connect 的 bssid 参数可能固化到新配置；连接成功后立即清除，保留后续漫游能力。
+		"802-11-wireless.bssid", "",
+	}
 	if security != "open" {
 		// 显式改为系统持有密钥，避免无桌面环境重启后只能向不存在的用户密钥代理索取密码。
 		saveArgs = append(
@@ -847,6 +859,43 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 		return fmt.Errorf("保存 WiFi 自动连接设置: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) clearManagedProfileBSSIDLocks(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "NAME,UUID,TYPE", "connection", "show")
+	if err != nil {
+		return fmt.Errorf("读取待迁移的 WiFi 配置: %w", err)
+	}
+	var migrationErrors []error
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := splitNMCLI(line)
+		if len(fields) != 3 ||
+			(fields[2] != "802-11-wireless" && fields[2] != "wifi") ||
+			!strings.HasPrefix(fields[0], managedUpstreamPrefix) ||
+			!validUUID(fields[1]) {
+			continue
+		}
+		bssid, readErr := m.run(ctx, "nmcli", "-g", "802-11-wireless.bssid", "connection", "show", "uuid", fields[1])
+		if readErr != nil {
+			migrationErrors = append(migrationErrors, fmt.Errorf("读取 %s 的 BSSID: %w", fields[0], readErr))
+			continue
+		}
+		if strings.TrimSpace(string(bssid)) == "" {
+			continue
+		}
+		if clearErr := m.clearProfileBSSIDLock(ctx, fields[1]); clearErr != nil {
+			migrationErrors = append(migrationErrors, fmt.Errorf("清除 %s 的 BSSID: %w", fields[0], clearErr))
+		}
+	}
+	return errors.Join(migrationErrors...)
+}
+
+func (m *Manager) clearProfileBSSIDLock(ctx context.Context, uuid string) error {
+	_, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", uuid, "802-11-wireless.bssid", "")
+	return err
 }
 
 // SetAutoConnect 更新已保存客户端网络的自动连接策略，不影响当前连接。
