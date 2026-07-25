@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -29,6 +30,7 @@ const (
 	defaultUpdateResult    = "/var/lib/teslabox-system/update-result.json"
 	defaultGadgetPausePath = "/var/lib/teslabox-system/gadget-paused"
 	defaultBootIDPath      = "/proc/sys/kernel/random/boot_id"
+	defaultBootUptimePath  = "/proc/uptime"
 	defaultConfigFSPath    = "/sys/kernel/config/usb_gadget"
 	defaultUDCPath         = "/sys/class/udc"
 	defaultGadgetName      = "teslabox"
@@ -43,7 +45,7 @@ const (
 	defaultSnapshotLimit   = 2 * time.Minute
 	defaultSnapshotRetry   = 10 * time.Minute
 	defaultMediaProbeLimit = 10 * time.Second
-	defaultExportLimit     = 30 * time.Minute
+	defaultExportLimit     = 2 * time.Minute
 	defaultExportQueueSize = 4
 	defaultShutdownLimit   = 10 * time.Second
 	defaultWebSessionTTL   = 7 * 24 * time.Hour
@@ -69,6 +71,7 @@ type Config struct {
 	MaintenanceStatePath string
 	TeslaTimeZone        string
 	UpdateManifestURL    string
+	UpdateCatalogURL     string
 	UpdatePublicKey      string
 	UpdateChannel        string
 	UpdateBoard          string
@@ -78,6 +81,7 @@ type Config struct {
 	UpdateMaxBytes       int64
 	GadgetPauseStatePath string
 	BootIDPath           string
+	BootUptimePath       string
 	ConfigFSPath         string
 	UDCPath              string
 	UDCName              string
@@ -164,6 +168,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	updateManifestURL := strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_MANIFEST_URL"))
+	updateCatalogURL := strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_CATALOG_URL"))
+	if updateCatalogURL == "" {
+		updateCatalogURL = catalogURLForManifest(updateManifestURL)
+	}
 
 	cfg := Config{
 		HTTPAddr:             envString("TESLABOX_HTTP_ADDR", defaultHTTPAddr),
@@ -180,7 +189,8 @@ func Load() (Config, error) {
 		WebAuthStatePath:     envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
 		MaintenanceStatePath: envString("TESLABOX_MAINTENANCE_STATE", defaultMaintenancePath),
 		TeslaTimeZone:        envString("TESLABOX_TESLA_TIME_ZONE", defaultTeslaTimeZone),
-		UpdateManifestURL:    strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_MANIFEST_URL")),
+		UpdateManifestURL:    updateManifestURL,
+		UpdateCatalogURL:     updateCatalogURL,
 		UpdatePublicKey:      strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_PUBLIC_KEY")),
 		UpdateChannel:        envString("TESLABOX_UPDATE_CHANNEL", "stable"),
 		UpdateBoard:          envString("TESLABOX_UPDATE_BOARD", "radxa-rock-3a"),
@@ -190,6 +200,7 @@ func Load() (Config, error) {
 		UpdateMaxBytes:       defaultUpdateMaxBytes,
 		GadgetPauseStatePath: envString("TESLABOX_GADGET_PAUSE_STATE", defaultGadgetPausePath),
 		BootIDPath:           envString("TESLABOX_BOOT_ID_PATH", defaultBootIDPath),
+		BootUptimePath:       envString("TESLABOX_BOOT_UPTIME_PATH", defaultBootUptimePath),
 		ConfigFSPath:         envString("TESLABOX_CONFIGFS_PATH", defaultConfigFSPath),
 		UDCPath:              envString("TESLABOX_UDC_PATH", defaultUDCPath),
 		UDCName:              strings.TrimSpace(os.Getenv("TESLABOX_UDC_NAME")),
@@ -224,6 +235,17 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+func catalogURLForManifest(manifestURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(manifestURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || !strings.HasSuffix(parsed.Path, "/latest.json") {
+		return ""
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/latest.json") + "/history.json"
+	parsed.RawPath = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 // Validate 拒绝可能挂载错误设备或造成忙循环的配置。
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.HTTPAddr) == "" {
@@ -251,9 +273,6 @@ func (c Config) Validate() error {
 	}
 	if !isSafeInterfaceName(c.APInterface) {
 		return fmt.Errorf("TESLABOX_AP_INTERFACE 不是有效的网络接口名")
-	}
-	if c.WiFiInterface != "" && c.WiFiInterface == c.APInterface {
-		return fmt.Errorf("TESLABOX_WIFI_INTERFACE 和 TESLABOX_AP_INTERFACE 不能相同")
 	}
 	if !isSafeAbsolutePath(c.ConfigFSPath) || !isSafeAbsolutePath(c.UDCPath) {
 		return fmt.Errorf("configfs 和 UDC 路径必须是非根目录的绝对路径")
@@ -283,6 +302,7 @@ func (c Config) Validate() error {
 		"TESLABOX_UPDATE_RESULT_PATH":  c.UpdateResultPath,
 		"TESLABOX_GADGET_PAUSE_STATE":  c.GadgetPauseStatePath,
 		"TESLABOX_BOOT_ID_PATH":        c.BootIDPath,
+		"TESLABOX_BOOT_UPTIME_PATH":    c.BootUptimePath,
 	} {
 		if !isSafeAbsolutePath(value) {
 			return fmt.Errorf("%s 必须是非根目录的绝对路径", name)

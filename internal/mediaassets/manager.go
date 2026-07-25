@@ -68,7 +68,7 @@ type Maintenance interface {
 
 // SnapshotSource 提供已冻结的只读媒体视图，避免扫描直接读取仍由 USB 主机写入的原始镜像。
 type SnapshotSource interface {
-	Scan(context.Context) error
+	ActivateMedia(context.Context) error
 	AcquireMediaSnapshotView() (*mediasnapshot.View, func())
 }
 
@@ -178,7 +178,7 @@ func (m *Manager) statusWithDiscoveredAssets(ctx context.Context, assets []Asset
 	if !status.ImageAvailable || m.snapshots == nil {
 		return status
 	}
-	if err := m.snapshots.Scan(ctx); err != nil {
+	if err := m.snapshots.ActivateMedia(ctx); err != nil {
 		status.Message = "媒体快照暂不可用，已显示 TeslaBox 管理的文件；稍后刷新可读取电脑或车机直接写入的文件。"
 		return status
 	}

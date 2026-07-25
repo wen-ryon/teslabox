@@ -27,12 +27,13 @@ var (
 type ExportState string
 
 const (
-	ExportQueued     ExportState = "queued"
-	ExportRunning    ExportState = "running"
-	ExportCompleted  ExportState = "completed"
-	ExportFailed     ExportState = "failed"
-	ExportCanceled   ExportState = "canceled"
-	maxExportHistory             = 8
+	ExportQueued           ExportState = "queued"
+	ExportRunning          ExportState = "running"
+	ExportCompleted        ExportState = "completed"
+	ExportFailed           ExportState = "failed"
+	ExportCanceled         ExportState = "canceled"
+	maxExportHistory                   = 8
+	maxExportDecoderInputs             = 12
 )
 
 // ExportRequest 只接受结构化选项，避免把 FFmpeg 参数暴露给客户端。
@@ -107,6 +108,9 @@ type Exporter struct {
 	cancels   map[string]context.CancelFunc
 	releases  map[string]func()
 	queue     chan exportJob
+	runOnce   sync.Once
+	done      chan struct{}
+	stopping  bool
 }
 
 // NewExporter 在启动阶段建立独立输出目录，并清理异常退出遗留的临时文件。
@@ -126,12 +130,19 @@ func NewExporter(runner exportRunner, config ExportConfig) (*Exporter, error) {
 	return &Exporter{
 		runner: runner, config: config, logger: config.Logger, tasks: make(map[string]ExportTask),
 		cancels: make(map[string]context.CancelFunc), releases: make(map[string]func()),
-		queue: make(chan exportJob, config.QueueSize),
+		queue: make(chan exportJob, config.QueueSize), done: make(chan struct{}),
 	}, nil
 }
 
 // Run 消费有界队列；服务上下文取消时，正在运行的 FFmpeg 会被同步终止。
 func (e *Exporter) Run(ctx context.Context) {
+	e.runOnce.Do(func() {
+		defer close(e.done)
+		e.run(ctx)
+	})
+}
+
+func (e *Exporter) run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			e.stopQueued()
@@ -144,6 +155,16 @@ func (e *Exporter) Run(ctx context.Context) {
 		case job := <-e.queue:
 			e.runJob(ctx, job)
 		}
+	}
+}
+
+// Wait 等待工作进程释放 FFmpeg 和快照租约，避免退出清理与仍在运行的导出并发。
+func (e *Exporter) Wait(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-e.done:
+		return nil
 	}
 }
 
@@ -180,6 +201,11 @@ func (e *Exporter) Create(request ExportRequest, source ExportSource, release fu
 	}
 	job := exportJob{id: id, request: request, source: source, release: safeRelease}
 	e.mu.Lock()
+	if e.stopping {
+		e.mu.Unlock()
+		safeRelease()
+		return ExportTask{}, errors.New("视频导出器正在停止")
+	}
 	e.tasks[id] = task
 	e.releases[id] = safeRelease
 	select {
@@ -372,6 +398,7 @@ func (e *Exporter) updateProgress(id string, progress int) {
 
 func (e *Exporter) stopQueued() {
 	e.mu.Lock()
+	e.stopping = true
 	for _, cancel := range e.cancels {
 		cancel()
 	}
@@ -379,11 +406,15 @@ func (e *Exporter) stopQueued() {
 	for id, release := range e.releases {
 		task := e.tasks[id]
 		if task.State == ExportQueued || task.State == ExportRunning {
+			wasQueued := task.State == ExportQueued
 			now := time.Now()
 			task.State = ExportCanceled
 			task.CompletedAt = &now
 			e.tasks[id] = task
-			releases = append(releases, release)
+			// 运行任务必须等 FFmpeg 真正退出后由 runJob 释放；排队任务不会再被消费，可立即归还租约。
+			if wasQueued {
+				releases = append(releases, release)
+			}
 		}
 	}
 	e.mu.Unlock()
@@ -453,7 +484,32 @@ func validateExport(request ExportRequest, source ExportSource, maximum time.Dur
 			return &InputError{Message: "选择的视角在导出范围内没有录像"}
 		}
 	}
+	if exportDecoderInputCount(request, source) > maxExportDecoderInputs {
+		return &InputError{Message: "导出范围包含过多录像片段，请缩短时间范围后重试"}
+	}
 	return nil
+}
+
+func exportDecoderInputCount(request ExportRequest, source ExportSource) int {
+	exportStart := source.SessionStart.Add(time.Duration(request.StartSeconds * float64(time.Second)))
+	exportEnd := exportStart.Add(time.Duration(request.DurationSeconds * float64(time.Second)))
+	count := 0
+	for _, camera := range request.Cameras {
+		videos := slices.DeleteFunc(slices.Clone(source.Videos), func(video ExportVideo) bool { return video.Camera != camera })
+		slices.SortFunc(videos, func(left, right ExportVideo) int { return left.RecordedAt.Compare(right.RecordedAt) })
+		cursor := exportStart
+		for _, video := range videos {
+			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
+			start := maxTime(exportStart, video.RecordedAt, cursor)
+			end := minTime(exportEnd, videoEnd)
+			if !end.After(start) || !isLinuxAbsolutePath(video.Path) {
+				continue
+			}
+			count++
+			cursor = end
+		}
+	}
+	return count
 }
 
 func normalizeExportRequest(request ExportRequest) (ExportRequest, error) {
@@ -542,6 +598,9 @@ func exportArgs(request ExportRequest, source ExportSource, output string) ([]st
 			end := minTime(exportEnd, videoEnd)
 			if !end.After(start) || !isLinuxAbsolutePath(video.Path) {
 				continue
+			}
+			if inputIndex >= maxExportDecoderInputs {
+				return nil, &InputError{Message: "导出范围包含过多录像片段，请缩短时间范围后重试"}
 			}
 			args = append(args, "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime", "-c:v", "h264_rkmpp", "-i", filepath.ToSlash(filepath.Clean(video.Path)))
 			label := fmt.Sprintf("c%ds%d", cameraIndex, len(segments))

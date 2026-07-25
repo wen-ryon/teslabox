@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,20 @@ type fakeExportRunner struct {
 	block   bool
 	started chan struct{}
 	once    sync.Once
+}
+
+type shutdownExportRunner struct {
+	started  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+}
+
+func (r *shutdownExportRunner) RunProgress(ctx context.Context, _ string, _ []string, _ func(time.Duration)) error {
+	close(r.started)
+	<-ctx.Done()
+	close(r.canceled)
+	<-r.release
+	return ctx.Err()
 }
 
 func (r *fakeExportRunner) RunProgress(ctx context.Context, _ string, args []string, progress func(time.Duration)) error {
@@ -172,12 +187,55 @@ func TestExporterCancelQueuedTaskReleasesSnapshotImmediately(t *testing.T) {
 		t.Fatalf("state = %s, releases = %d", canceled.State, queuedRelease.Load())
 	}
 	cancel()
-	deadline := time.Now().Add(time.Second)
-	for firstRelease.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	waitCtx, waitCancel := context.WithTimeout(t.Context(), time.Second)
+	defer waitCancel()
+	if err := exporter.Wait(waitCtx); err != nil {
+		t.Fatalf("Wait() error = %v", err)
 	}
 	if firstRelease.Load() != 1 {
 		t.Fatalf("running snapshot releases = %d", firstRelease.Load())
+	}
+}
+
+func TestExporterShutdownWaitsForRunnerBeforeReleasingSnapshot(t *testing.T) {
+	t.Parallel()
+	runner := &shutdownExportRunner{
+		started: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}),
+	}
+	exporter, err := NewExporter(runner, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 1, MaxDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	go exporter.Run(ctx)
+	var releases atomic.Int32
+	if _, err := exporter.Create(validExportRequest(), validExportSource(), func() { releases.Add(1) }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("running task did not start")
+	}
+	cancel()
+	select {
+	case <-runner.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not receive cancellation")
+	}
+	if releases.Load() != 0 {
+		t.Fatalf("snapshot released before runner exit: %d", releases.Load())
+	}
+	close(runner.release)
+	waitCtx, waitCancel := context.WithTimeout(t.Context(), time.Second)
+	defer waitCancel()
+	if err := exporter.Wait(waitCtx); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if releases.Load() != 1 {
+		t.Fatalf("snapshot releases = %d", releases.Load())
 	}
 }
 
@@ -223,6 +281,34 @@ func TestValidateExportRejectsOriginalComposite(t *testing.T) {
 	}
 	if err := validateExport(request, validExportSource(), time.Minute); err == nil || !strings.Contains(err.Error(), "原画导出仅支持单路") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateExportRejectsTooManyHardwareDecoderInputs(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	source := ExportSource{
+		SessionStart: start,
+		SessionEnd:   start.Add(13 * 10 * time.Second),
+		Videos:       make([]ExportVideo, 0, 13),
+	}
+	for index := 0; index < 13; index++ {
+		source.Videos = append(source.Videos, ExportVideo{
+			Camera:     "front",
+			Path:       fmt.Sprintf("/snapshot/front-%02d.mp4", index),
+			RecordedAt: start.Add(time.Duration(index) * 10 * time.Second),
+			Duration:   10,
+		})
+	}
+	request := ExportRequest{
+		SessionID: "session", DurationSeconds: 130, Layout: "single",
+		Cameras: []string{"front"}, Quality: "standard",
+	}
+	if err := validateExport(request, source, 30*time.Minute); err == nil || !strings.Contains(err.Error(), "过多录像片段") {
+		t.Fatalf("validateExport() error = %v", err)
+	}
+	if _, err := exportArgs(request, source, "/exports/too-many.mp4"); err == nil || !strings.Contains(err.Error(), "过多录像片段") {
+		t.Fatalf("exportArgs() error = %v", err)
 	}
 }
 

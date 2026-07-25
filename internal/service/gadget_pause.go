@@ -3,15 +3,19 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	gadgetGuardPaused       = "paused"
 	gadgetGuardAttempt      = "attempt:"
+	gadgetGuardService      = "service:"
 	gadgetGuardResumeAfter  = "resume-after:"
 	defaultUntrackedBootID  = "untracked-boot"
 	maximumGadgetBootIDSize = 128
@@ -45,6 +49,26 @@ func readBootID(path string) (string, error) {
 	return bootID, nil
 }
 
+func readBootUptime(path string) (time.Duration, bool, error) {
+	if path == "" {
+		return 0, false, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, true, fmt.Errorf("读取系统启动时长: %w", err)
+	}
+	fields := strings.Fields(string(content))
+	if len(fields) == 0 {
+		return 0, true, errors.New("系统启动时长为空")
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	maximumSeconds := float64(math.MaxInt64) / float64(time.Second)
+	if err != nil || seconds < 0 || seconds > maximumSeconds || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0, true, fmt.Errorf("系统启动时长不合法: %q", fields[0])
+	}
+	return time.Duration(seconds * float64(time.Second)), true, nil
+}
+
 func loadGadgetGuardState(path string) (gadgetGuardState, error) {
 	if path == "" {
 		return gadgetGuardState{}, nil
@@ -68,7 +92,7 @@ func loadGadgetGuardState(path string) (gadgetGuardState, error) {
 	if value == "" || value == gadgetGuardPaused {
 		return gadgetGuardState{exists: true, mode: gadgetGuardPaused}, nil
 	}
-	for _, prefix := range []string{gadgetGuardAttempt, gadgetGuardResumeAfter} {
+	for _, prefix := range []string{gadgetGuardAttempt, gadgetGuardService, gadgetGuardResumeAfter} {
 		if bootID, found := strings.CutPrefix(value, prefix); found {
 			if _, err := validateGuardBootID(bootID); err != nil {
 				return gadgetGuardState{}, err
@@ -99,7 +123,7 @@ func persistGadgetGuardState(path, value string) error {
 	}
 	if value != gadgetGuardPaused {
 		prefixValid := false
-		for _, prefix := range []string{gadgetGuardAttempt, gadgetGuardResumeAfter} {
+		for _, prefix := range []string{gadgetGuardAttempt, gadgetGuardService, gadgetGuardResumeAfter} {
 			if bootID, found := strings.CutPrefix(value, prefix); found {
 				if _, err := validateGuardBootID(bootID); err != nil {
 					return err

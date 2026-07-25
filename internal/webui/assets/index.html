@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260723-4">
-  <script src="/app.js?v=20260723-7" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260725-2">
+  <script src="/app.js?v=20260725-2" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -51,7 +51,7 @@
       <nav class="drawer-nav">
         <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
         <button type="button" data-page-link="media"><span>媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
-        <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、服务与网络诊断</small></button>
+        <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、视频与系统诊断</small></button>
         <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
       </nav>
       <p class="drawer-foot">TeslaBox 本地管理中心</p>
@@ -115,10 +115,15 @@
           <div class="library-actions"><div class="view-switch" aria-label="录像时间轴方式"><button type="button" data-view="multi" class="active">多路时间轴</button><button type="button" data-view="single">单路时间轴</button></div><div class="archive-switch" aria-label="时间线归档方式"><button type="button" data-period="month" class="active">月</button><button type="button" data-period="week">周</button><button type="button" data-period="day">日</button></div><span id="result-count" class="muted">正在载入</span></div>
         </div>
 
+        <section id="recent-recordings-section" class="recent-recordings" aria-labelledby="recent-recordings-title" hidden>
+          <div class="recent-recordings-heading"><div><p class="eyebrow">RECENT CLIPS</p><h3 id="recent-recordings-title">最近录像</h3><p class="muted">循环缓存按实际可播放时长连续拼接；中间写入间隔不会产生不可跳转的空档。</p></div></div>
+          <div id="recent-video-grid" class="recent-video-grid"></div>
+        </section>
+
         <form id="filter-form" class="filters">
           <label>录像类型
             <select id="clip-type" name="clip_type">
-              <option value="">全部类型</option><option value="recent">最近录像</option>
+              <option value="">全部（已保存/哨兵）</option>
               <option value="saved">已保存</option><option value="sentry">哨兵事件</option>
             </select>
           </label>
@@ -261,14 +266,19 @@
         <article class="settings-card update-card">
           <div class="update-summary">
             <div><h3>TeslaBox 程序</h3><p id="update-version-detail">正在读取当前版本…</p></div>
-            <div class="update-versions"><span>当前版本<strong id="update-current-version">—</strong></span><span>最新版本<strong id="update-latest-version">—</strong></span></div>
+            <div class="update-versions"><span>当前版本<strong id="update-current-version">—</strong></span><span id="update-target-label">最新版本<strong id="update-latest-version">—</strong></span></div>
           </div>
           <div id="update-progress-wrap" class="update-progress" hidden><progress id="update-progress" max="100" value="0"></progress><span id="update-progress-detail">0%</span></div>
           <p id="update-release-notes" class="update-release-notes muted" hidden></p>
           <p id="update-notice" class="notice" role="status" aria-live="polite" hidden></p>
           <div class="power-actions"><button id="update-check" class="secondary" type="button">检查更新</button><button id="update-download" class="secondary" type="button" hidden>下载更新</button><button id="update-install" class="primary" type="button" hidden>安装并重启</button></div>
+          <section id="update-history-section" class="update-history" hidden>
+            <div class="update-history-head"><div><h4>指定版本</h4><p>仅列出维护者签名且当前环境允许安装的主程序版本。</p></div><button id="update-history-load" class="secondary" type="button">查看历史版本</button></div>
+            <p id="update-history-detail" class="muted" hidden></p>
+            <div id="update-history-list" class="update-history-list" hidden></div>
+          </section>
         </article>
-		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
+		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。指定版本仅回退 TeslaBox 主程序，不回退内核、驱动、FFmpeg 或 systemd。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
       </section>
 
       <section class="settings-section power-section" aria-labelledby="power-title">
@@ -282,8 +292,11 @@
 
     <div id="logs-page" class="page logs-page app-page" hidden>
       <section class="settings-hero logs-hero">
-        <div><p class="eyebrow">DIAGNOSTICS</p><h1>日志中心</h1><p class="hero-copy">查看 USB 枚举、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
-        <button id="logs-refresh" class="secondary" type="button">刷新日志</button>
+        <div><p class="eyebrow">DIAGNOSTICS</p><h1>日志中心</h1><p class="hero-copy">查看 USB Gadget 生命周期、视频合成、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
+        <div class="logs-hero-actions">
+          <button id="logs-download-report" class="primary" type="button">下载完整诊断报告</button>
+          <button id="logs-refresh" class="secondary" type="button">刷新日志</button>
+        </div>
       </section>
       <div id="logs-notice" class="notice" role="status" aria-live="polite"></div>
 
@@ -316,6 +329,7 @@
         </div>
         <div class="segmented logs-source-switch" role="group" aria-label="日志来源">
           <button type="button" data-log-source="usb" class="active">USB 枚举</button>
+          <button type="button" data-log-source="media">视频与转码</button>
           <button type="button" data-log-source="application">TeslaBox 服务</button>
           <button type="button" data-log-source="network">网络与热点</button>
         </div>
@@ -323,7 +337,7 @@
           <div class="logs-meta" id="logs-meta">尚未读取日志</div>
           <pre id="logs-output" class="logs-output" tabindex="0">正在读取…</pre>
         </article>
-        <div class="settings-warning">日志可能包含设备名称、SSID、IP 地址和硬件标识。发送给他人前仍请快速检查；页面不会读取任意文件或执行用户输入的命令。</div>
+        <div class="settings-warning">复现问题后请尽快下载完整诊断报告；报告会同时收集当前与上一次启动的关键日志，适合直接发给维护者。内容可能包含设备名称、SSID、IP 地址和硬件标识，发送前仍请快速检查。</div>
       </section>
     </div>
   </main>
@@ -426,7 +440,7 @@
       <p class="muted">跨分钟拼接所选视角，并按录像绝对时间对齐最多约 1–2 帧的时间差。</p>
       <div class="form-grid export-range-grid">
         <label>开始位置（秒）<input id="export-start" type="number" min="0" step="0.1" required></label>
-        <label>导出时长（秒）<input id="export-duration" type="number" min="1" max="1800" step="0.1" required></label>
+        <label>导出时长（秒）<input id="export-duration" type="number" min="1" max="120" step="0.1" required></label>
       </div>
       <div class="form-grid export-view-grid">
         <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>

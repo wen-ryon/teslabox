@@ -31,26 +31,29 @@ const (
 
 // Status 不暴露板端文件路径或内部命令输出，只返回管理页面需要的信息。
 type Status struct {
-	Configured      bool   `json:"configured"`
-	CurrentVersion  string `json:"current_version"`
-	CurrentCommit   string `json:"current_commit"`
-	Channel         string `json:"channel"`
-	State           State  `json:"state"`
-	LatestVersion   string `json:"latest_version,omitempty"`
-	PublishedAt     string `json:"published_at,omitempty"`
-	ReleaseNotes    string `json:"release_notes,omitempty"`
-	Available       bool   `json:"available"`
-	ProgressPercent int    `json:"progress_percent"`
-	DownloadedBytes int64  `json:"downloaded_bytes,omitempty"`
-	TotalBytes      int64  `json:"total_bytes,omitempty"`
-	Error           string `json:"error,omitempty"`
-	LastCheckedAt   string `json:"last_checked_at,omitempty"`
-	InstallResult   string `json:"install_result,omitempty"`
+	Configured        bool   `json:"configured"`
+	CurrentVersion    string `json:"current_version"`
+	CurrentCommit     string `json:"current_commit"`
+	Channel           string `json:"channel"`
+	State             State  `json:"state"`
+	LatestVersion     string `json:"latest_version,omitempty"`
+	PublishedAt       string `json:"published_at,omitempty"`
+	ReleaseNotes      string `json:"release_notes,omitempty"`
+	SelectedAction    string `json:"selected_action,omitempty"`
+	HistoryConfigured bool   `json:"history_configured"`
+	Available         bool   `json:"available"`
+	ProgressPercent   int    `json:"progress_percent"`
+	DownloadedBytes   int64  `json:"downloaded_bytes,omitempty"`
+	TotalBytes        int64  `json:"total_bytes,omitempty"`
+	Error             string `json:"error,omitempty"`
+	LastCheckedAt     string `json:"last_checked_at,omitempty"`
+	InstallResult     string `json:"install_result,omitempty"`
 }
 
 // Config 定义在线更新功能的本地策略，私钥永远不属于设备配置。
 type Config struct {
 	ManifestURL    string
+	CatalogURL     string
 	PublicKey      string
 	Channel        string
 	Board          string
@@ -125,7 +128,7 @@ func New(config Config, starter ServiceStarter) (*Manager, error) {
 		return nil, err
 	}
 	client, err := NewClient(ClientConfig{
-		ManifestURL: manifestURL, PublicKey: publicKey, Channel: config.Channel,
+		ManifestURL: manifestURL, CatalogURL: config.CatalogURL, PublicKey: publicKey, Channel: config.Channel,
 		Board: config.Board, Arch: config.Arch, DownloadDir: config.DownloadDir,
 		MaximumSize: config.MaximumSize,
 	})
@@ -134,6 +137,7 @@ func New(config Config, starter ServiceStarter) (*Manager, error) {
 	}
 	manager.client = client
 	manager.state.Configured = true
+	manager.state.HistoryConfigured = client.HasCatalog()
 	manager.state.State = StateIdle
 	return manager, nil
 }
@@ -208,10 +212,95 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 		}
 		status.LatestVersion, status.PublishedAt = manifest.Version, manifest.PublishedAt
 		status.ReleaseNotes, status.Available = manifest.ReleaseNotes, available
+		status.SelectedAction = ""
+		if available {
+			status.SelectedAction = "upgrade"
+		}
 		status.ProgressPercent, status.DownloadedBytes, status.TotalBytes = 0, 0, manifest.Size
 		status.LastCheckedAt, status.Error = now, ""
 	})
 	return m.Status(), nil
+}
+
+// History 返回维护者签名且与当前程序兼容的可选历史版本；未配置目录时保持普通更新可用。
+func (m *Manager) History(ctx context.Context) (ReleaseHistory, error) {
+	if m.client == nil {
+		return ReleaseHistory{}, errors.New("在线更新尚未配置")
+	}
+	if !m.client.HasCatalog() {
+		return ReleaseHistory{Configured: false}, nil
+	}
+	if !m.opMu.TryLock() {
+		return ReleaseHistory{}, errors.New("已有更新操作正在进行")
+	}
+	defer m.opMu.Unlock()
+	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	catalog, err := m.client.FetchCatalog(checkCtx)
+	if err != nil {
+		return ReleaseHistory{}, err
+	}
+	releases := make([]Release, 0, len(catalog.Manifests))
+	for _, manifest := range catalog.Manifests {
+		action, compatible := m.manifestAction(manifest)
+		if !compatible {
+			if manifest.Version != m.config.CurrentVersion && m.logger != nil {
+				m.logger.Warn("忽略与当前版本不兼容的历史更新", "version", manifest.Version)
+			}
+			continue
+		}
+		releases = append(releases, Release{
+			Version: manifest.Version, PublishedAt: manifest.PublishedAt,
+			ReleaseNotes: manifest.ReleaseNotes, Action: action,
+		})
+	}
+	sortReleases(releases)
+	return ReleaseHistory{Configured: true, GeneratedAt: catalog.GeneratedAt, Releases: releases}, nil
+}
+
+// Select 从刚刚验签的历史目录中选择一个准确版本；客户端提交的版本号从不携带下载地址。
+func (m *Manager) Select(ctx context.Context, version string) (Status, error) {
+	if m.client == nil {
+		return m.Status(), errors.New("在线更新尚未配置")
+	}
+	if !m.client.HasCatalog() {
+		return m.Status(), errors.New("历史版本目录尚未配置")
+	}
+	version = strings.TrimSpace(version)
+	if _, err := parseStableVersion(version); err != nil {
+		return m.Status(), errors.New("请选择有效的稳定版本")
+	}
+	if !m.opMu.TryLock() {
+		return m.Status(), errors.New("已有更新操作正在进行")
+	}
+	defer m.opMu.Unlock()
+	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	catalog, err := m.client.FetchCatalog(checkCtx)
+	if err != nil {
+		return m.Status(), err
+	}
+	for _, manifest := range catalog.Manifests {
+		if manifest.Version != version {
+			continue
+		}
+		action, compatible := m.manifestAction(manifest)
+		if !compatible {
+			return m.Status(), errors.New("所选版本与当前程序不兼容，不能直接安装")
+		}
+		m.manifest = &manifest
+		m.packagePath = ""
+		m.updateState(func(status *Status) {
+			status.State, status.Error = StateAvailable, ""
+			status.LatestVersion, status.PublishedAt = manifest.Version, manifest.PublishedAt
+			status.ReleaseNotes, status.SelectedAction = manifest.ReleaseNotes, action
+			status.Available = true
+			status.ProgressPercent, status.DownloadedBytes, status.TotalBytes = 0, 0, manifest.Size
+			status.LastCheckedAt = time.Now().Format(time.RFC3339)
+		})
+		return m.Status(), nil
+	}
+	return m.Status(), errors.New("指定版本不在维护者签名的历史目录中")
 }
 
 // StartDownload 在后台下载已验签的清单目标，避免慢速公网连接占住浏览器请求。
@@ -224,7 +313,7 @@ func (m *Manager) StartDownload() (Status, error) {
 	}
 	if m.manifest == nil || !m.Status().Available {
 		m.opMu.Unlock()
-		return m.Status(), errors.New("请先检查并确认存在可用更新")
+		return m.Status(), errors.New("请先检查更新或选择历史版本")
 	}
 	manifest := *m.manifest
 	m.updateState(func(status *Status) {
@@ -254,6 +343,53 @@ func (m *Manager) StartDownload() (Status, error) {
 		})
 	}()
 	return m.Status(), nil
+}
+
+func (m *Manager) manifestAction(manifest Manifest) (string, bool) {
+	if manifest.Version == m.config.CurrentVersion {
+		return "", false
+	}
+	if manifest.MinVersion != "" && !isDevelopmentVersion(m.config.CurrentVersion) {
+		meetsMinimum, err := versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
+		if err != nil || !meetsMinimum {
+			return "", false
+		}
+	}
+	if isDevelopmentVersion(m.config.CurrentVersion) {
+		return "install", true
+	}
+	isNewer, err := newerVersion(manifest.Version, m.config.CurrentVersion)
+	if err != nil {
+		return "", false
+	}
+	if isNewer {
+		return "upgrade", true
+	}
+	return "rollback", true
+}
+
+func sortReleases(releases []Release) {
+	for left := range releases {
+		for right := left + 1; right < len(releases); right++ {
+			leftVersion, leftErr := parseStableVersion(releases[left].Version)
+			rightVersion, rightErr := parseStableVersion(releases[right].Version)
+			if leftErr != nil || rightErr != nil {
+				continue
+			}
+			if versionLess(leftVersion, rightVersion) {
+				releases[left], releases[right] = releases[right], releases[left]
+			}
+		}
+	}
+}
+
+func versionLess(left, right [3]uint64) bool {
+	for index := range left {
+		if left[index] != right[index] {
+			return left[index] < right[index]
+		}
+	}
+	return false
 }
 
 // Install 写入只含可信本地文件名和摘要的请求，再启动固定的一次性安装服务。

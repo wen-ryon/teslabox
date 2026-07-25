@@ -5,7 +5,7 @@ After=NetworkManager.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
+RemainAfterExit=no
 EnvironmentFile=-/etc/teslabox/teslabox.env
 ExecStart=/usr/local/libexec/teslabox-ap-setup.sh
 

@@ -30,6 +30,7 @@ $helper = Join-Path $output "teslabox-update-helper-linux-arm64"
 $binaryTemporary = "$binary.tmp"
 $helperTemporary = "$helper.tmp"
 $manifest = Join-Path $output "latest.json"
+$versionManifest = Join-Path $output "manifest-$Version.json"
 $ldflags = "-s -w -X github.com/wen-ryon/teslabox/internal/version.Version=$Version -X github.com/wen-ryon/teslabox/internal/version.Commit=$commit"
 
 $previousGOOS = $env:GOOS
@@ -71,6 +72,7 @@ if ($NotesFile) {
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to generate the signed update manifest."
 }
+Copy-Item -Force $manifest $versionManifest
 
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
@@ -78,4 +80,4 @@ $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$binary.sha256", "$binaryHash  $(Split-Path -Leaf $binary)`n", [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText("$helper.sha256", "$helperHash  $(Split-Path -Leaf $helper)`n", [Text.Encoding]::ASCII)
 
-Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest | Format-Table Path, Hash
+Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest, $versionManifest | Format-Table Path, Hash

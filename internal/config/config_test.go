@@ -41,7 +41,7 @@ func TestLoad(t *testing.T) {
 	if cfg.FFmpegPath != "/opt/teslabox/media/bin/ffmpeg" || cfg.FFprobePath != "/opt/teslabox/media/bin/ffprobe" || cfg.MediaProbeTimeout != 10*time.Second {
 		t.Errorf("media config = %q, %q, %s", cfg.FFmpegPath, cfg.FFprobePath, cfg.MediaProbeTimeout)
 	}
-	if cfg.ExportPath != "exports" || cfg.ExportMaxDuration != 30*time.Minute || cfg.ExportQueueSize != 4 {
+	if cfg.ExportPath != "exports" || cfg.ExportMaxDuration != 2*time.Minute || cfg.ExportQueueSize != 4 {
 		t.Errorf("export config = %q, %s, %d", cfg.ExportPath, cfg.ExportMaxDuration, cfg.ExportQueueSize)
 	}
 	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {
@@ -53,8 +53,8 @@ func TestLoad(t *testing.T) {
 	if cfg.WiFiInterface != "" || cfg.APInterface != "ap0" {
 		t.Errorf("network interfaces = %q, %q", cfg.WiFiInterface, cfg.APInterface)
 	}
-	if cfg.BootIDPath != "/proc/sys/kernel/random/boot_id" || cfg.GadgetPauseStatePath != "/var/lib/teslabox-system/gadget-paused" {
-		t.Errorf("gadget safety paths = %q, %q", cfg.BootIDPath, cfg.GadgetPauseStatePath)
+	if cfg.BootIDPath != "/proc/sys/kernel/random/boot_id" || cfg.BootUptimePath != "/proc/uptime" || cfg.GadgetPauseStatePath != "/var/lib/teslabox-system/gadget-paused" {
+		t.Errorf("gadget safety paths = %q, %q, %q", cfg.BootIDPath, cfg.BootUptimePath, cfg.GadgetPauseStatePath)
 	}
 }
 
@@ -67,6 +67,42 @@ func TestLoadUsesDefaultHTTPAddr(t *testing.T) {
 	}
 	if cfg.HTTPAddr != ":80" {
 		t.Errorf("HTTPAddr = %q, want :80", cfg.HTTPAddr)
+	}
+}
+
+func TestLoadDerivesSignedCatalogFromManifest(t *testing.T) {
+	t.Setenv("TESLABOX_UPDATE_MANIFEST_URL", "https://gitee.example/repository/raw/master/stable/latest.json")
+	t.Setenv("TESLABOX_UPDATE_CATALOG_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.UpdateCatalogURL != "https://gitee.example/repository/raw/master/stable/history.json" {
+		t.Fatalf("UpdateCatalogURL = %q", cfg.UpdateCatalogURL)
+	}
+
+	t.Setenv("TESLABOX_UPDATE_CATALOG_URL", "https://updates.example/custom/catalog.json")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() with explicit catalog error = %v", err)
+	}
+	if cfg.UpdateCatalogURL != "https://updates.example/custom/catalog.json" {
+		t.Fatalf("explicit UpdateCatalogURL = %q", cfg.UpdateCatalogURL)
+	}
+}
+
+func TestCatalogURLForManifestRejectsUnrelatedOrInsecureURL(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"",
+		"http://gitee.example/stable/latest.json",
+		"https://gitee.example/stable/release.json",
+		"not-a-url",
+	} {
+		if got := catalogURLForManifest(value); got != "" {
+			t.Fatalf("catalogURLForManifest(%q) = %q", value, got)
+		}
 	}
 }
 
@@ -112,6 +148,7 @@ func TestConfigValidate(t *testing.T) {
 		UpdateMaxBytes:       128 * 1024 * 1024,
 		GadgetPauseStatePath: "/var/lib/teslabox-system/gadget-paused",
 		BootIDPath:           "/proc/sys/kernel/random/boot_id",
+		BootUptimePath:       "/proc/uptime",
 		ConfigFSPath:         "/sys/kernel/config/usb_gadget",
 		UDCPath:              "/sys/class/udc",
 		GadgetName:           "teslabox",
@@ -154,6 +191,7 @@ func TestConfigValidate(t *testing.T) {
 		{name: "invalid Tesla time zone", mutate: func(cfg *Config) { cfg.TeslaTimeZone = "Asia/NotAZone" }, wantErr: true},
 		{name: "relative gadget pause path", mutate: func(cfg *Config) { cfg.GadgetPauseStatePath = "var/lib/gadget-paused" }, wantErr: true},
 		{name: "relative boot id path", mutate: func(cfg *Config) { cfg.BootIDPath = "proc/sys/kernel/random/boot_id" }, wantErr: true},
+		{name: "relative boot uptime path", mutate: func(cfg *Config) { cfg.BootUptimePath = "proc/uptime" }, wantErr: true},
 		{name: "relative ffmpeg path", mutate: func(cfg *Config) { cfg.FFmpegPath = "ffmpeg" }, wantErr: true},
 		{name: "zero media probe timeout", mutate: func(cfg *Config) { cfg.MediaProbeTimeout = 0 }, wantErr: true},
 		{name: "zero idle snapshot interval", mutate: func(cfg *Config) { cfg.SnapshotIdleInterval = 0 }, wantErr: true},
@@ -162,7 +200,7 @@ func TestConfigValidate(t *testing.T) {
 		{name: "missing selector", mutate: func(cfg *Config) { cfg.DataLabel = "" }, wantErr: true},
 		{name: "unsafe gadget name", mutate: func(cfg *Config) { cfg.GadgetName = "../gadget" }, wantErr: true},
 		{name: "unsafe wifi interface", mutate: func(cfg *Config) { cfg.WiFiInterface = "wlan0;reboot" }, wantErr: true},
-		{name: "same network interfaces", mutate: func(cfg *Config) { cfg.WiFiInterface = "ap0" }, wantErr: true},
+		{name: "same network interfaces", mutate: func(cfg *Config) { cfg.WiFiInterface = "ap0" }},
 		{name: "zero minimum free bytes", mutate: func(cfg *Config) { cfg.MinFreeBytes = 0 }, wantErr: true},
 		{name: "invalid minimum free percent", mutate: func(cfg *Config) { cfg.MinFreePercent = 100 }, wantErr: true},
 		{name: "password without session secret", mutate: func(cfg *Config) { cfg.WebPasswordSHA256 = strings.Repeat("a", 64) }, wantErr: true},

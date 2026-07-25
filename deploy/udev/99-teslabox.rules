@@ -1,2 +1,5 @@
-# loop 设备由快照流程管理，忽略其事件可避免通知信号打断 losetup、fsck 和 lsblk 子进程。
-ACTION=="add|remove|change", SUBSYSTEM=="block", KERNEL!="loop*", RUN+="/bin/systemctl kill --kill-who=main --signal=SIGUSR1 teslabox.service"
+# 数据盘状态由 TeslaBox 的低频轮询收敛。不要从 udev 向主进程发送信号：
+# 系统启动时块设备事件可能早于 Go 信号订阅，默认 SIGUSR1 会终止刚启动的服务并破坏 Gadget 绑定窗口。
+
+# 无线网卡可能是可热插拔 USB/PCIe 设备；出现后只唤起独立 AP 探测服务，不触碰主服务或 Gadget。
+ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="teslabox-ap.service"

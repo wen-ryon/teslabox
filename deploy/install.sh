@@ -8,6 +8,7 @@ BOOTSTRAP_SHA256="14d7688f7d85c612ae9c42545078a818e3a8ed8c4c6b4f2656c8801d3ebe23
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
+UPDATE_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/history.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
 RADXA_KEYRING_VERSION="0.2.0"
 RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
@@ -429,7 +430,7 @@ configure_debian_apt_sources
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
-    dosfstools libnss-mdns network-manager parted pciutils rfkill udev util-linux xfsprogs
+    dosfstools libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
 
 if ! systemctl is-active --quiet teslabox.service 2>/dev/null && command -v ss >/dev/null 2>&1; then
     if ss -H -ltn 'sport = :80' 2>/dev/null | sed -n '1p' | read -r _; then
@@ -466,10 +467,11 @@ if [ ! -f /etc/teslabox/teslabox.env ]; then
 fi
 
 ENV_TEMP="${WORK_DIR}/teslabox.env.updated"
-awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|PUBLIC_KEY|CHANNEL|BOARD)=/' \
+awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|PUBLIC_KEY|CHANNEL|BOARD)=/' \
     /etc/teslabox/teslabox.env >"${ENV_TEMP}"
 {
     printf '%s\n' "TESLABOX_UPDATE_MANIFEST_URL=${UPDATE_MANIFEST_URL}"
+    printf '%s\n' "TESLABOX_UPDATE_CATALOG_URL=${UPDATE_CATALOG_URL}"
     printf '%s\n' "TESLABOX_UPDATE_PUBLIC_KEY=${UPDATE_PUBLIC_KEY}"
     printf '%s\n' 'TESLABOX_UPDATE_CHANNEL=stable'
     printf '%s\n' 'TESLABOX_UPDATE_BOARD=radxa-rock-3a'
@@ -560,12 +562,10 @@ else
 fi
 
 WIFI_INTERFACE="$(detect_wifi_interface)"
-if [ -n "${WIFI_INTERFACE}" ]; then
-    systemctl enable teslabox-ap.service >/dev/null || warn "teslabox-ap.service 无法设为开机启动。"
-    systemctl restart teslabox-ap.service || warn "AP 热点启动失败；请保留网线并在设置中心检查无线网卡。"
-else
-    systemctl disable teslabox-ap.service >/dev/null 2>&1 || true
-    warn "当前没有检测到无线客户端接口，暂不启动 AP；基础功能仍可通过网线使用。"
+systemctl enable teslabox-ap.service >/dev/null || warn "teslabox-ap.service 无法设为开机启动。"
+systemctl restart teslabox-ap.service || warn "AP 热点启动失败；请保留网线并在设置中心检查无线网卡。"
+if [ -z "${WIFI_INTERFACE}" ]; then
+    warn "当前没有检测到无线客户端接口；已保留热插拔探测，基础功能仍可通过网线使用。"
 fi
 
 log "启动 TeslaBox"

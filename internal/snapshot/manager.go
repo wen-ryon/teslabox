@@ -53,11 +53,12 @@ func (e *InsufficientSpaceError) Unwrap() error {
 
 // View 描述一个已经检查并只读挂载的 TeslaCam 快照。
 type View struct {
-	ID         string    `json:"id"`
-	ImagePath  string    `json:"image_path"`
-	MountPath  string    `json:"mount_path"`
-	LoopDevice string    `json:"loop_device"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	ImagePath     string    `json:"image_path"`
+	MountPath     string    `json:"mount_path"`
+	LoopDevice    string    `json:"loop_device"`
+	CreatedAt     time.Time `json:"created_at"`
+	RepairApplied bool      `json:"repair_applied"`
 }
 
 // Config 固定原始镜像、快照目录和运行时只读挂载根目录。
@@ -235,20 +236,6 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 	if err := requireRegularFile(temporaryImage); err != nil {
 		return View{}, fmt.Errorf("检查临时快照: %w", err)
 	}
-	loopDevice, err = m.attachLoop(ctx, temporaryImage, false)
-	if err != nil {
-		return View{}, err
-	}
-	if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
-		commandError, ok := errors.AsType[*system.CommandError](err)
-		if !ok || commandError.Code != 1 {
-			return View{}, fmt.Errorf("检查并修复 TeslaCam 快照: %w", err)
-		}
-	}
-	if err := m.detachLoop(ctx, loopDevice); err != nil {
-		return View{}, err
-	}
-	loopDevice = ""
 	if err := os.Rename(temporaryImage, finalImage); err != nil {
 		return View{}, fmt.Errorf("发布 TeslaCam 快照: %w", err)
 	}
@@ -256,12 +243,51 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	if err := m.mountReadOnly(ctx, loopDevice+"p1", mountPath); err != nil {
-		return View{}, err
+	repairApplied := false
+	firstMountErr := m.mountReadOnly(ctx, loopDevice+"p1", mountPath)
+	if firstMountErr != nil {
+		// 正常 reflink 副本通常可直接只读挂载；只有捕获到写入中间态时才运行全盘 fsck，
+		// 避免每 30 秒扫描都与车机的音乐读取和录像写入争抢底层闪存。
+		if err := m.detachLoop(ctx, loopDevice); err != nil {
+			return View{}, errors.Join(firstMountErr, err)
+		}
+		loopDevice = ""
+		loopDevice, err = m.attachLoop(ctx, finalImage, false)
+		if err != nil {
+			return View{}, errors.Join(firstMountErr, err)
+		}
+		if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
+			commandError, ok := errors.AsType[*system.CommandError](err)
+			if !ok || commandError.Code != 1 {
+				return View{}, errors.Join(firstMountErr, fmt.Errorf("检查并修复 TeslaCam 快照: %w", err))
+			}
+		}
+		repairApplied = true
+		if err := m.detachLoop(ctx, loopDevice); err != nil {
+			return View{}, errors.Join(firstMountErr, err)
+		}
+		loopDevice = ""
+		loopDevice, err = m.attachLoop(ctx, finalImage, true)
+		if err != nil {
+			return View{}, errors.Join(firstMountErr, err)
+		}
+		if retryErr := m.mountReadOnly(ctx, loopDevice+"p1", mountPath); retryErr != nil {
+			return View{}, errors.Join(
+				fmt.Errorf("首次只读挂载 TeslaCam 快照: %w", firstMountErr),
+				fmt.Errorf("修复后只读挂载 TeslaCam 快照: %w", retryErr),
+			)
+		}
 	}
 
 	cleanup = false
-	return View{ID: id, ImagePath: finalImage, MountPath: mountPath, LoopDevice: loopDevice, CreatedAt: createdAt}, nil
+	return View{
+		ID:            id,
+		ImagePath:     finalImage,
+		MountPath:     mountPath,
+		LoopDevice:    loopDevice,
+		CreatedAt:     createdAt,
+		RepairApplied: repairApplied,
+	}, nil
 }
 
 // Remove 先卸载只读视图再删除快照，不会触碰正在向 Tesla 暴露的原始镜像。

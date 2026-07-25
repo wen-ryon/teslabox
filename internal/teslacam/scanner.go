@@ -36,13 +36,15 @@ type Video struct {
 
 // EventMetadata 保存车辆写入的事件触发信息，避免用目录时间猜测真实触发点。
 type EventMetadata struct {
-	OccurredAt *time.Time `json:"occurred_at,omitempty"`
-	City       string     `json:"city,omitempty"`
-	Street     string     `json:"street,omitempty"`
-	Latitude   *float64   `json:"latitude,omitempty"`
-	Longitude  *float64   `json:"longitude,omitempty"`
-	Reason     string     `json:"reason,omitempty"`
-	Camera     string     `json:"camera,omitempty"`
+	OccurredAt  *time.Time `json:"occurred_at,omitempty"`
+	City        string     `json:"city,omitempty"`
+	Street      string     `json:"street,omitempty"`
+	Latitude    *float64   `json:"latitude,omitempty"`
+	Longitude   *float64   `json:"longitude,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+	TriggerType string     `json:"trigger_type,omitempty"`
+	Camera      string     `json:"camera,omitempty"`
+	CameraView  string     `json:"camera_view,omitempty"`
 }
 
 // Scanner 只读取目录元数据，不打开视频内容，降低扫描开销。
@@ -155,10 +157,55 @@ func readEventMetadata(path string, location *time.Location) (*EventMetadata, er
 		City: strings.TrimSpace(raw.City), Street: strings.TrimSpace(raw.Street),
 		Reason: strings.TrimSpace(raw.Reason), Camera: strings.TrimSpace(raw.Camera),
 	}
+	metadata.TriggerType = classifyEventTrigger(metadata.Reason)
+	metadata.CameraView = eventCameraView(metadata.Camera)
 	metadata.OccurredAt = parseEventTime(strings.TrimSpace(raw.Timestamp), location)
 	metadata.Latitude = parseCoordinate(raw.EstLat, -90, 90)
 	metadata.Longitude = parseCoordinate(raw.EstLon, -180, 180)
 	return metadata, nil
+}
+
+func classifyEventTrigger(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.HasPrefix(normalized, "sentry_panic"):
+		return "sentry_alarm"
+	case strings.HasPrefix(normalized, "sentry_aware_accel"):
+		return "sentry_motion"
+	case strings.HasPrefix(normalized, "sentry_aware_object"):
+		return "sentry_object"
+	case strings.HasPrefix(normalized, "sentry_"):
+		return "sentry_other"
+	case strings.HasPrefix(normalized, "user_interaction_honk"):
+		return "manual_honk"
+	case strings.HasPrefix(normalized, "user_interaction_dashcam_"):
+		return "manual_save"
+	case strings.HasPrefix(normalized, "user_interaction_"):
+		return "manual_other"
+	default:
+		return "unknown"
+	}
+}
+
+func eventCameraView(camera string) string {
+	// event.json 使用的是车端感知相机编号，而录像文件使用视角名称。
+	// 前向三路在 TeslaCam 中会合并为 front，未映射编号保持空值以避免错误标点。
+	switch strings.TrimSpace(camera) {
+	case "0", "1", "2":
+		return "front"
+	case "3":
+		return "left_repeater"
+	case "4":
+		return "right_repeater"
+	case "5":
+		return "left_pillar"
+	case "6":
+		return "right_pillar"
+	case "7":
+		return "back"
+	default:
+		return ""
+	}
 }
 
 func parseEventTime(value string, location *time.Location) *time.Time {

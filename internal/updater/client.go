@@ -17,11 +17,15 @@ import (
 	"time"
 )
 
-const maximumManifestSize = 64 * 1024
+const (
+	maximumManifestSize = 64 * 1024
+	maximumCatalogSize  = 512 * 1024
+)
 
 // ClientConfig 固定远程更新的信任根、设备目标和资源上限。
 type ClientConfig struct {
 	ManifestURL string
+	CatalogURL  string
 	PublicKey   ed25519.PublicKey
 	Channel     string
 	Board       string
@@ -38,9 +42,15 @@ type Client struct {
 
 // NewClient 创建带 HTTPS 跳转约束和超时的更新客户端。
 func NewClient(config ClientConfig) (*Client, error) {
-	manifestURL, err := url.Parse(strings.TrimSpace(config.ManifestURL))
-	if err != nil || !manifestURL.IsAbs() || manifestURL.Scheme != "https" || manifestURL.Host == "" || manifestURL.User != nil {
-		return nil, errors.New("更新清单地址必须是无凭据的 HTTPS 地址")
+	config.ManifestURL = strings.TrimSpace(config.ManifestURL)
+	config.CatalogURL = strings.TrimSpace(config.CatalogURL)
+	if err := validateHTTPSURL(config.ManifestURL, "更新清单地址"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(config.CatalogURL) != "" {
+		if err := validateHTTPSURL(config.CatalogURL, "历史版本目录地址"); err != nil {
+			return nil, err
+		}
 	}
 	if len(config.PublicKey) != ed25519.PublicKeySize {
 		return nil, errors.New("更新公钥无效")
@@ -68,43 +78,90 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return &Client{config: config}, nil
 }
 
+func validateHTTPSURL(value, label string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || !parsed.IsAbs() || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("%s 必须是无凭据的 HTTPS 地址", label)
+	}
+	return nil
+}
+
 // FetchManifest 下载并校验尺寸受限的最新版本清单。
 func (c *Client) FetchManifest(ctx context.Context) (Manifest, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.config.ManifestURL, nil)
+	content, err := c.fetchJSON(ctx, c.config.ManifestURL, maximumManifestSize, "更新清单")
 	if err != nil {
-		return Manifest{}, fmt.Errorf("创建更新检查请求: %w", err)
-	}
-	response, err := c.config.HTTPClient.Do(request)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("下载更新清单: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return Manifest{}, fmt.Errorf("更新服务器返回 HTTP %d", response.StatusCode)
-	}
-	if response.ContentLength > maximumManifestSize {
-		return Manifest{}, errors.New("更新清单超过大小限制")
-	}
-	content, err := io.ReadAll(io.LimitReader(response.Body, maximumManifestSize+1))
-	if err != nil {
-		return Manifest{}, fmt.Errorf("读取更新清单: %w", err)
-	}
-	if len(content) > maximumManifestSize {
-		return Manifest{}, errors.New("更新清单超过大小限制")
+		return Manifest{}, err
 	}
 	var manifest Manifest
-	decoder := json.NewDecoder(strings.NewReader(string(content)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
+	if err := decodeStrictJSON(content, &manifest); err != nil {
 		return Manifest{}, fmt.Errorf("解析更新清单: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Manifest{}, errors.New("更新清单包含多余内容")
 	}
 	if err := manifest.Verify(c.config.PublicKey, c.config.Channel, c.config.Board, c.config.Arch, c.config.MaximumSize); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// HasCatalog 表示设备已配置维护者签名的历史版本目录。
+func (c *Client) HasCatalog() bool {
+	return strings.TrimSpace(c.config.CatalogURL) != ""
+}
+
+// FetchCatalog 下载并验证历史版本目录及其所有独立清单。
+func (c *Client) FetchCatalog(ctx context.Context) (Catalog, error) {
+	if !c.HasCatalog() {
+		return Catalog{}, errors.New("历史版本目录尚未配置")
+	}
+	content, err := c.fetchJSON(ctx, c.config.CatalogURL, maximumCatalogSize, "历史版本目录")
+	if err != nil {
+		return Catalog{}, err
+	}
+	var catalog Catalog
+	if err := decodeStrictJSON(content, &catalog); err != nil {
+		return Catalog{}, fmt.Errorf("解析历史版本目录: %w", err)
+	}
+	if err := catalog.Verify(c.config.PublicKey, c.config.Channel, c.config.Board, c.config.Arch, c.config.MaximumSize); err != nil {
+		return Catalog{}, err
+	}
+	return catalog, nil
+}
+
+func (c *Client) fetchJSON(ctx context.Context, source string, limit int64, label string) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建 %s 请求: %w", label, err)
+	}
+	response, err := c.config.HTTPClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("下载 %s: %w", label, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("更新服务器返回 HTTP %d", response.StatusCode)
+	}
+	if response.ContentLength > limit {
+		return nil, fmt.Errorf("%s 超过大小限制", label)
+	}
+	content, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 %s: %w", label, err)
+	}
+	if int64(len(content)) > limit {
+		return nil, fmt.Errorf("%s 超过大小限制", label)
+	}
+	return content, nil
+}
+
+func decodeStrictJSON(content []byte, value any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(content)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("包含多余内容")
+	}
+	return nil
 }
 
 // Download 下载签名清单指向的程序，并在原子改名前验证长度和 SHA-256。

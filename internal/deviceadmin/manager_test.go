@@ -2,6 +2,7 @@ package deviceadmin
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -13,12 +14,20 @@ import (
 
 type fakeRunner struct {
 	responses map[string]string
+	failures  map[string][]error
 	calls     []string
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := strings.Join(append([]string{name}, args...), " ")
 	r.calls = append(r.calls, call)
+	if len(r.failures[call]) > 0 {
+		err := r.failures[call][0]
+		r.failures[call] = r.failures[call][1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return []byte(r.responses[call]), nil
 }
 
@@ -82,6 +91,52 @@ func TestAPSettingsIncludesInterfaceDetails(t *testing.T) {
 	}
 }
 
+func TestAPSettingsReportsUnavailableWithoutWirelessDevice(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid 11111111-1111-1111-1111-111111111111":                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                                               "eth0:ethernet:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	settings, err := manager.APSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Available || settings.Enabled {
+		t.Fatalf("settings = %#v", settings)
+	}
+}
+
+func TestAPSettingsReportsUnavailableForWiFiOnlyInterface(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "wlan0:wifi:connected\neth0:ethernet:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	settings, err := manager.APSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Available || settings.Enabled || settings.Interface != "ap0" {
+		t.Fatalf("settings = %#v", settings)
+	}
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Available || status.Interface != "wlan0" {
+		t.Fatalf("WiFi-only status = %#v", status)
+	}
+}
+
 func TestManagerDiscoversNonstandardWiFiAndAPInterfaces(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{
@@ -108,6 +163,122 @@ func TestManagerDiscoversNonstandardWiFiAndAPInterfaces(t *testing.T) {
 	}
 	if settings.Interface != "hotspot7" || settings.MACAddress != "AA:BB:CC:DD:EE:20" {
 		t.Fatalf("settings = %#v", settings)
+	}
+}
+
+func TestUpdateAPClosesActiveHotspotAfterResponseDelay(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var scheduled func()
+	manager.schedule = func(delay time.Duration, operation func()) {
+		if delay != apDisableDelay {
+			t.Fatalf("delay = %s, want %s", delay, apDisableDelay)
+		}
+		scheduled = operation
+	}
+
+	err := manager.UpdateAP(context.Background(), APUpdate{
+		Enabled: false, SSID: "TeslaBox-5G", Band: "a", Channel: 161, AutoConnect: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAP() error = %v", err)
+	}
+	downCall := "nmcli --wait 15 connection down uuid " + apUUID
+	if containsCall(runner.calls, downCall) {
+		t.Fatalf("AP was closed before response: calls = %v", runner.calls)
+	}
+	if scheduled == nil {
+		t.Fatal("AP close operation was not scheduled")
+	}
+	scheduled()
+	if !containsCall(runner.calls, downCall) {
+		t.Fatalf("scheduled AP close was not executed: calls = %v", runner.calls)
+	}
+}
+
+func TestUpdateAPDoesNotRunStaleDisableAfterReenable(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var scheduled func()
+	manager.schedule = func(_ time.Duration, operation func()) {
+		scheduled = operation
+	}
+	update := APUpdate{SSID: "TeslaBox-5G", Band: "a", Channel: 161}
+	if err := manager.UpdateAP(context.Background(), update); err != nil {
+		t.Fatalf("关闭 UpdateAP() error = %v", err)
+	}
+	update.Enabled = true
+	if err := manager.UpdateAP(context.Background(), update); err != nil {
+		t.Fatalf("重新启用 UpdateAP() error = %v", err)
+	}
+	if scheduled == nil {
+		t.Fatal("AP close operation was not scheduled")
+	}
+	scheduled()
+	downCall := "nmcli --wait 15 connection down uuid " + apUUID
+	if containsCall(runner.calls, downCall) {
+		t.Fatalf("旧关闭任务不应关闭已重新启用的 AP: calls = %v", runner.calls)
+	}
+	upCall := "nmcli --wait 15 connection up uuid " + apUUID + " ifname ap0"
+	if !containsCall(runner.calls, upCall) {
+		t.Fatalf("AP 未重新启用: calls = %v", runner.calls)
+	}
+}
+
+func TestWiFiStatusReportsUnavailableWithoutWirelessDevice(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status": "eth0:ethernet:connected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Available || status.Interface != "" {
+		t.Fatalf("status = %#v", status)
+	}
+	if !strings.Contains(status.SingleRadioNotice, "有线管理不受影响") {
+		t.Fatalf("notice = %q", status.SingleRadioNotice)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "device wifi list ifname") {
+			t.Fatalf("没有无线网卡时不应扫描: %#v", runner.calls)
+		}
+	}
+}
+
+func TestWiFiStatusUsesSingleRadioAPInterface(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless:wlan7:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n149\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan7:wifi:connected\neth0:ethernet:connected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan7 --rescan no": "",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Available || status.Interface != "wlan7" || !status.APActive || status.ConcurrentMode {
+		t.Fatalf("status = %#v", status)
 	}
 }
 
@@ -228,7 +399,7 @@ func TestWiFiStatusReportsRealAPSTAConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.ConcurrentMode || status.CurrentConnection != "Home" {
+	if !status.ConcurrentMode || !status.ChannelCoupled || status.CurrentConnection != "Home" {
 		t.Fatalf("status = %#v", status)
 	}
 }
@@ -239,7 +410,8 @@ func TestConnectAlignsAPChannelAndLocksBSSID(t *testing.T) {
 		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless:ap0:yes\nHome:22222222-2222-2222-2222-222222222222:802-11-wireless::no\n",
 		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n149\nwpa-psk\nshared\n192.168.88.1/24\n",
 		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
-		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                                              ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "ap0:wifi:connected\nwlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := ConnectRequest{UUID: "22222222-2222-2222-2222-222222222222"}
@@ -259,6 +431,87 @@ func TestConnectAlignsAPChannelAndLocksBSSID(t *testing.T) {
 	}
 }
 
+func TestConnectKeepsIndependentAPRadioOnItsOwnChannel(t *testing.T) {
+	t.Parallel()
+	const (
+		apUUID       = "11111111-1111-1111-1111-111111111111"
+		upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	)
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                        "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\nHome:" + upstreamUUID + ":802-11-wireless::no\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID:       "ap\nTeslaBox-5G\nbg\n6\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                          "ap0:wifi:connected\nwlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                         ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager.sameWirelessPHY = func(_, _ string) (bool, bool) { return false, true }
+
+	if err := manager.Connect(context.Background(), ConnectRequest{UUID: upstreamUUID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "uuid "+apUUID+" 802-11-wireless.band") ||
+			strings.Contains(call, "connection up uuid "+apUUID) {
+			t.Fatalf("独立 AP 网卡不应跟随上游信道重启: calls = %#v", runner.calls)
+		}
+	}
+	want := "nmcli --wait 15 connection up uuid " + upstreamUUID + " ifname wlan0"
+	if !containsCall(runner.calls, want) {
+		t.Fatalf("独立客户端网卡未连接上游: calls = %#v", runner.calls)
+	}
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.ConcurrentMode || status.ChannelCoupled || !strings.Contains(status.SingleRadioNotice, "独立无线设备") {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestAlignAPChannelFailureRestoresPreviousNetworkState(t *testing.T) {
+	t.Parallel()
+	const (
+		apUUID       = "11111111-1111-1111-1111-111111111111"
+		upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	)
+	apUpCall := "nmcli --wait 20 connection up uuid " + apUUID + " ifname ap0"
+	runner := &fakeRunner{
+		responses: map[string]string{
+			"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                        "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\nHome:" + upstreamUUID + ":802-11-wireless:wlan0:yes\n",
+			"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID:       "ap\nTeslaBox-5G\na\n149\nwpa-psk\nshared\n192.168.88.1/24\n",
+			"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+			"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                                 "ap0\n",
+			"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                          "ap0:wifi:connected\nwlan0:wifi:connected\n",
+		},
+		failures: map[string][]error{
+			apUpCall: {errors.New("热点启动失败")},
+		},
+	}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status := WiFiStatus{
+		Interface:         "wlan0",
+		CurrentConnection: "Home",
+		SavedNetworks: []SavedNetwork{{
+			Name: "Home", UUID: upstreamUUID,
+		}},
+	}
+
+	if err := manager.alignAPChannel(context.Background(), status, 161); err == nil {
+		t.Fatal("alignAPChannel() error = nil")
+	}
+	wantCalls := []string{
+		"nmcli connection modify uuid " + apUUID + " 802-11-wireless.band a 802-11-wireless.channel 149",
+		apUpCall,
+		"nmcli --wait 15 connection up uuid " + upstreamUUID + " ifname wlan0",
+	}
+	for _, want := range wantCalls {
+		if !containsCall(runner.calls, want) {
+			t.Fatalf("missing rollback call %q in %#v", want, runner.calls)
+		}
+	}
+}
+
 func TestReconcileAutoConnectUsesPriorityAndRealignsAP(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{
@@ -266,9 +519,10 @@ func TestReconcileAutoConnectUsesPriorityAndRealignsAP(t *testing.T) {
 		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
 		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
 		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 33333333-3333-3333-3333-333333333333": "infrastructure\nBackup\na\n0\nwpa-psk\nauto\n\n",
-		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                                              ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:165:WPA2\n:Backup:AA\\:BB\\:CC\\:DD\\:EE\\:02:90:161:WPA2\n",
-		"nmcli -g connection.autoconnect-priority connection show uuid 22222222-2222-2222-2222-222222222222":                                                                                                                     "90\n",
-		"nmcli -g connection.autoconnect-priority connection show uuid 33333333-3333-3333-3333-333333333333":                                                                                                                     "10\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "ap0:wifi:connected\nwlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:165:WPA2\n:Backup:AA\\:BB\\:CC\\:DD\\:EE\\:02:90:161:WPA2\n",
+		"nmcli -g connection.autoconnect-priority connection show uuid 22222222-2222-2222-2222-222222222222":        "90\n",
+		"nmcli -g connection.autoconnect-priority connection show uuid 33333333-3333-3333-3333-333333333333":        "10\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	recovered, ssid, err := manager.reconcileAutoConnect(context.Background())
@@ -322,6 +576,46 @@ func TestReconcileAutoConnectFollowsActiveUpstreamChannel(t *testing.T) {
 	}
 }
 
+func TestReconcileAutoConnectIfNeededSkipsFullInventoryForHealthyLink(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -g GENERAL.STATE device show wlan0": "100 (connected)\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager.monitoredWiFiInterface = "wlan0"
+
+	recovered, ssid, err := manager.reconcileAutoConnectIfNeeded(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered || ssid != "" {
+		t.Fatalf("healthy link recovery = (%t, %q), want no recovery", recovered, ssid)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != "nmcli -g GENERAL.STATE device show wlan0" {
+		t.Fatalf("healthy link calls = %v, want only lightweight state query", runner.calls)
+	}
+}
+
+func TestReconcileAutoConnectIfNeededRunsFullInventoryOnFirstCheck(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                "",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": "",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if _, _, err := manager.reconcileAutoConnectIfNeeded(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if manager.monitoredWiFiInterface != "wlan0" {
+		t.Fatalf("monitored WiFi interface = %q, want wlan0", manager.monitoredWiFiInterface)
+	}
+	calls := strings.Join(runner.calls, "\n")
+	if !strings.Contains(calls, "nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show") ||
+		!strings.Contains(calls, "nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no") {
+		t.Fatalf("first check calls = %v, want full profile and cached access-point inventory", runner.calls)
+	}
+}
+
 func containsCall(calls []string, expected string) bool {
 	for _, call := range calls {
 		if call == expected {
@@ -339,8 +633,12 @@ func TestValidationAndPowerScheduling(t *testing.T) {
 	if err := validatePassword("short"); err == nil {
 		t.Fatal("validatePassword() error = nil")
 	}
-	if !validBandChannel("a", 149) || validBandChannel("a", 6) {
+	if !validBandChannel("a", 36) || !validBandChannel("a", 149) || !validBandChannel("a", 165) ||
+		validBandChannel("a", 6) || !validBandChannel("bg", 13) || validBandChannel("bg", 14) {
 		t.Fatal("validBandChannel() returned unexpected result")
+	}
+	if _, ok := concurrentBand(100); ok {
+		t.Fatal("DFS 信道不应进入单射频 AP+STA 自动对齐")
 	}
 	runner := &fakeRunner{responses: map[string]string{}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -37,7 +37,7 @@ type fakeSnapshotSource struct {
 	released  int
 }
 
-func (s *fakeSnapshotSource) Scan(context.Context) error {
+func (s *fakeSnapshotSource) ActivateMedia(context.Context) error {
 	s.scanCalls++
 	return s.scanErr
 }

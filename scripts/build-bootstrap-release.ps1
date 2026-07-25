@@ -11,6 +11,27 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+function Assert-LinuxTextFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0) {
+        throw "Required Linux source text file is empty: $Path"
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw "Linux source text file must not contain a UTF-8 BOM: $Path"
+    }
+    if ($bytes -contains 0x0D) {
+        throw "Linux source text file must use LF line endings: $Path"
+    }
+    $strictUTF8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false, $true
+    try {
+        [void]$strictUTF8.GetString($bytes)
+    } catch {
+        throw "Linux source text file is not valid UTF-8: $Path"
+    }
+}
+
 if (-not $AllowDirty) {
     $dirty = git -C $root status --porcelain
     if ($LASTEXITCODE -ne 0) {
@@ -106,10 +127,8 @@ $files = @{
 foreach ($entry in $files.GetEnumerator()) {
     $destination = Join-Path $stage $entry.Value
     $source = Join-Path $root $entry.Key
+    Assert-LinuxTextFile -Path $source
     $sourceLength = (Get-Item -LiteralPath $source).Length
-    if ($sourceLength -eq 0) {
-        throw "Required Linux source text file is empty: $source"
-    }
     Copy-Item -LiteralPath $source -Destination $destination
     $destinationLength = (Get-Item -LiteralPath $destination).Length
     if ($destinationLength -ne $sourceLength) {

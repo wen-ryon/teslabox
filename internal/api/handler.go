@@ -23,6 +23,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
+	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 	"github.com/wen-ryon/teslabox/internal/updater"
 )
@@ -106,6 +107,8 @@ type ExportAdmin interface {
 type UpdateAdmin interface {
 	Status() updater.Status
 	Check(context.Context) (updater.Status, error)
+	History(context.Context) (updater.ReleaseHistory, error)
+	Select(context.Context, string) (updater.Status, error)
 	StartDownload() (updater.Status, error)
 	Install(context.Context) (updater.Status, error)
 }
@@ -113,6 +116,7 @@ type UpdateAdmin interface {
 // Diagnostics 定义日志中心只能读取预设诊断来源的能力边界。
 type Diagnostics interface {
 	Logs(context.Context, string, int) (diagnostics.Report, error)
+	Bundle(context.Context) (diagnostics.Bundle, error)
 }
 
 type handlerOptions struct {
@@ -377,6 +381,105 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 		}
 		writeJSON(w, http.StatusOK, report)
 	})
+	mux.HandleFunc("GET /api/v1/diagnostics/report", func(w http.ResponseWriter, r *http.Request) {
+		bundle, err := manager.Bundle(r.Context())
+		if err != nil {
+			logger.Warn("生成完整诊断报告失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法生成完整诊断报告"})
+			return
+		}
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": bundle.Filename}))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(bundle.Content)
+	})
+	mux.HandleFunc("POST /api/v1/diagnostics/client-event", func(w http.ResponseWriter, r *http.Request) {
+		var event clientDiagnosticEvent
+		if !decodeJSON(w, r, &event) {
+			return
+		}
+		if !event.valid() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的客户端诊断事件"})
+			return
+		}
+		event.normalize()
+		logger.Warn("客户端播放诊断",
+			"event", event.Event,
+			"reason", event.Reason,
+			"session_id", event.SessionID,
+			"group_id", event.GroupID,
+			"display", event.Display,
+			"quality", event.Quality,
+			"effective_quality", event.EffectiveQuality,
+			"access_path", event.AccessPath,
+			"network_type", event.NetworkType,
+			"downlink_mbps", event.DownlinkMbps,
+			"rtt_ms", event.RTTMS,
+			"media_mbps", event.MediaMbps,
+			"buffer_seconds", event.BufferSeconds,
+			"stalls", event.Stalls,
+			"media_error_code", event.MediaErrorCode,
+			"ready_state", event.ReadyState,
+			"user_agent", normalizeDiagnosticText(r.UserAgent(), 240),
+		)
+		writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+	})
+}
+
+type clientDiagnosticEvent struct {
+	Event            string  `json:"event"`
+	Reason           string  `json:"reason"`
+	SessionID        string  `json:"session_id"`
+	GroupID          string  `json:"group_id"`
+	Display          string  `json:"display"`
+	Quality          string  `json:"quality"`
+	EffectiveQuality string  `json:"effective_quality"`
+	AccessPath       string  `json:"access_path"`
+	NetworkType      string  `json:"network_type"`
+	DownlinkMbps     float64 `json:"downlink_mbps"`
+	RTTMS            int     `json:"rtt_ms"`
+	MediaMbps        float64 `json:"media_mbps"`
+	BufferSeconds    float64 `json:"buffer_seconds"`
+	Stalls           int     `json:"stalls"`
+	MediaErrorCode   int     `json:"media_error_code"`
+	ReadyState       int     `json:"ready_state"`
+}
+
+func (e *clientDiagnosticEvent) valid() bool {
+	switch strings.ToLower(strings.TrimSpace(e.Event)) {
+	case "media_error", "load_failed", "fallback_requested", "playback_stall":
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *clientDiagnosticEvent) normalize() {
+	e.Event = normalizeDiagnosticText(strings.ToLower(e.Event), 32)
+	e.Reason = normalizeDiagnosticText(e.Reason, 180)
+	e.SessionID = normalizeDiagnosticText(e.SessionID, 96)
+	e.GroupID = normalizeDiagnosticText(e.GroupID, 96)
+	e.Display = normalizeDiagnosticText(e.Display, 32)
+	e.Quality = normalizeDiagnosticText(e.Quality, 32)
+	e.EffectiveQuality = normalizeDiagnosticText(e.EffectiveQuality, 32)
+	e.AccessPath = normalizeDiagnosticText(e.AccessPath, 64)
+	e.NetworkType = normalizeDiagnosticText(e.NetworkType, 32)
+	e.DownlinkMbps = max(0, min(e.DownlinkMbps, 10000))
+	e.RTTMS = max(0, min(e.RTTMS, 600000))
+	e.MediaMbps = max(0, min(e.MediaMbps, 10000))
+	e.BufferSeconds = max(0, min(e.BufferSeconds, 86400))
+	e.Stalls = max(0, min(e.Stalls, 100000))
+	e.MediaErrorCode = max(0, min(e.MediaErrorCode, 10))
+	e.ReadyState = max(0, min(e.ReadyState, 4))
+}
+
+func normalizeDiagnosticText(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	runes := []rune(value)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return value
 }
 
 func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAdmin, power PowerAdmin, automation MaintenanceAutomation, logger *slog.Logger) {
@@ -388,6 +491,29 @@ func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAd
 		if err != nil {
 			logger.Warn("检查在线更新失败", "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("GET /api/v1/update/history", func(w http.ResponseWriter, r *http.Request) {
+		history, err := admin.History(r.Context())
+		if err != nil {
+			logger.Warn("读取历史版本目录失败", "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, history)
+	})
+	mux.HandleFunc("POST /api/v1/update/select", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Version string `json:"version"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		status, err := admin.Select(r.Context(), request.Version)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, status)
@@ -579,13 +705,54 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 		tracked := &countingWriter{ResponseWriter: w}
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Cache-Control", "no-store")
-		err := compositor.Stream(r.Context(), media.CompositeRequest{
-			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Inputs: inputs,
-		}, tracked)
-		if err == nil || errors.Is(err, context.Canceled) {
+		request := media.CompositeRequest{
+			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Camera: r.URL.Query().Get("camera"), Inputs: inputs,
+		}
+		startedAt := time.Now()
+		logger.Info("实时合成录像开始",
+			"group_id", selected.ID,
+			"layout", request.Layout,
+			"quality", request.Quality,
+			"camera", request.Camera,
+			"input_count", len(request.Inputs),
+		)
+		err := compositor.Stream(r.Context(), request, tracked)
+		duration := time.Since(startedAt)
+		if err == nil {
+			logger.Info("实时合成录像完成",
+				"group_id", selected.ID,
+				"layout", request.Layout,
+				"quality", request.Quality,
+				"bytes", tracked.written,
+				"duration_ms", duration.Milliseconds(),
+			)
 			return
 		}
-		logger.Warn("实时合成录像失败", "group_id", selected.ID, "error", err)
+		if errors.Is(err, context.Canceled) {
+			logger.Info("实时合成录像由客户端中止",
+				"group_id", selected.ID,
+				"layout", request.Layout,
+				"quality", request.Quality,
+				"bytes", tracked.written,
+				"duration_ms", duration.Milliseconds(),
+			)
+			return
+		}
+		logValues := []any{
+			"group_id", selected.ID,
+			"layout", request.Layout,
+			"quality", request.Quality,
+			"camera", request.Camera,
+			"input_count", len(request.Inputs),
+			"bytes", tracked.written,
+			"duration_ms", duration.Milliseconds(),
+			"error", normalizeDiagnosticText(err.Error(), 2048),
+		}
+		var commandError *system.CommandError
+		if errors.As(err, &commandError) {
+			logValues = append(logValues, "command", commandError.Name, "exit_code", commandError.Code)
+		}
+		logger.Warn("实时合成录像失败", logValues...)
 		if tracked.written > 0 {
 			return
 		}
@@ -1046,6 +1213,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求参数无效"})
 		return false
 	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求参数无效"})
+		return false
+	}
 	return true
 }
 
@@ -1053,6 +1224,10 @@ func writeDeviceAdminError(w http.ResponseWriter, logger *slog.Logger, message s
 	logger.Warn(message, "error", err)
 	if errors.Is(err, deviceadmin.ErrAPActive) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前无线网卡正在提供 TeslaBox 热点。第一版不会自动关闭热点，请先准备有线网络或第二块无线网卡。"})
+		return
+	}
+	if errors.Is(err, deviceadmin.ErrWiFiUnavailable) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未检测到可用的无线网卡；TeslaUSB、媒体与有线管理不受影响"})
 		return
 	}
 	if errors.Is(err, deviceadmin.ErrUnsupportedSecurity) {
@@ -1207,6 +1382,7 @@ type videoGroup struct {
 	RecordedAt    time.Time               `json:"recorded_at"`
 	EndAt         time.Time               `json:"end_at"`
 	Duration      float64                 `json:"duration_seconds"`
+	TimelineStart float64                 `json:"timeline_start_seconds"`
 	TimeSpreadMS  int64                   `json:"time_spread_ms"`
 	TotalSize     int64                   `json:"total_size"`
 	Complete      bool                    `json:"complete"`
@@ -1362,8 +1538,13 @@ func findVideoSession(videos []teslacam.Video, id string) (videoSession, bool) {
 }
 
 func exportSource(snapshotRoot string, session videoSession) (media.ExportSource, error) {
-	source := media.ExportSource{SessionStart: session.StartAt, SessionEnd: session.EndAt}
+	sessionEnd := session.EndAt
+	if session.Duration > 0 {
+		sessionEnd = session.StartAt.Add(time.Duration(session.Duration * float64(time.Second)))
+	}
+	source := media.ExportSource{SessionStart: session.StartAt, SessionEnd: sessionEnd}
 	for _, moment := range session.Moments {
+		momentStart := session.StartAt.Add(time.Duration(moment.TimelineStart * float64(time.Second)))
 		for _, video := range moment.Videos {
 			name, err := snapshotVideoPath(snapshotRoot, video.Path)
 			if err != nil {
@@ -1373,8 +1554,10 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 			if duration <= 0 {
 				duration = defaultSegmentDuration.Seconds()
 			}
+			// 最近录像会压缩掉缺失时间段，导出必须沿用页面时间轴，否则点击的范围会落到错误片段。
+			recordedAt := momentStart.Add(video.RecordedAt.Sub(moment.RecordedAt))
 			source.Videos = append(source.Videos, media.ExportVideo{
-				Camera: video.Camera, Path: name, RecordedAt: video.RecordedAt, Duration: duration,
+				Camera: video.Camera, Path: name, RecordedAt: recordedAt, Duration: duration,
 			})
 		}
 	}
@@ -1447,7 +1630,8 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 	})
 	sessions := make([]videoSession, 0, len(ordered))
 	for _, group := range ordered {
-		if len(sessions) == 0 || !sessionAcceptsGroup(sessions[len(sessions)-1], group, continuityGap) {
+		sessionIndex := matchingSession(sessions, group, continuityGap)
+		if sessionIndex < 0 {
 			sessions = append(sessions, videoSession{
 				ID: group.ID, ClipType: group.ClipType, Event: group.Event, EventMetadata: group.EventMetadata,
 				ThumbnailID: group.ThumbnailID,
@@ -1457,7 +1641,7 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 			})
 			continue
 		}
-		session := &sessions[len(sessions)-1]
+		session := &sessions[sessionIndex]
 		session.Moments = append(session.Moments, group)
 		session.TotalSize += group.TotalSize
 		session.Complete = session.Complete && group.Complete
@@ -1473,7 +1657,7 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 	}
 	for index := range sessions {
 		session := &sessions[index]
-		session.Duration = session.EndAt.Sub(session.StartAt).Seconds()
+		assignSessionTimeline(session)
 		session.SegmentCount = len(session.Moments)
 		if session.ThumbnailID != "" {
 			session.ThumbnailURL = "/api/v1/thumbnails/" + session.ThumbnailID
@@ -1490,12 +1674,67 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 			}
 		}
 	}
-	slices.Reverse(sessions)
+	slices.SortFunc(sessions, func(left, right videoSession) int {
+		return right.StartAt.Compare(left.StartAt)
+	})
 	return sessions
 }
 
+func matchingSession(sessions []videoSession, group videoGroup, continuityGap time.Duration) int {
+	if group.ClipType == "recent" {
+		for index := range sessions {
+			if sessions[index].ClipType == "recent" {
+				return index
+			}
+		}
+		return -1
+	}
+	for index := len(sessions) - 1; index >= 0; index-- {
+		if sessionAcceptsGroup(sessions[index], group, continuityGap) {
+			return index
+		}
+	}
+	return -1
+}
+
+func assignSessionTimeline(session *videoSession) {
+	if session.ClipType != "recent" {
+		for index := range session.Moments {
+			session.Moments[index].TimelineStart = session.Moments[index].RecordedAt.Sub(session.StartAt).Seconds()
+		}
+		session.Duration = session.EndAt.Sub(session.StartAt).Seconds()
+		return
+	}
+
+	var playbackDuration float64
+	for index := range session.Moments {
+		moment := &session.Moments[index]
+		moment.TimelineStart = playbackDuration
+		playbackDuration += groupPlaybackDuration(*moment)
+	}
+	session.Duration = playbackDuration
+}
+
+func groupPlaybackDuration(group videoGroup) float64 {
+	if group.Duration > 0 {
+		return group.Duration
+	}
+	if group.EndAt.After(group.RecordedAt) {
+		return group.EndAt.Sub(group.RecordedAt).Seconds()
+	}
+	return defaultSegmentDuration.Seconds()
+}
+
 func sessionAcceptsGroup(session videoSession, group videoGroup, continuityGap time.Duration) bool {
-	if session.ClipType != group.ClipType || session.Event != group.Event {
+	if session.ClipType != group.ClipType {
+		return false
+	}
+	// RecentClips 本质是循环缓冲区。即使中间缺一分钟，也保留为同一条可跳转时间轴，
+	// 让用户看到“最近录像”的完整窗口，而不是被视角缺失或写入间隔切成多段。
+	if session.ClipType == "recent" {
+		return true
+	}
+	if session.Event != group.Event {
 		return false
 	}
 	return !group.RecordedAt.After(session.EndAt.Add(continuityGap))

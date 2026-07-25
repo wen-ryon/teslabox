@@ -80,7 +80,9 @@ TeslaBox manages USB Mass Storage Gadget through configfs:
 - When an initialized data drive with the configured stable identity is inserted after boot, the system must mount it and revalidate the backing image. If the safe binding window for that boot has ended, Gadget remains unbound until the user reconnects OTG and requests a warm reboot recovery; a fully powered-off boot with OTG pre-connected remains the fallback. This path must never format an unknown or uninitialized drive.
 - Do not expose a LUN when the backing image is unavailable or the data drive has failed.
 - If the active data drive disconnects while Gadget is running, enter a fault state, make a best effort to unbind the UDC, stop providing the LUN, and emit an explicit alert. After the drive returns, repeat identity, mount, and image validation instead of reusing stale state.
-- Allow at most one UDC binding attempt per ROCK 3A `boot_id`, during the initial service convergence. If the host does not complete enumeration within the bounded wait, unbind immediately and prohibit retries from polling, udev, service restarts, or UI actions during that boot.
+- Allow at most one UDC binding attempt per ROCK 3A `boot_id`, during the first 60 seconds of kernel uptime and the initial service convergence. If uptime cannot be verified, fail closed for new bindings without tearing down an existing bound Gadget. If the host does not complete enumeration within the bounded wait, unbind immediately and prohibit retries from polling, udev, service restarts, or UI actions during that boot.
+- A single timeout while reading `lsblk`, configfs, or UDC state must not be treated as a disconnected data drive and must not unbind an already active Gadget.
+- After the boot-time binding succeeds, keep the Gadget bound while the vehicle resets or re-enumerates USB. Stop the LUN only when the backing store is unavailable or the active data drive is confirmed missing.
 
 ## Consistent Snapshots and Online Viewing
 
@@ -104,6 +106,7 @@ Rules:
 - Snapshot creation and reading must not unbind the active Gadget.
 - A snapshot must be independent of the image still being written.
 - Mount snapshots read-only; filesystem repair may only modify the snapshot copy.
+- Try a direct read-only mount first. Run `fsck.exfat` only when the snapshot copy cannot be mounted, so periodic scans do not contend with vehicle music reads or recording writes.
 - APIs return only media files that are complete and readable in a snapshot.
 - Switch the media index atomically after a new snapshot becomes available. Do not delete an old snapshot while it is still serving a playback request.
 - Snapshot failure must not interrupt vehicle recording. Keep the last usable snapshot and expose a degraded state.

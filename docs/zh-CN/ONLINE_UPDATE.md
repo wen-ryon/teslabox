@@ -15,7 +15,7 @@
 
 车机 USB 正在连接或存在排队、运行中的视频导出任务时，服务端会拒绝安装。下载和检查不受此限制。
 
-在线更新只保留最近一次可回滚备份：`/var/lib/teslabox-system/update-backups/teslabox.previous.backup`。人工部署脚本同样只保留 `/usr/local/bin/teslabox.backup`。旧版本遗留的带时间戳备份不会再新增；如需清理已有历史备份，应先人工确认最近可回滚版本后再删除。
+在线更新只保留最近一次健康检查自动回滚备份：`/var/lib/teslabox-system/update-backups/teslabox.previous.backup`。人工部署脚本同样只保留 `/usr/local/bin/teslabox.backup`。这份备份用于安装失败自动恢复，不作为管理页面的指定版本来源；指定版本只来自维护者签名的历史目录。
 
 ## 一次性生成发布密钥
 
@@ -76,18 +76,40 @@ systemctl cat teslabox-update.service
   -NotesFile .\release-notes\0.2.0.md
 ```
 
-把 `dist\update\teslabox-linux-arm64` 和 `dist\update\latest.json` 上传到该 Release。更新清单中已经包含包体摘要、大小、说明和签名，上传后不要手工修改。
+把 `dist\update\teslabox-linux-arm64`、`dist\update\latest.json` 和 `dist\update\manifest-0.2.0.json` 上传到该 Release。更新清单中已经包含包体摘要、大小、说明和签名，上传后不要手工修改。`manifest-0.2.0.json` 是该版本固定留档，后续生成历史目录时需要它；每次发布都应保留一份，不要只保留会被覆盖的 `latest.json`。
 
 设备配置示例：
 
 ```ini
 TESLABOX_UPDATE_MANIFEST_URL=https://gitee.com/你的账号/teslabox/releases/download/latest/latest.json
+# 可选：维护者签名的历史主程序目录
+TESLABOX_UPDATE_CATALOG_URL=https://gitee.com/你的账号/teslabox-releases/raw/main/stable/history.json
 TESLABOX_UPDATE_PUBLIC_KEY=这里填写Base64公钥
 TESLABOX_UPDATE_CHANNEL=stable
 TESLABOX_UPDATE_BOARD=radxa-rock-3a
 ```
 
 如果 Gitee 无法为固定 `latest` 标签提供稳定附件地址，可以维护一个固定分支中的 `latest.json` 原始文件地址；包体仍放在带版本号的 Release 中。两种地址都必须使用 HTTPS。
+
+## 指定版本与回退
+
+管理页面不会接受浏览器传入的下载 URL。用户选择历史版本时，设备会重新下载并校验维护者签名的 `history.json`，再从其中选择完全匹配的单个已签名清单，因此公开 Gitee 页面或中间人不能把任意二进制伪装成回退包。
+
+历史目录只应包含你确认可与当前环境兼容的**主程序**版本。它不会回退内核、MT7922 驱动、FFmpeg/MPP 工具链或 systemd unit；如果某个版本曾改动这些组件，就不要放入可选历史目录，仍应走完整的人工部署与验证流程。
+
+维护者在发布后，收集各版本的固定清单，例如：
+
+```powershell
+go run .\cmd\teslabox-update-catalog `
+  -private-key D:\TeslaBoxSecrets\update-private.key `
+  -manifest .\release-manifests\manifest-0.1.6.json `
+  -manifest .\release-manifests\manifest-0.1.7.json `
+  -output .\dist\update\history.json
+```
+
+将 `history.json` 上传到一个固定 HTTPS 地址，例如 `teslabox-releases` 仓库的 `stable/history.json`。更新板子的 `TESLABOX_UPDATE_CATALOG_URL` 后重启 `teslabox.service`；设置中心点击“查看历史版本”即可查看、选择、下载并安装指定版本。`history.json`、其中每条清单和程序包会依次校验签名/摘要；维护者新增、删除或调整目录顺序后都必须重新生成并签名。
+
+回退与普通更新共用 Gadget 自动维护流程：下载不影响车机，点击“回退并重启”才会暂时断开 USB Gadget，健康检查通过后自动重启恢复。回退前会保留当前主程序用于本次健康检查失败自动恢复。
 
 ## 暂不支持
 

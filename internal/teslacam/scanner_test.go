@@ -71,7 +71,8 @@ func TestScannerScan(t *testing.T) {
 	metadata := videos[1].EventMetadata
 	if metadata == nil || metadata.OccurredAt == nil || metadata.OccurredAt.Second() != 42 ||
 		metadata.City != "宁波" || metadata.Street != "测试路" || metadata.Latitude == nil || *metadata.Latitude != 29.8421 ||
-		metadata.Longitude == nil || *metadata.Longitude != 121.622 || metadata.Reason != "user_interaction_dashcam_icon_tapped" || metadata.Camera != "0" {
+		metadata.Longitude == nil || *metadata.Longitude != 121.622 || metadata.Reason != "user_interaction_dashcam_icon_tapped" ||
+		metadata.TriggerType != "manual_save" || metadata.Camera != "0" || metadata.CameraView != "front" {
 		t.Errorf("event metadata = %#v", metadata)
 	}
 	if videos[2].ClipType != "recent" || videos[2].Camera != "front" {
@@ -79,6 +80,53 @@ func TestScannerScan(t *testing.T) {
 	}
 	if videos[2].ThumbnailID != videos[0].ThumbnailID || videos[2].ThumbnailPath != videos[0].ThumbnailPath {
 		t.Errorf("recent videos should share thumbnail: first=%#v second=%#v", videos[0], videos[2])
+	}
+}
+
+func TestReadEventMetadataClassifiesTriggerAndCameraView(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "event.json")
+	if err := os.WriteFile(path, []byte(`{"timestamp":"2026-07-15T12:31:42","reason":"sentry_aware_object_detection","camera":"5"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := readEventMetadata(path, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.TriggerType != "sentry_object" || metadata.CameraView != "left_pillar" {
+		t.Fatalf("event metadata = %#v", metadata)
+	}
+}
+
+func TestClassifyEventTrigger(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{name: "仪表盘手动保存", reason: "user_interaction_dashcam_icon_tapped", want: "manual_save"},
+		{name: "新版启动器手动保存", reason: "user_interaction_dashcam_launcher_action_tapped", want: "manual_save"},
+		{name: "鸣笛保存", reason: "user_interaction_honk", want: "manual_honk"},
+		{name: "哨兵对象检测", reason: "sentry_aware_object_detection", want: "sentry_object"},
+		{name: "哨兵震动检测", reason: "sentry_aware_accel_0.8", want: "sentry_motion"},
+		{name: "哨兵警报", reason: "sentry_panic_0", want: "sentry_alarm"},
+		{name: "未知事件", reason: "future_event", want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyEventTrigger(test.reason); got != test.want {
+				t.Fatalf("classifyEventTrigger(%q) = %q, want %q", test.reason, got, test.want)
+			}
+		})
+	}
+}
+
+func TestEventCameraViewRejectsUnknownCamera(t *testing.T) {
+	t.Parallel()
+	if got := eventCameraView("4294967295"); got != "" {
+		t.Fatalf("camera view = %q, want empty", got)
 	}
 }
 

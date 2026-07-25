@@ -45,7 +45,7 @@ sudo ./teslabox-install.sh
 9. 禁用已经退役的常驻 `teslabox-gadget.service`，由 Go 主服务单独管理 UDC。
 10. 启动服务并等待 `/healthz` 通过；失败时恢复安装前的主程序。
 
-如果安装时 NetworkManager 已识别到无线客户端接口，脚本会自动发现它，不要求名称必须是 `wlan0`，随后创建 `TeslaBox-5G` AP 配置并尝试启用热点。初始热点密码随机生成，只在安装结束时显示；请记录并在设置中心修改。如果没有识别到无线接口，脚本保持有线管理可用，不会让 AP 失败阻断 TeslaUSB 基础安装。
+如果安装时 NetworkManager 已识别到无线客户端接口，脚本会自动发现它，不要求名称必须是 `wlan0`，随后创建 `TeslaBox-5G` AP 配置并尝试启用热点。上游 WiFi 已连接时，热点会先同步到同一信道；没有上游时优先选择网卡和当前监管域允许的 5GHz 非 DFS 信道，必要时回退到 2.4GHz。初始热点密码随机生成，只在安装结束时显示；请记录并在设置中心修改。如果没有识别到无线接口，或网卡/驱动不支持 AP，脚本保持有线管理可用，不会让 AP 失败阻断 TeslaUSB 基础安装。
 
 `radxa-usbnet.service` 只会让 OTG Device 口模拟 `ecm.usb0` USB 有线网卡，不负责 USB Host 口上的无线网卡，也不管理 NetworkManager 或 MT7922。TeslaBox 屏蔽它不会影响上游 WiFi 或 AP 热点。
 

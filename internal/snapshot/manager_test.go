@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ type fakeRunner struct {
 	failErr         error
 	loopCalls       int
 	failKernelMount bool
+	mountFailures   int
 	notMounted      bool
 	loopList        string
 }
@@ -37,6 +39,10 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 	}
 	if name == "mount" && r.failKernelMount {
 		return nil, &system.CommandError{Name: "mount", Code: 32, Output: "unknown filesystem type 'exfat'", Internal: errors.New("exit status 32")}
+	}
+	if name == "mount" && r.mountFailures > 0 {
+		r.mountFailures--
+		return nil, &system.CommandError{Name: "mount", Code: 32, Output: "Structure needs cleaning", Internal: errors.New("exit status 32")}
 	}
 	if name == "umount" && r.notMounted {
 		return nil, &system.CommandError{Name: "umount", Code: 32, Output: "not mounted", Internal: errors.New("exit status 32")}
@@ -212,10 +218,21 @@ func TestManagerCreateAcceptsRepairedFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := &fakeRunner{failName: "fsck.exfat", failErr: &system.CommandError{Name: "fsck.exfat", Code: 1, Internal: errors.New("已修复")}}
+	runner := &fakeRunner{
+		failName:      "fsck.exfat",
+		failErr:       &system.CommandError{Name: "fsck.exfat", Code: 1, Internal: errors.New("已修复")},
+		mountFailures: 1,
+	}
 	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
-	if _, err := manager.Create(t.Context()); err != nil {
+	view, err := manager.Create(t.Context())
+	if err != nil {
 		t.Fatalf("Create() error = %v", err)
+	}
+	if !view.RepairApplied {
+		t.Fatal("Create() did not report the repair fallback")
+	}
+	if !slices.ContainsFunc(runner.commands, func(item command) bool { return item.name == "fsck.exfat" }) {
+		t.Fatal("Create() did not repair the snapshot after mount failure")
 	}
 }
 
@@ -245,7 +262,10 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	if view.ID != "20260716T080910.000000123Z" || view.MountPath != filepath.Join(mountRoot, view.ID) {
 		t.Fatalf("view = %#v", view)
 	}
-	wantNames := []string{"cp", "losetup", "fsck.exfat", "losetup", "losetup", "mount"}
+	if view.RepairApplied {
+		t.Fatal("Create() reported a repair for a directly mounted snapshot")
+	}
+	wantNames := []string{"cp", "losetup", "mount"}
 	gotNames := make([]string, 0, len(runner.commands))
 	for _, item := range runner.commands {
 		gotNames = append(gotNames, item.name)
@@ -256,11 +276,11 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	if got := runner.commands[0].args[:2]; !reflect.DeepEqual(got, []string{"--reflink=always", "--sparse=auto"}) {
 		t.Fatalf("cp args = %v", runner.commands[0].args)
 	}
-	if got := runner.commands[2].args[1]; got != "/dev/loop7p1" {
-		t.Fatalf("fsck target = %q", got)
-	}
-	if got := runner.commands[5].args[1]; got != "ro,nosuid,nodev,noexec" {
+	if got := runner.commands[2].args[1]; got != "ro,nosuid,nodev,noexec" {
 		t.Fatalf("mount options = %q", got)
+	}
+	if slices.ContainsFunc(runner.commands, func(item command) bool { return item.name == "fsck.exfat" }) {
+		t.Fatal("Create() ran fsck for a snapshot that mounted read-only")
 	}
 }
 
@@ -280,7 +300,7 @@ func TestManagerCreateFailureDoesNotPublishSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := New(&fakeRunner{failName: "fsck.exfat"}, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(&fakeRunner{failName: "fsck.exfat", mountFailures: 1}, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
 	if _, err := manager.Create(t.Context()); err == nil {
 		t.Fatal("Create() error = nil, want fsck error")
 	}

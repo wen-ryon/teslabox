@@ -8,12 +8,16 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const streamAcquireTimeout = 5 * time.Second
 
 // CompositeRequest 集中约束单分钟合成输入，避免客户端直接传递 FFmpeg 参数。
 type CompositeRequest struct {
 	Layout  string
 	Quality string
+	Camera  string
 	Inputs  map[string]string
 }
 
@@ -33,6 +37,7 @@ type streamingRunner interface {
 type Compositor struct {
 	runner     streamingRunner
 	ffmpegPath string
+	streamSlot chan struct{}
 }
 
 // NewCompositor 在启动阶段拒绝不安全路径，避免请求阶段执行任意程序。
@@ -43,7 +48,12 @@ func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, erro
 	if !isLinuxAbsolutePath(ffmpegPath) {
 		return nil, errors.New("FFmpeg 必须使用绝对路径")
 	}
-	return &Compositor{runner: runner, ffmpegPath: ffmpegPath}, nil
+	return &Compositor{
+		runner:     runner,
+		ffmpegPath: ffmpegPath,
+		// RK356x 同时运行多个实时转码很容易放大峰值功耗和内存压力。
+		streamSlot: make(chan struct{}, 1),
+	}, nil
 }
 
 // Stream 沿用请求上下文，避免浏览器断开后遗留占用硬件的 FFmpeg 进程。
@@ -51,6 +61,16 @@ func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, outpu
 	args, err := compositeArgs(request)
 	if err != nil {
 		return err
+	}
+	waitTimer := time.NewTimer(streamAcquireTimeout)
+	defer waitTimer.Stop()
+	select {
+	case c.streamSlot <- struct{}{}:
+		defer func() { <-c.streamSlot }()
+	case <-ctx.Done():
+		return fmt.Errorf("等待实时合成资源: %w", ctx.Err())
+	case <-waitTimer.C:
+		return errors.New("实时转码资源正在使用，请稍后重试")
 	}
 	if err := c.runner.RunStreaming(ctx, c.ffmpegPath, args, output); err != nil {
 		return fmt.Errorf("实时合成录像: %w", err)
@@ -82,7 +102,7 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 	if !ok {
 		return nil, &InputError{Message: "不支持的播放画质"}
 	}
-	tiles, err := teslaLayoutTiles(request.Layout, profile.height)
+	tiles, err := playbackTiles(request, profile.height)
 	if err != nil {
 		return nil, err
 	}
@@ -111,9 +131,13 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		labels = append(labels, "["+label+"]")
 		layout = append(layout, strconv.Itoa(tile.x)+"_"+strconv.Itoa(tile.y))
 	}
-	filters = append(filters, strings.Join(labels, "")+fmt.Sprintf(
-		"xstack=inputs=%d:layout=%s:fill=black:shortest=1[out]", len(tiles), strings.Join(layout, "|"),
-	))
+	if len(tiles) == 1 {
+		filters = append(filters, labels[0]+"null[out]")
+	} else {
+		filters = append(filters, strings.Join(labels, "")+fmt.Sprintf(
+			"xstack=inputs=%d:layout=%s:fill=black:shortest=1[out]", len(tiles), strings.Join(layout, "|"),
+		))
+	}
 
 	bitrate := strconv.Itoa(profile.bitrate) + "k"
 	args = append(args,
@@ -125,6 +149,16 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		"-f", "mp4", "pipe:1",
 	)
 	return args, nil
+}
+
+func playbackTiles(request CompositeRequest, height int) ([]compositeTile, error) {
+	if request.Layout != "single" {
+		return teslaLayoutTiles(request.Layout, height)
+	}
+	if request.Camera == "" {
+		return nil, &InputError{Message: "单路播放缺少摄像头视角"}
+	}
+	return []compositeTile{{camera: request.Camera, width: teslaAspectWidth(height), height: height}}, nil
 }
 
 func gridTiles(cameras []string, columns, rows []int) []compositeTile {

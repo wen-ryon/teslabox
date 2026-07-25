@@ -63,6 +63,22 @@ func TestManagerReportsEnumerationWithoutClaimingPhysicalCableState(t *testing.T
 	}
 }
 
+func TestSamePathRecognizesFilesystemAliases(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := filepath.Join(root, "teslacam.img")
+	alias := filepath.Join(root, "teslacam-alias.img")
+	if err := os.WriteFile(original, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(original, alias); err != nil {
+		t.Skipf("当前文件系统不支持硬链接: %v", err)
+	}
+	if !samePath(original, alias) {
+		t.Fatalf("samePath(%q, %q) = false", original, alias)
+	}
+}
+
 func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	manager, imagePath := testManager(t)
 	status, err := manager.Start()
@@ -178,6 +194,28 @@ func TestManagerStopOnlyRemovesTeslaBoxGadget(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("other gadget was removed: %v", err)
+	}
+}
+
+func TestManagerStopRemovesOwnedGadgetWhenUDCDisappears(t *testing.T) {
+	manager, _ := testManager(t)
+	if _, err := manager.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	udcPath := filepath.Join(manager.config.UDCPath, "fcc00000.dwc3")
+	if err := os.RemoveAll(udcPath); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := manager.Stop()
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if status.Exists || status.Bound {
+		t.Fatalf("status = %#v", status)
+	}
+	if _, err := os.Stat(manager.gadgetPath()); !os.IsNotExist(err) {
+		t.Fatalf("TeslaBox gadget should be removed, stat error = %v", err)
 	}
 }
 

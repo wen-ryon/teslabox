@@ -14,6 +14,7 @@ import (
 
 type fakeDeviceAdmin struct {
 	status            deviceadmin.WiFiStatus
+	scanErr           error
 	autoConnectUpdate deviceadmin.AutoConnectUpdate
 	ipv4Update        deviceadmin.IPv4Update
 	powerAction       string
@@ -23,7 +24,7 @@ func (a *fakeDeviceAdmin) WiFiStatus(context.Context) (deviceadmin.WiFiStatus, e
 	return a.status, nil
 }
 func (a *fakeDeviceAdmin) Scan(context.Context) ([]deviceadmin.AccessPoint, error) {
-	return []deviceadmin.AccessPoint{}, nil
+	return []deviceadmin.AccessPoint{}, a.scanErr
 }
 func (a *fakeDeviceAdmin) Connect(context.Context, deviceadmin.ConnectRequest) error { return nil }
 func (a *fakeDeviceAdmin) SetAutoConnect(_ context.Context, update deviceadmin.AutoConnectUpdate) error {
@@ -100,5 +101,29 @@ func TestDeviceAdminRejectsUnknownJSONField(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDeviceAdminKeepsCoreStatusUsableWithoutWiFi(t *testing.T) {
+	t.Parallel()
+	admin := &fakeDeviceAdmin{
+		status: deviceadmin.WiFiStatus{
+			Available:         false,
+			SingleRadioNotice: "未检测到可用的无线网卡；热点和 WiFi 管理不可用，但 TeslaUSB、媒体与有线管理不受影响。",
+		},
+		scanErr: deviceadmin.ErrWiFiUnavailable,
+	}
+	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithDeviceAdmin(admin))
+
+	status := httptest.NewRecorder()
+	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/v1/network/wifi", nil))
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"available":false`) {
+		t.Fatalf("wifi status = %d, body = %s", status.Code, status.Body.String())
+	}
+
+	scan := httptest.NewRecorder()
+	handler.ServeHTTP(scan, httptest.NewRequest(http.MethodPost, "/api/v1/network/wifi/scan", nil))
+	if scan.Code != http.StatusServiceUnavailable || !strings.Contains(scan.Body.String(), "有线管理不受影响") {
+		t.Fatalf("wifi scan = %d, body = %s", scan.Code, scan.Body.String())
 	}
 }

@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-const internetCacheDuration = 15 * time.Second
+// internetCacheDuration 平衡状态栏的新鲜度与车载待机功耗。
+// 网络连接变化由 NetworkManager 负责，页面只需低频确认公共网络出口仍可访问。
+const internetCacheDuration = time.Minute
 
 // Usage 描述容量型资源的当前占用情况。
 type Usage struct {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/wen-ryon/teslabox/internal/api"
 	"github.com/wen-ryon/teslabox/internal/backing"
@@ -19,6 +20,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/driveinit"
 	"github.com/wen-ryon/teslabox/internal/gadget"
+	"github.com/wen-ryon/teslabox/internal/hostmigration"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
@@ -63,6 +65,18 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
+	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	udevMigrated, migrationErr := hostmigration.RemoveLegacyUdevSignal(
+		migrationCtx,
+		"/etc/udev/rules.d/99-teslabox.rules",
+		runner,
+	)
+	migrationCancel()
+	if migrationErr != nil {
+		logger.Warn("无法迁移旧版 udev 信号规则，主服务继续启动", "error", migrationErr)
+	} else if udevMigrated {
+		logger.Info("已移除旧版 udev SIGUSR1 规则并重新加载")
+	}
 	guardCtx, guardCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	protectedServices, guardErr := gadget.DisableConflictingServices(guardCtx, runner)
 	guardCancel()
@@ -193,7 +207,7 @@ func main() {
 		os.Exit(1)
 	}
 	updateManager, err := updater.New(updater.Config{
-		ManifestURL: cfg.UpdateManifestURL, PublicKey: cfg.UpdatePublicKey,
+		ManifestURL: cfg.UpdateManifestURL, CatalogURL: cfg.UpdateCatalogURL, PublicKey: cfg.UpdatePublicKey,
 		Channel: cfg.UpdateChannel, Board: cfg.UpdateBoard,
 		CurrentVersion: buildversion.Version, CurrentCommit: buildversion.Commit,
 		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
@@ -272,6 +286,9 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("停止 HTTP 服务失败", "error", err)
+	}
+	if err := mediaExporter.Wait(shutdownCtx); err != nil {
+		logger.Error("等待视频导出器停止失败", "error", err)
 	}
 	if err := manager.Close(shutdownCtx); err != nil {
 		logger.Error("停止 TeslaUSB 状态管理器失败", "error", err)

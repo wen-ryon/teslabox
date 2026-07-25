@@ -141,11 +141,12 @@ func TestVideoGroupsMergeSixCamerasWithinTolerance(t *testing.T) {
 	}
 }
 
-func TestGroupVideoSessionsMergesContinuousMinuteSegments(t *testing.T) {
+func TestGroupVideoSessionsMergesRecentClipsIntoOneTimeline(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
 	groups := []videoGroup{
 		{ID: "first", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base, EndAt: base.Add(time.Minute), Complete: true, TotalSize: 10, Videos: []teslacam.Video{{Camera: "front"}}},
+		{ID: "saved-between", ClipType: "saved", Event: "event-1", RecordedAt: base.Add(90 * time.Second), EndAt: base.Add(150 * time.Second), Complete: true, TotalSize: 5, Videos: []teslacam.Video{{Camera: "front"}}},
 		{ID: "second", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base.Add(time.Minute), EndAt: base.Add(2 * time.Minute), Complete: true, TotalSize: 20, Videos: []teslacam.Video{{Camera: "front"}}},
 		{ID: "after-gap", ClipType: "recent", ThumbnailID: "recent-thumb", RecordedAt: base.Add(3 * time.Minute), EndAt: base.Add(4 * time.Minute), Complete: false, TotalSize: 30, Videos: []teslacam.Video{{Camera: "back"}}},
 	}
@@ -153,18 +154,91 @@ func TestGroupVideoSessionsMergesContinuousMinuteSegments(t *testing.T) {
 	if len(sessions) != 2 {
 		t.Fatalf("len(sessions) = %d, want 2: %#v", len(sessions), sessions)
 	}
-	continuous := sessions[1]
-	if continuous.SegmentCount != 2 || continuous.Duration != 120 || continuous.TotalSize != 30 || !continuous.Complete {
-		t.Fatalf("continuous session = %#v", continuous)
+	var recent videoSession
+	for _, session := range sessions {
+		if session.ClipType == "recent" {
+			recent = session
+			break
+		}
 	}
-	if len(continuous.Cameras) != 1 || continuous.Cameras[0] != "front" {
-		t.Fatalf("continuous cameras = %#v", continuous.Cameras)
+	if recent.ID == "" {
+		t.Fatalf("recent session not found: %#v", sessions)
 	}
-	if sessions[0].SegmentCount != 1 || sessions[0].Complete {
-		t.Fatalf("newer session = %#v", sessions[0])
+	if recent.SegmentCount != 3 || recent.Duration != 180 || recent.TotalSize != 60 || recent.Complete {
+		t.Fatalf("recent session = %#v", recent)
 	}
-	if continuous.ThumbnailURL != "/api/v1/thumbnails/recent-thumb" || sessions[0].ThumbnailURL != continuous.ThumbnailURL {
-		t.Fatalf("recent sessions should share thumbnail URL: %#v", sessions)
+	for index, want := range []float64{0, 60, 120} {
+		if recent.Moments[index].TimelineStart != want {
+			t.Fatalf("moment %d timeline start = %f, want %f", index, recent.Moments[index].TimelineStart, want)
+		}
+	}
+	if len(recent.Cameras) != 2 || recent.Cameras[0] != "front" || recent.Cameras[1] != "back" {
+		t.Fatalf("recent cameras = %#v", recent.Cameras)
+	}
+	if recent.ThumbnailURL != "/api/v1/thumbnails/recent-thumb" {
+		t.Fatalf("recent thumbnail URL = %q", recent.ThumbnailURL)
+	}
+}
+
+func TestGroupVideoSessionsKeepsGappedSavedClipsSeparate(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
+	groups := []videoGroup{
+		{ID: "first", ClipType: "saved", Event: "event-1", RecordedAt: base, EndAt: base.Add(time.Minute)},
+		{ID: "after-gap", ClipType: "saved", Event: "event-1", RecordedAt: base.Add(3 * time.Minute), EndAt: base.Add(4 * time.Minute)},
+	}
+	if sessions := groupVideoSessions(groups, 5*time.Second); len(sessions) != 2 {
+		t.Fatalf("len(sessions) = %d, want 2: %#v", len(sessions), sessions)
+	}
+}
+
+func TestExportSourceUsesCompressedRecentTimeline(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
+	firstPath := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "first-front.mp4"))
+	secondPath := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "second-front.mp4"))
+	for _, relative := range []string{firstPath, secondPath} {
+		name := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := videoSession{
+		ClipType: "recent",
+		StartAt:  base,
+		EndAt:    base.Add(11 * time.Minute),
+		Duration: 120,
+		Moments: []videoGroup{
+			{
+				RecordedAt:    base,
+				TimelineStart: 0,
+				Videos: []teslacam.Video{{
+					Camera: "front", Path: firstPath, RecordedAt: base, Duration: 60,
+				}},
+			},
+			{
+				RecordedAt:    base.Add(10 * time.Minute),
+				TimelineStart: 60,
+				Videos: []teslacam.Video{{
+					Camera: "front", Path: secondPath, RecordedAt: base.Add(10*time.Minute + time.Second), Duration: 60,
+				}},
+			},
+		},
+	}
+
+	source, err := exportSource(root, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := source.SessionEnd.Sub(source.SessionStart); got != 2*time.Minute {
+		t.Fatalf("export duration = %s, want 2m", got)
+	}
+	if got := source.Videos[1].RecordedAt.Sub(source.SessionStart); got != 61*time.Second {
+		t.Fatalf("second video timeline offset = %s, want 1m1s", got)
 	}
 }
 
@@ -242,7 +316,7 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	longitude := 121.622
 	metadata := &teslacam.EventMetadata{
 		OccurredAt: &eventAt, City: "宁波", Street: "测试路", Latitude: &latitude, Longitude: &longitude,
-		Reason: "sentry_aware_accel_0.8", Camera: "0",
+		Reason: "sentry_aware_accel_0.8", TriggerType: "sentry_motion", Camera: "0", CameraView: "front",
 	}
 	videos := make([]teslacam.Video, 0, 12)
 	for minute := range 2 {
@@ -276,7 +350,7 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	if session.ThumbnailURL != "/api/v1/thumbnails/timeline-thumb" {
 		t.Fatalf("thumbnail URL = %q", session.ThumbnailURL)
 	}
-	if session.EventMetadata == nil || session.EventMetadata.OccurredAt == nil || !session.EventMetadata.OccurredAt.Equal(eventAt) || session.EventMetadata.City != "宁波" {
+	if session.EventMetadata == nil || session.EventMetadata.OccurredAt == nil || !session.EventMetadata.OccurredAt.Equal(eventAt) || session.EventMetadata.City != "宁波" || session.EventMetadata.TriggerType != "sentry_motion" || session.EventMetadata.CameraView != "front" {
 		t.Fatalf("session event metadata = %#v", session.EventMetadata)
 	}
 	detailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/video-sessions/"+session.ID, nil)

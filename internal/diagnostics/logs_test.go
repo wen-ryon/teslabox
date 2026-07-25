@@ -3,7 +3,10 @@ package diagnostics
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 type fakeRunner struct {
@@ -12,6 +15,28 @@ type fakeRunner struct {
 	output          string
 	systemctlOutput string
 	calls           []string
+}
+
+type blockingBundleRunner struct {
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingBundleRunner) Run(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+	blocked := false
+	r.once.Do(func() {
+		blocked = true
+		close(r.started)
+	})
+	if blocked {
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, nil
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -49,7 +74,8 @@ func TestManagerLogsFiltersUSBAndRedactsSecrets(t *testing.T) {
 	if report.Redacted != 2 || !strings.Contains(report.Lines[1], "[已脱敏]") || !strings.Contains(report.Lines[2], "[已脱敏]") {
 		t.Fatalf("redaction = %#v", report)
 	}
-	if len(runner.calls) != 2 || !strings.HasPrefix(runner.calls[0], "journalctl ") || !strings.HasPrefix(runner.calls[1], "systemctl show ") {
+	if len(runner.calls) != 3 || !strings.HasPrefix(runner.calls[0], "journalctl ") ||
+		!strings.HasPrefix(runner.calls[1], "journalctl ") || !strings.HasPrefix(runner.calls[2], "systemctl show ") {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	if runner.name != "systemctl" || len(report.ServiceStates) != 2 || report.ServiceStates[0].UnitFileState != "masked" {
@@ -74,5 +100,90 @@ func TestManagerLogsUsesAllowlistedUnitsAndBoundsLimit(t *testing.T) {
 	}
 	if _, err := manager.Logs(t.Context(), "../../etc/passwd", 20); err == nil {
 		t.Fatal("unsupported source error = nil")
+	}
+}
+
+func TestManagerLogsCombinesMediaServiceAndKernelFailures(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: strings.Join([]string{
+		"teslabox: 实时合成录像失败 error=执行 ffmpeg",
+		"kernel: rga allocation failed",
+		"teslabox: ordinary request",
+	}, "\n")}
+	report, err := New(runner).Logs(t.Context(), SourceMedia, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 || len(report.Lines) != 2 {
+		t.Fatalf("calls = %#v, report = %#v", runner.calls, report)
+	}
+	if !strings.Contains(strings.Join(report.Lines, "\n"), "ffmpeg") ||
+		!strings.Contains(strings.Join(report.Lines, "\n"), "rga") {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestManagerBundleIncludesStateLogsAndRedaction(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{
+		output: strings.Join([]string{
+			"teslabox: 实时合成录像失败 token=owner-token",
+			"kernel: dwc3 fcc00000.dwc3: device reset",
+		}, "\n"),
+		systemctlOutput: "ActiveState=active\nNRestarts=1\n",
+	}
+	bundle, err := New(runner).Bundle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(bundle.Content)
+	for _, expected := range []string{"TeslaBox 诊断报告", "TeslaBox 服务状态", "当前启动日志: media", "上一次启动关键故障日志", "[已脱敏]"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("bundle missing %q:\n%s", expected, content)
+		}
+	}
+	if strings.Contains(content, "owner-token") || !strings.HasSuffix(bundle.Filename, ".txt") {
+		t.Fatalf("bundle filename = %q, content = %s", bundle.Filename, content)
+	}
+}
+
+func TestManagerBundleSizeLimitPreservesUTF8(t *testing.T) {
+	t.Parallel()
+	line := strings.Repeat("中", 1400)
+	runner := &fakeRunner{output: strings.Repeat(line+"\n", 500)}
+
+	bundle, err := New(runner).Bundle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.Valid(bundle.Content) {
+		t.Fatal("Bundle() returned invalid UTF-8 after applying the size limit")
+	}
+	if !strings.Contains(string(bundle.Content), "[报告已达到大小上限") {
+		t.Fatalf("bundle length = %d, want truncated report", len(bundle.Content))
+	}
+}
+
+func TestManagerBundleRejectsConcurrentGeneration(t *testing.T) {
+	t.Parallel()
+	runner := &blockingBundleRunner{started: make(chan struct{}), release: make(chan struct{})}
+	manager := New(runner)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := manager.Bundle(t.Context())
+		firstDone <- err
+	}()
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("第一个诊断报告没有开始生成")
+	}
+	if _, err := manager.Bundle(t.Context()); err == nil {
+		t.Fatal("并发生成诊断报告未被拒绝")
+	}
+	close(runner.release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
 }

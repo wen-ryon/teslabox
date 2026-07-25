@@ -16,6 +16,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
+	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 )
 
@@ -198,7 +199,7 @@ func TestVideoGroupComposite(t *testing.T) {
 	}
 	groupID := groupVideos(videos, videoGroupTolerance)[0].ID
 	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)), WithMediaCompositor(compositor))
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/video-groups/"+groupID+"/composite?layout=composite3&quality=standard", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/video-groups/"+groupID+"/composite?layout=composite3&quality=standard&camera=front", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -206,11 +207,56 @@ func TestVideoGroupComposite(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != "fragmented-mp4" {
 		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 	}
-	if compositor.request.Layout != "composite3" || compositor.request.Quality != "standard" || len(compositor.request.Inputs) != 3 {
+	if compositor.request.Layout != "composite3" || compositor.request.Quality != "standard" || compositor.request.Camera != "front" || len(compositor.request.Inputs) != 3 {
 		t.Fatalf("request = %#v", compositor.request)
 	}
 	if acquired != 1 || released != 1 {
 		t.Fatalf("media lease acquired = %d, released = %d", acquired, released)
+	}
+}
+
+func TestVideoGroupCompositeFailureLogsPlaybackContext(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "clip-front.mp4"))
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	videos := []teslacam.Video{{
+		ID: "front", Camera: "front", Path: relative,
+		RecordedAt: time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC),
+	}}
+	controller := fakeController{state: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root},
+		Videos:        videos,
+	}}
+	compositor := &fakeMediaCompositor{err: &system.CommandError{
+		Name: "ffmpeg", Code: 137, Output: "rkmpp decoder failed", Internal: context.DeadlineExceeded,
+	}}
+	var logs strings.Builder
+	handler := NewHandler(
+		controller,
+		slog.New(slog.NewJSONHandler(&logs, nil)),
+		WithMediaCompositor(compositor),
+	)
+	groupID := groupVideos(videos, videoGroupTolerance)[0].ID
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/video-groups/"+groupID+"/composite?layout=composite6&quality=smooth", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	output := logs.String()
+	for _, expected := range []string{"实时合成录像失败", `"layout":"composite6"`, `"quality":"smooth"`, `"exit_code":137`, "rkmpp decoder failed"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("log missing %q: %s", expected, output)
+		}
 	}
 }
 

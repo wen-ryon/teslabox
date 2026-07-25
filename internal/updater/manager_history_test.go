@@ -1,0 +1,70 @@
+package updater
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+func TestManagerSelectsSignedHistoricalRollback(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback := testManifest(t, privateKey, "0.1.6")
+	current := testManifest(t, privateKey, "0.1.7")
+	upgrade := testManifest(t, privateKey, "0.1.8")
+	catalog := Catalog{
+		SchemaVersion: catalogSchemaVersion,
+		Channel:       "stable",
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Manifests:     []Manifest{rollback, current, upgrade},
+	}
+	if err := catalog.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/latest.json":
+			_ = json.NewEncoder(writer).Encode(upgrade)
+		case "/history.json":
+			_ = json.NewEncoder(writer).Encode(catalog)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(ClientConfig{
+		ManifestURL: server.URL + "/latest.json", CatalogURL: server.URL + "/history.json",
+		PublicKey: publicKey, Channel: "stable", Board: "radxa-rock-3a", Arch: "arm64",
+		DownloadDir: t.TempDir(), MaximumSize: 128 * 1024 * 1024, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{
+		config: Config{CurrentVersion: "0.1.7", Channel: "stable"},
+		client: client,
+		state:  Status{Configured: true, HistoryConfigured: true, CurrentVersion: "0.1.7", Channel: "stable", State: StateIdle},
+	}
+	history, err := manager.History(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Releases) != 2 || history.Releases[0].Version != "0.1.8" || history.Releases[1].Action != "rollback" {
+		t.Fatalf("History() = %#v", history.Releases)
+	}
+	status, err := manager.Select(context.Background(), "0.1.6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != StateAvailable || !status.Available || status.SelectedAction != "rollback" || status.LatestVersion != "0.1.6" {
+		t.Fatalf("Select() status = %#v", status)
+	}
+}

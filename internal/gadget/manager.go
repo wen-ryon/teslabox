@@ -65,40 +65,46 @@ func NewManager(config Config) *Manager {
 
 // Inspect 只读取 UDC 占用和 TeslaBox Gadget 状态。
 func (m *Manager) Inspect() (Status, error) {
+	return m.inspect(true)
+}
+
+func (m *Manager) inspect(requireSelectedUDC bool) (Status, error) {
 	if err := validateConfig(m.config); err != nil {
 		return Status{}, err
 	}
 	selectedUDC, err := m.selectUDC()
-	if err != nil {
+	if err != nil && requireSelectedUDC {
 		return Status{}, err
 	}
 	status := Status{SelectedUDC: selectedUDC, OtherBindings: []Binding{}}
-	status.UDCState, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "state"))
-	if err != nil {
-		return Status{}, fmt.Errorf("读取 UDC 状态: %w", err)
-	}
-	status.CurrentSpeed, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "current_speed"))
-	if err != nil {
-		return Status{}, fmt.Errorf("读取 UDC 速率: %w", err)
-	}
-	normalizedState := strings.ToLower(strings.TrimSpace(status.UDCState))
-	status.HostDetected = normalizedState != "" && normalizedState != "not attached"
-	status.EnumerationComplete = normalizedState == "configured"
-	// HostConnected 保留旧 API 兼容性；调用方不得再把它解释为可靠的物理插线检测。
-	status.HostConnected = status.EnumerationComplete
-	suspended, err := readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "device", "gadget", "suspended"))
-	if err != nil {
-		return Status{}, fmt.Errorf("读取 USB 总线挂起状态: %w", err)
-	}
-	switch strings.TrimSpace(suspended) {
-	case "":
-	case "0":
-		status.BusSuspendKnown = true
-	case "1":
-		status.BusSuspendKnown = true
-		status.BusSuspended = true
-	default:
-		return Status{}, fmt.Errorf("USB 总线挂起状态不合法: %q", suspended)
+	if selectedUDC != "" {
+		status.UDCState, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "state"))
+		if err != nil {
+			return Status{}, fmt.Errorf("读取 UDC 状态: %w", err)
+		}
+		status.CurrentSpeed, err = readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "current_speed"))
+		if err != nil {
+			return Status{}, fmt.Errorf("读取 UDC 速率: %w", err)
+		}
+		normalizedState := strings.ToLower(strings.TrimSpace(status.UDCState))
+		status.HostDetected = normalizedState != "" && normalizedState != "not attached"
+		status.EnumerationComplete = normalizedState == "configured"
+		// HostConnected 保留旧 API 兼容性；调用方不得再把它解释为可靠的物理插线检测。
+		status.HostConnected = status.EnumerationComplete
+		suspended, suspendErr := readOptional(filepath.Join(m.config.UDCPath, selectedUDC, "device", "gadget", "suspended"))
+		if suspendErr != nil {
+			return Status{}, fmt.Errorf("读取 USB 总线挂起状态: %w", suspendErr)
+		}
+		switch strings.TrimSpace(suspended) {
+		case "":
+		case "0":
+			status.BusSuspendKnown = true
+		case "1":
+			status.BusSuspendKnown = true
+			status.BusSuspended = true
+		default:
+			return Status{}, fmt.Errorf("USB 总线挂起状态不合法: %q", suspended)
+		}
 	}
 	entries, err := os.ReadDir(m.config.ConfigFSPath)
 	if err != nil {
@@ -155,16 +161,6 @@ func (m *Manager) Start() (status Status, err error) {
 		// 给主机和 DWC3 控制端点留下完整断线窗口，避免旧 Gadget 的 EP0 请求污染新枚举。
 		m.sleep(hostDisconnectSettleTime)
 	}
-	restoreReleased := len(released) > 0
-	defer func() {
-		if err != nil && restoreReleased {
-			for _, binding := range released {
-				if restoreErr := writeValue(filepath.Join(m.config.ConfigFSPath, binding.Gadget, "UDC"), binding.UDC); restoreErr != nil {
-					err = errors.Join(err, fmt.Errorf("恢复 Gadget %s: %w", binding.Gadget, restoreErr))
-				}
-			}
-		}
-	}()
 	if status.Exists {
 		if err := m.removeUnbound(); err != nil {
 			return status, fmt.Errorf("清理未绑定的 TeslaBox Gadget: %w", err)
@@ -239,7 +235,6 @@ func (m *Manager) Start() (status Status, err error) {
 		return status, fmt.Errorf("绑定 UDC: %w", err)
 	}
 	created = false
-	restoreReleased = false
 	return m.Inspect()
 }
 
@@ -306,18 +301,16 @@ func (m *Manager) Stop() (Status, error) {
 	if err := validateConfig(m.config); err != nil {
 		return Status{}, err
 	}
-	if _, err := m.selectUDC(); err != nil {
-		return Status{}, err
-	}
 	if _, err := os.Lstat(m.gadgetPath()); errors.Is(err, os.ErrNotExist) {
-		return m.Inspect()
+		return m.inspect(false)
 	} else if err != nil {
 		return Status{}, fmt.Errorf("检查 TeslaBox Gadget: %w", err)
 	}
 	if err := m.removeOwned(); err != nil {
 		return Status{}, err
 	}
-	return m.Inspect()
+	// 停止路径不能依赖 UDC 仍然可枚举；控制器异常时更需要保证自有 Gadget 已解绑并移除。
+	return m.inspect(false)
 }
 
 func (m *Manager) removeOwned() error {
@@ -446,7 +439,14 @@ func imageLoopDevice(imagePath string) (string, error) {
 }
 
 func samePath(left, right string) bool {
-	return filepath.Clean(left) == filepath.Clean(right)
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func readTrimmed(name string) (string, error) {

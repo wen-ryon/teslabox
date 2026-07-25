@@ -42,6 +42,9 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 	if bytes.Contains(body, []byte(`value="track"`)) || bytes.Contains(body, []byte(`data-display=`)) {
 		t.Error("页面不应显示无数据的赛道筛选或独立播放模式切换")
 	}
+	if bytes.Contains(body, []byte(`value="recent"`)) {
+		t.Error("最近录像应独立展示，不应再出现在归档筛选条件中")
+	}
 	if logsPosition, settingsPosition := bytes.Index(body, []byte(`data-page-link="logs"`)), bytes.Index(body, []byte(`data-page-link="settings"`)); logsPosition < 0 || settingsPosition < 0 || logsPosition > settingsPosition {
 		t.Error("侧边导航应将日志中心置于设置中心之前")
 	}
@@ -55,7 +58,7 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "app.css?v=20260723-4", "app.js?v=20260723-7",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "app.css?v=20260725-2", "app.js?v=20260725-2",
 		"toast-region",
 		"自动（当前：高清）", "流畅（480p · 20 FPS）", "标清（720p · 24 FPS）", "高清（720p · 30 FPS）", "<option value=\"original\">原画</option>",
 	} {
@@ -77,7 +80,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "downloadDiagnosticReport", "/api/v1/diagnostics/report", "reportPlaybackDiagnostic", "/api/v1/diagnostics/client-event", "playback_stall", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery", "renderSavedNetworks(wifi.saved_networks || [], available)", "button.disabled = !state.wifi?.available", "未检测到可用的无线网卡"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}
@@ -201,8 +204,10 @@ func TestHandlerServesPlaybackFailureFallback(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	for _, marker := range []string{
-		"requestPlaybackFallback", "playbackFallbackLadder", "effectivePlaybackQuality",
-		"已自动降至", "已自动切换到单路原画", "播放连续卡顿超过 8 秒", `sessionVideo.addEventListener("error"`,
+		"requestPlaybackFallback", "playbackFallbackLadder", "effectivePlaybackQuality", "usesServerTranscode", "loadServerSingle", "timeline_start_seconds",
+		"waitForMetadata(sessionVideo, 15000)", "function waitForMetadata(video, timeout = 4000)",
+		"原画不可用，已自动切换到高清合成", "已自动降至", "已自动切换到单路原画", "播放连续卡顿超过 8 秒", `sessionVideo.addEventListener("error"`,
+		"refreshRecordings", `request("/api/v1/scan"`, "timelinePositionPending", "eventCameraView", "track-segment continuous",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("播放器缺少失败自动降级标记 %q", marker)

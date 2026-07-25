@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fakeStreamingRunner struct {
@@ -18,6 +20,21 @@ func (r *fakeStreamingRunner) RunStreaming(_ context.Context, name string, args 
 	r.args = append([]string(nil), args...)
 	_, err := io.WriteString(output, "fragmented-mp4")
 	return err
+}
+
+type blockingStreamingRunner struct {
+	started atomic.Int32
+	release chan struct{}
+}
+
+func (r *blockingStreamingRunner) RunStreaming(ctx context.Context, _ string, _ []string, _ io.Writer) error {
+	r.started.Add(1)
+	select {
+	case <-r.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func TestCompositorStreamBuildsSixCameraPipeline(t *testing.T) {
@@ -52,6 +69,86 @@ func TestCompositorStreamBuildsSixCameraPipeline(t *testing.T) {
 	}
 }
 
+func TestCompositorSerializesStreamingRequests(t *testing.T) {
+	t.Parallel()
+	runner := &blockingStreamingRunner{release: make(chan struct{}, 2)}
+	compositor, err := NewCompositor(runner, "/opt/teslabox/media/bin/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := CompositeRequest{
+		Layout: "single", Quality: "smooth", Camera: "front",
+		Inputs: map[string]string{"front": "/snapshot/front.mp4"},
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- compositor.Stream(t.Context(), request, io.Discard)
+	}()
+	waitForStreamingCalls(t, runner, 1)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- compositor.Stream(t.Context(), request, io.Discard)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if got := runner.started.Load(); got != 1 {
+		t.Fatalf("并发实时转码数 = %d，期望第二个请求等待", got)
+	}
+
+	runner.release <- struct{}{}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	waitForStreamingCalls(t, runner, 2)
+	runner.release <- struct{}{}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompositorWaitingRequestHonorsContext(t *testing.T) {
+	t.Parallel()
+	runner := &blockingStreamingRunner{release: make(chan struct{}, 1)}
+	compositor, err := NewCompositor(runner, "/opt/teslabox/media/bin/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := CompositeRequest{
+		Layout: "single", Quality: "smooth", Camera: "front",
+		Inputs: map[string]string{"front": "/snapshot/front.mp4"},
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- compositor.Stream(t.Context(), request, io.Discard)
+	}()
+	waitForStreamingCalls(t, runner, 1)
+
+	waitContext, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := compositor.Stream(waitContext, request, io.Discard); !errors.Is(err, context.Canceled) {
+		t.Fatalf("等待中的请求错误 = %v，期望 context.Canceled", err)
+	}
+	if got := runner.started.Load(); got != 1 {
+		t.Fatalf("已启动实时转码数 = %d，期望仍为 1", got)
+	}
+	runner.release <- struct{}{}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForStreamingCalls(t *testing.T, runner *blockingStreamingRunner, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if runner.started.Load() >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("实时转码调用数 = %d，期望至少 %d", runner.started.Load(), want)
+}
+
 func TestCompositeArgsDownloadsFramesBeforeSoftwareScaling(t *testing.T) {
 	t.Parallel()
 	inputs := map[string]string{
@@ -78,6 +175,26 @@ func TestCompositeArgsRejectsMissingCamera(t *testing.T) {
 	var inputError *InputError
 	if err == nil || !errors.As(err, &inputError) {
 		t.Fatalf("error = %v, want InputError", err)
+	}
+}
+
+func TestCompositeArgsBuildsSingleCameraTranscode(t *testing.T) {
+	t.Parallel()
+	args, err := compositeArgs(CompositeRequest{
+		Layout: "single", Quality: "standard", Camera: "front",
+		Inputs: map[string]string{"front": "/snapshot/front.mp4"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{"scale_rkrga=w=1110:h=720", "[v0]null[out]", "-b:v 3000k"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("args do not contain %q: %s", expected, joined)
+		}
+	}
+	if strings.Contains(joined, "xstack=inputs=1") {
+		t.Fatalf("单路转码不应走 xstack: %s", joined)
 	}
 }
 
