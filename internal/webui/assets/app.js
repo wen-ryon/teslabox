@@ -1298,9 +1298,9 @@ function renderWiFiSettings(wifi) {
   if (wifi.single_radio_notice) warnings.push(wifi.single_radio_notice);
   if (wifi.recovery?.last_error) {
     const retry = wifi.recovery.next_attempt_at ? `，下次尝试 ${new Date(wifi.recovery.next_attempt_at).toLocaleTimeString("zh-CN", {hour12:false})}` : "";
-    warnings.push(`上游自动恢复：${wifi.recovery.last_error}${retry}`);
+    warnings.push(`上游连接协调：${wifi.recovery.last_error}${retry}`);
   } else if (wifi.recovery?.last_success_at) {
-    warnings.push(`上游自动恢复最近成功：${new Date(wifi.recovery.last_success_at).toLocaleString("zh-CN", {hour12:false})}`);
+    warnings.push(`上游连接协调最近成功：${new Date(wifi.recovery.last_success_at).toLocaleString("zh-CN", {hour12:false})}`);
   }
   $("wifi-warning").hidden = warnings.length === 0;
   $("wifi-warning").textContent = warnings.join(" ");
@@ -1342,7 +1342,7 @@ function renderSavedNetworks(networks, wifiAvailable = true) {
     const title = document.createElement("strong");
     title.textContent = network.ssid || network.name;
     const detail = document.createElement("small");
-    detail.textContent = `${network.active ? "当前已连接" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"} · ${formatWiFiIPv4Summary(network.ipv4)}`;
+    detail.textContent = `${network.active ? "当前已连接" : network.requires_password ? "需要重新输入密码" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"} · ${formatWiFiIPv4Summary(network.ipv4)}`;
     identity.append(title, detail);
     const actions = document.createElement("div");
     actions.className = "network-actions";
@@ -1362,7 +1362,7 @@ function renderSavedNetworks(networks, wifiAvailable = true) {
     connect.textContent = network.active ? "已连接" : "连接";
     connect.disabled = !wifiAvailable || network.active;
     connect.title = wifiAvailable ? "" : "未检测到可用的无线网卡";
-    connect.addEventListener("click", () => connectSavedWiFi(network));
+    connect.addEventListener("click", () => selectSavedWiFi(network));
     const ipv4 = document.createElement("button");
     ipv4.type = "button";
     ipv4.className = "ghost";
@@ -1459,6 +1459,28 @@ async function connectSavedWiFi(network) {
   });
 }
 
+function selectSavedWiFi(network) {
+  if (!network.requires_password) {
+    connectSavedWiFi(network);
+    return;
+  }
+  const accessPoint = (state.wifi?.available_networks || []).find((item) => item.ssid === network.ssid);
+  pendingWiFi = {
+    ...accessPoint,
+    uuid:network.uuid,
+    ssid:network.ssid,
+    security:accessPoint?.security || network.security || "WPA2",
+  };
+  $("wifi-modal-title").textContent = `重新连接 ${network.ssid}`;
+  $("wifi-modal-detail").textContent = "旧配置没有可供后台服务读取的密码，请重新输入一次；保存后会恢复开机自动连接。";
+  $("wifi-password-label").hidden = false;
+  $("wifi-password").required = true;
+  $("wifi-password").value = "";
+  $("wifi-autoconnect").checked = Boolean(network.auto_connect);
+  $("wifi-modal").hidden = false;
+  window.setTimeout(() => $("wifi-password").focus(), 0);
+}
+
 async function updateWiFiAutoConnect(network, input) {
   const enabled = input.checked;
   input.disabled = true;
@@ -1477,7 +1499,11 @@ async function updateWiFiAutoConnect(network, input) {
 function openAvailableWiFi(network) {
   const saved = (state.wifi?.saved_networks || []).find((item) => item.ssid === network.ssid);
   if (saved) {
-    connectSavedWiFi(saved);
+    if (saved.requires_password) {
+      selectSavedWiFi(saved);
+    } else {
+      connectSavedWiFi(saved);
+    }
     return;
   }
   pendingWiFi = network;
@@ -1572,7 +1598,7 @@ async function connectNewWiFi(event) {
   const password = $("wifi-password").value;
   closeWiFiModal();
   await runWiFiConnect({
-    ssid:network.ssid, bssid:network.bssid, channel:Number(network.channel || 0),
+    uuid:network.uuid || "", ssid:network.ssid, bssid:network.bssid, channel:Number(network.channel || 0),
     security:network.security, password, auto_connect:$("wifi-autoconnect").checked,
   });
 }

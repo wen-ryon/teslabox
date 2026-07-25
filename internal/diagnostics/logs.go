@@ -35,7 +35,7 @@ const (
 )
 
 var (
-	secretAssignment = regexp.MustCompile(`(?i)(\b(?:password|passwd|psk|token|secret|authorization|cookie)\b["']?)(\s*[:=]\s*|\s+)("[^"]*"|'[^']*'|[^\s,;]+)`)
+	secretAssignment = regexp.MustCompile(`(?i)(\b(?:password|passwd|psk|token|secret|authorization|cookie)\b["']?)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
 	usbKeywords      = []string{
 		"usb", "dwc3", "udc", "gadget", "configfs", "mass_storage", "mass storage", "lun",
 		"fcc00000", "teslausb", "状态切换", "数据盘", "媒体快照", "快照挂载", "快照修复",

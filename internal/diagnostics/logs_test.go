@@ -83,6 +83,14 @@ func TestManagerLogsFiltersUSBAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactLinePreservesNetworkManagerMissingPasswordExplanation(t *testing.T) {
+	t.Parallel()
+	line := "Warning: password for '802-11-wireless-security.psk' not given in 'passwd-file'"
+	if redacted := redactLine(line); redacted != line {
+		t.Fatalf("redactLine() = %q, want original diagnostic wording", redacted)
+	}
+}
+
 func TestManagerLogsUsesAllowlistedUnitsAndBoundsLimit(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{output: "one\ntwo\nthree\n"}

@@ -35,8 +35,10 @@ var (
 	// ErrWiFiUnavailable 表示系统没有发现可供 NetworkManager 管理的无线接口。
 	ErrWiFiUnavailable = errors.New("未检测到可用的无线网卡")
 	// ErrUnsupportedSecurity 表示第一版尚不能安全配置该无线加密类型。
-	ErrUnsupportedSecurity  = errors.New("暂不支持该无线网络的加密类型")
-	errAutoNetworkInvisible = errors.New("自动连接网络暂不可见")
+	ErrUnsupportedSecurity     = errors.New("暂不支持该无线网络的加密类型")
+	errAutoNetworkInvisible    = errors.New("自动连接网络暂不可见")
+	errWiFiPasswordRequired    = errors.New("已保存 WiFi 缺少可由系统读取的密码，请在设置中心重新输入密码")
+	errNetworkInventoryChanged = errors.New("NetworkManager 无线设备清单已变化")
 )
 
 // InputError 表示可以安全返回给管理页面的请求参数错误。
@@ -49,12 +51,14 @@ func (e *InputError) Error() string { return e.Message }
 
 // SavedNetwork 是不包含密码的 NetworkManager 客户端连接摘要。
 type SavedNetwork struct {
-	Name        string       `json:"name"`
-	UUID        string       `json:"uuid"`
-	SSID        string       `json:"ssid"`
-	Active      bool         `json:"active"`
-	AutoConnect bool         `json:"auto_connect"`
-	IPv4        IPv4Settings `json:"ipv4"`
+	Name             string       `json:"name"`
+	UUID             string       `json:"uuid"`
+	SSID             string       `json:"ssid"`
+	Security         string       `json:"security,omitempty"`
+	Active           bool         `json:"active"`
+	AutoConnect      bool         `json:"auto_connect"`
+	RequiresPassword bool         `json:"requires_password,omitempty"`
+	IPv4             IPv4Settings `json:"ipv4"`
 }
 
 // IPv4Settings 描述已保存 WiFi 的 IPv4 配置；DHCP 模式不会返回临时租约地址。
@@ -236,10 +240,16 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-retryTimer.C:
 			m.reconcileForNetworkChange(ctx, retryTimer)
 		case watchErr := <-watchErrors:
+			watcherOnline = false
+			if errors.Is(watchErr, errNetworkInventoryChanged) {
+				// AP 虚拟接口创建和无线网卡热插拔都会改变设备清单，这是重建监听目标的正常信号。
+				// 保持事件驱动模式，避免把一次预期变化降级成两分钟轮询。
+				resetTimer(watcherRetryTimer, networkEventDebounce)
+				continue
+			}
 			if watchErr != nil {
 				m.logger.Warn("NetworkManager 事件监听中断，已切换低频后备检查", "error", watchErr)
 			}
-			watcherOnline = false
 			resetTimer(watcherRetryTimer, networkWatcherRetry)
 			resetTimer(fallbackTimer, networkFallbackInterval)
 		case <-watcherRetryTimer.C:
@@ -408,7 +418,8 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		}
 		status.SavedNetworks = append(status.SavedNetworks, SavedNetwork{
 			Name: profile.Name, UUID: profile.UUID, SSID: profile.SSID,
-			Active: profile.Active, AutoConnect: profile.AutoConnect, IPv4: profileIPv4Settings(profile),
+			Security: profile.Security, Active: profile.Active, AutoConnect: profile.AutoConnect,
+			RequiresPassword: profile.RequiresPassword, IPv4: profileIPv4Settings(profile),
 		})
 	}
 	if status.APActive {
@@ -493,10 +504,11 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 			if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
 				return false, current.SSID, fmt.Errorf("跟随上游 WiFi 信道: %w", err)
 			}
-			if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", current.UUID, "802-11-wireless.bssid", target.BSSID); err != nil {
-				return false, current.SSID, fmt.Errorf("更新 %s BSSID: %w", current.SSID, err)
-			}
-			if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID, "ifname", status.Interface); err != nil {
+			if _, err := m.run(
+				ctx,
+				"nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID,
+				"ifname", status.Interface, "ap", target.BSSID,
+			); err != nil {
 				activated, pending := m.activationStateAfterWaitTimeout(ctx, status.Interface, err)
 				if activated {
 					return true, current.SSID, nil
@@ -509,6 +521,11 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 			return true, current.SSID, nil
 		}
 	} else if status.CurrentConnection != "" {
+		return false, "", nil
+	}
+	if !status.APActive || !status.ConcurrentMode || !status.ChannelCoupled {
+		// 普通 STA 自动连接属于 NetworkManager 的职责。后台重复扫描和 connection up 会重置
+		// 系统正在进行的认证，并且无法读取桌面密钥代理持有的密码；这里只处理单射频热点信道约束。
 		return false, "", nil
 	}
 	candidates := m.autoConnectCandidates(ctx, status.SavedNetworks)
@@ -531,31 +548,28 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 			continue
 		}
 		visible = true
-		if status.APActive && status.ConcurrentMode && status.ChannelCoupled {
-			if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
-				failures = append(failures, fmt.Errorf("同步 %s 热点信道: %w", candidate.network.SSID, err))
-				failedSSID = candidate.network.SSID
-				continue
-			}
-		}
-		if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", candidate.network.UUID, "802-11-wireless.bssid", target.BSSID); err != nil {
-			failures = append(failures, fmt.Errorf("更新 %s BSSID: %w", candidate.network.SSID, err))
+		if candidate.network.RequiresPassword {
+			failures = append(failures, fmt.Errorf("%s: %w", candidate.network.SSID, errWiFiPasswordRequired))
 			failedSSID = candidate.network.SSID
 			continue
 		}
-		if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "up", "uuid", candidate.network.UUID, "ifname", status.Interface); err != nil {
-			activated, pending := m.activationStateAfterWaitTimeout(ctx, status.Interface, err)
-			if activated {
-				return true, candidate.network.SSID, nil
-			}
-			if pending {
-				return false, "", nil
-			}
-			failures = append(failures, fmt.Errorf("连接 %s: %w", candidate.network.SSID, err))
+		if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
+			failures = append(failures, fmt.Errorf("同步 %s 热点信道: %w", candidate.network.SSID, err))
 			failedSSID = candidate.network.SSID
 			continue
 		}
-		return true, candidate.network.SSID, nil
+		if _, err := m.run(
+			ctx,
+			"nmcli", "connection", "modify", "uuid", candidate.network.UUID,
+			"connection.autoconnect", "yes",
+		); err != nil {
+			failures = append(failures, fmt.Errorf("恢复 %s 系统自动连接: %w", candidate.network.SSID, err))
+			failedSSID = candidate.network.SSID
+			continue
+		}
+		// 重写 autoconnect 会清除 NetworkManager 对该连接的临时阻止状态；真正的认证和选点
+		// 仍由 NetworkManager 完成，避免服务进程替代系统 WiFi 管理器持有或索取密码。
+		return false, "", nil
 	}
 	if len(failures) > 0 {
 		return false, failedSSID, errors.Join(failures...)
@@ -749,6 +763,26 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 			return invalidInput("未找到可连接的已保存 WiFi")
 		}
 		ssid = network.SSID
+		if request.Password == "" && network.RequiresPassword {
+			return invalidInput(errWiFiPasswordRequired.Error())
+		}
+		if request.Password != "" {
+			if !profileUsesPSK(network.Security) {
+				return ErrUnsupportedSecurity
+			}
+			if err := validatePassword(request.Password); err != nil {
+				return err
+			}
+			if _, err := m.run(
+				ctx,
+				"nmcli",
+				"connection", "modify", "uuid", request.UUID,
+				"802-11-wireless-security.psk-flags", "0",
+				"802-11-wireless-security.psk", request.Password,
+			); err != nil {
+				return fmt.Errorf("保存已保存网络的 WiFi 密码: %w", err)
+			}
+		}
 	}
 	target, err := m.resolveAccessPoint(ctx, status.Interface, ssid, request.BSSID, request.Channel)
 	if err != nil {
@@ -800,7 +834,16 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	if request.AutoConnect != nil {
 		autoConnect = *request.AutoConnect
 	}
-	if _, err := m.run(ctx, "nmcli", "connection", "modify", "id", profileName, "connection.autoconnect", yesNo(autoConnect)); err != nil {
+	saveArgs := []string{"connection", "modify", "id", profileName, "connection.autoconnect", yesNo(autoConnect)}
+	if security != "open" {
+		// 显式改为系统持有密钥，避免无桌面环境重启后只能向不存在的用户密钥代理索取密码。
+		saveArgs = append(
+			saveArgs,
+			"802-11-wireless-security.psk-flags", "0",
+			"802-11-wireless-security.psk", request.Password,
+		)
+	}
+	if _, err := m.run(ctx, "nmcli", saveArgs...); err != nil {
 		return fmt.Errorf("保存 WiFi 自动连接设置: %w", err)
 	}
 	return nil
@@ -1191,7 +1234,7 @@ type profile struct {
 	DNS                                                         []string
 	Device, ConfiguredDevice                                    string
 	Channel                                                     int
-	Active, AutoConnect                                         bool
+	Active, AutoConnect, RequiresPassword                       bool
 }
 
 func (m *Manager) wirelessProfiles(ctx context.Context) ([]profile, error) {
@@ -1234,11 +1277,54 @@ func (m *Manager) profileDetails(ctx context.Context, item profile) (profile, er
 	item.Security = lines[4]
 	item.IPv4Method = lines[5]
 	item.Address = lines[6]
+	if item.Mode != "ap" && profileUsesPSK(item.Security) {
+		available, known := m.profilePSKAvailable(ctx, item.UUID)
+		item.RequiresPassword = known && !available
+	}
 	item.Gateway, item.DNS, err = m.profileIPv4Details(ctx, item.UUID)
 	if err != nil {
 		return profile{}, err
 	}
 	return item, nil
+}
+
+func (m *Manager) profilePSKAvailable(ctx context.Context, uuid string) (bool, bool) {
+	output, err := m.run(
+		ctx,
+		"nmcli",
+		"--show-secrets",
+		"-g", "802-11-wireless-security.psk-flags,802-11-wireless-security.psk",
+		"connection", "show", "uuid", uuid,
+	)
+	if err != nil {
+		// 某些旧版 NetworkManager 不支持 --show-secrets；密钥状态未知时继续沿用原连接行为，
+		// 不能因为一个增强诊断查询失败而让全部 WiFi 和 AP 管理不可用。
+		return false, false
+	}
+	normalized := strings.TrimSuffix(string(output), "\n")
+	if normalized == "" {
+		// 兼容不支持查询密钥标志的旧 NetworkManager；未知状态不能误报为缺少密码。
+		return false, false
+	}
+	lines := strings.Split(normalized, "\n")
+	flagsText := strings.TrimSpace(lines[0])
+	psk := ""
+	if len(lines) > 1 {
+		psk = strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+	flags := 0
+	if first := strings.Fields(flagsText); len(first) > 0 {
+		flags, _ = strconv.Atoi(first[0])
+	}
+	agentOwnedOrNotSaved := flags&0x3 != 0 ||
+		strings.Contains(strings.ToLower(flagsText), "agent-owned") ||
+		strings.Contains(strings.ToLower(flagsText), "not-saved")
+	return psk != "" && !agentOwnedOrNotSaved, true
+}
+
+func profileUsesPSK(security string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(security))
+	return normalized == "wpa-psk" || normalized == "sae"
 }
 
 func (m *Manager) profileIPv4Details(ctx context.Context, uuid string) (string, []string, error) {

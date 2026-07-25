@@ -1,0 +1,13 @@
+[Unit]
+Description=TeslaBox AP virtual interface setup
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+EnvironmentFile=-/etc/teslabox/teslabox.env
+ExecStart=/usr/local/libexec/teslabox-ap-setup.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -19,9 +19,12 @@ const (
 	legacyUdevComment   = "# loop 设备由快照流程管理，忽略其事件可避免通知信号打断 losetup、fsck 和 lsblk 子进程。"
 	replacementComment  = "# 数据盘状态由 TeslaBox 的低频轮询收敛。不要从 udev 向主进程发送信号：\n" +
 		"# 系统启动时块设备事件可能早于 Go 信号订阅，默认 SIGUSR1 会终止刚启动的服务并破坏 Gadget 绑定窗口。\n"
+	apHotplugRule  = `ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="teslabox-ap.service"`
+	apHotplugBlock = "# 无线网卡可能是可热插拔 USB/PCIe 设备；出现后只唤起独立 AP 探测服务，不触碰主服务或 Gadget。\n" +
+		apHotplugRule + "\n"
 )
 
-// RemoveLegacyUdevSignal 删除旧版本会向主进程发送 SIGUSR1 的规则并重新加载 udev。
+// RemoveLegacyUdevSignal 删除旧版 SIGUSR1 规则并补齐无线热插拔探测规则。
 // 迁移只接受普通文件且只删除精确匹配的旧规则，避免覆盖管理员添加的其他规则。
 func RemoveLegacyUdevSignal(ctx context.Context, rulePath string, runner system.Runner) (bool, error) {
 	if !filepath.IsAbs(rulePath) || filepath.Clean(rulePath) == string(filepath.Separator) {
@@ -66,17 +69,27 @@ func withoutLegacyUdevSignal(content string) (string, bool) {
 	lines := strings.Split(strings.TrimSuffix(normalized, "\n"), "\n")
 	kept := make([]string, 0, len(lines)+2)
 	changed := false
+	removedLegacy := false
+	hasAPHotplugRule := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == legacyUdevComment {
 			changed = true
+			removedLegacy = true
 			continue
 		}
 		if strings.Contains(trimmed, legacyUdevSignal) {
 			changed = true
+			removedLegacy = true
 			continue
 		}
+		if trimmed == apHotplugRule {
+			hasAPHotplugRule = true
+		}
 		kept = append(kept, line)
+	}
+	if !hasAPHotplugRule {
+		changed = true
 	}
 	if !changed {
 		return content, false
@@ -89,7 +102,15 @@ func withoutLegacyUdevSignal(content string) (string, bool) {
 		result.WriteString(strings.Join(kept, "\n"))
 		result.WriteString("\n")
 	}
-	result.WriteString(replacementComment)
+	if removedLegacy {
+		result.WriteString(replacementComment)
+	}
+	if !hasAPHotplugRule {
+		if result.Len() > 0 {
+			result.WriteString("\n")
+		}
+		result.WriteString(apHotplugBlock)
+	}
 	return result.String(), true
 }
 

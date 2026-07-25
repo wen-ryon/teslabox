@@ -9,13 +9,14 @@ import (
 )
 
 type recordingRunner struct {
-	calls []string
-	err   error
+	calls  []string
+	err    error
+	output string
 }
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
-	return nil, r.err
+	return []byte(r.output), r.err
 }
 
 func TestRemoveLegacyUdevSignalPreservesUnrelatedRules(t *testing.T) {
@@ -44,7 +45,8 @@ func TestRemoveLegacyUdevSignalPreservesUnrelatedRules(t *testing.T) {
 		t.Fatalf("updated rule still contains legacy signal or CRLF: %q", updated)
 	}
 	if !strings.Contains(string(updated), `ACTION=="add", SUBSYSTEM=="net", TAG+="systemd"`) ||
-		!strings.Contains(string(updated), "不要从 udev 向主进程发送信号") {
+		!strings.Contains(string(updated), "不要从 udev 向主进程发送信号") ||
+		!strings.Contains(string(updated), apHotplugRule) {
 		t.Fatalf("updated rule did not preserve the unrelated rule: %q", updated)
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "udevadm control --reload-rules" {
@@ -55,7 +57,7 @@ func TestRemoveLegacyUdevSignalPreservesUnrelatedRules(t *testing.T) {
 func TestRemoveLegacyUdevSignalIsIdempotent(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "99-teslabox.rules")
-	if err := os.WriteFile(path, []byte(replacementComment), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(replacementComment+"\n"+apHotplugBlock), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runner := &recordingRunner{}

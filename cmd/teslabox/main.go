@@ -75,7 +75,26 @@ func main() {
 	if migrationErr != nil {
 		logger.Warn("无法迁移旧版 udev 信号规则，主服务继续启动", "error", migrationErr)
 	} else if udevMigrated {
-		logger.Info("已移除旧版 udev SIGUSR1 规则并重新加载")
+		logger.Info("已迁移旧版 udev 规则并重新加载")
+	}
+	apMigrationCtx, apMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	apMigration, apMigrationErr := hostmigration.UpgradeLegacyAPComponents(
+		apMigrationCtx,
+		hostmigration.APComponentPaths{
+			Script: "/usr/local/libexec/teslabox-ap-setup.sh",
+			Unit:   "/etc/systemd/system/teslabox-ap.service",
+		},
+		runner,
+	)
+	apMigrationCancel()
+	if apMigrationErr != nil {
+		logger.Warn("无法迁移旧版 AP 系统组件，主服务继续启动", "error", apMigrationErr)
+	} else if apMigration.Script || apMigration.Unit {
+		logger.Info(
+			"已迁移旧版 AP 系统组件，下次开机或无线网卡热插拔时生效",
+			"script", apMigration.Script,
+			"unit", apMigration.Unit,
+		)
 	}
 	guardCtx, guardCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	protectedServices, guardErr := gadget.DisableConflictingServices(guardCtx, runner)

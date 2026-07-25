@@ -475,6 +475,72 @@ func TestConnectKeepsIndependentAPRadioOnItsOwnChannel(t *testing.T) {
 	}
 }
 
+func TestSavedWiFiMissingSystemSecretCanBeRepaired(t *testing.T) {
+	t.Parallel()
+	const upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "ExampleVisible-5G:" + upstreamUUID + ":802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nExampleVisible-5G\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli --show-secrets -g 802-11-wireless-security.psk-flags,802-11-wireless-security.psk connection show uuid " + upstreamUUID:                                                                      "1 (agent-owned)\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":ExampleVisible-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.SavedNetworks) != 1 || !status.SavedNetworks[0].RequiresPassword {
+		t.Fatalf("saved networks = %#v", status.SavedNetworks)
+	}
+	if err := manager.Connect(context.Background(), ConnectRequest{
+		UUID: upstreamUUID, Password: "correct-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := "nmcli connection modify uuid " + upstreamUUID +
+		" 802-11-wireless-security.psk-flags 0 802-11-wireless-security.psk correct-password"
+	if !containsCall(runner.calls, want) {
+		t.Fatalf("missing password repair call %q in %#v", want, runner.calls)
+	}
+	if !containsCall(runner.calls, "nmcli --wait 15 connection up uuid "+upstreamUUID+" ifname wlan0") {
+		t.Fatalf("saved network was not activated: %#v", runner.calls)
+	}
+}
+
+func TestReconcileAutoConnectDoesNotRetryCoupledProfileWithoutSystemSecret(t *testing.T) {
+	t.Parallel()
+	const (
+		apUUID       = "11111111-1111-1111-1111-111111111111"
+		upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	)
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                        "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:yes\nExampleVisible-5G:" + upstreamUUID + ":802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID:       "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nExampleVisible-5G\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli --show-secrets -g 802-11-wireless-security.psk-flags,802-11-wireless-security.psk connection show uuid " + upstreamUUID:                                                                      "2 (not-saved)\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                          "ap0:wifi:connected\nwlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                         ":ExampleVisible-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
+		"nmcli -g GENERAL.STATE device show wlan0":                                      "30 (disconnected)\n",
+		"nmcli -g connection.autoconnect-priority connection show uuid " + upstreamUUID: "10\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	recovered, ssid, err := manager.reconcileAutoConnect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), errWiFiPasswordRequired.Error()) {
+		t.Fatalf("reconcileAutoConnect() error = %v", err)
+	}
+	if recovered || ssid != "ExampleVisible-5G" {
+		t.Fatalf("result = (%t, %q), want blocked ExampleVisible-5G", recovered, ssid)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "connection up uuid "+upstreamUUID) {
+			t.Fatalf("missing-secret profile must not be activated repeatedly: %#v", runner.calls)
+		}
+	}
+}
+
 func TestAlignAPChannelFailureRestoresPreviousNetworkState(t *testing.T) {
 	t.Parallel()
 	const (
@@ -518,7 +584,7 @@ func TestAlignAPChannelFailureRestoresPreviousNetworkState(t *testing.T) {
 	}
 }
 
-func TestReconcileAutoConnectUsesPriorityAndRealignsAP(t *testing.T) {
+func TestReconcileAutoConnectPreparesCoupledAPForNetworkManager(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{
 		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless:ap0:yes\nHome:22222222-2222-2222-2222-222222222222:802-11-wireless::yes\nBackup:33333333-3333-3333-3333-333333333333:802-11-wireless::yes\n",
@@ -535,56 +601,57 @@ func TestReconcileAutoConnectUsesPriorityAndRealignsAP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recovered || ssid != "Home" {
-		t.Fatalf("recovered = %t, ssid = %q", recovered, ssid)
+	if recovered || ssid != "" {
+		t.Fatalf("recovered = %t, ssid = %q, want NetworkManager to activate", recovered, ssid)
 	}
 	wantCalls := []string{
 		"nmcli --wait 12 device wifi rescan ifname wlan0",
 		"nmcli connection modify uuid 11111111-1111-1111-1111-111111111111 802-11-wireless.band a 802-11-wireless.channel 165",
 		"nmcli --wait 20 connection up uuid 11111111-1111-1111-1111-111111111111 ifname ap0",
-		"nmcli connection modify uuid 22222222-2222-2222-2222-222222222222 802-11-wireless.bssid AA:BB:CC:DD:EE:01",
-		"nmcli --wait 15 connection up uuid 22222222-2222-2222-2222-222222222222 ifname wlan0",
+		"nmcli connection modify uuid 22222222-2222-2222-2222-222222222222 connection.autoconnect yes",
 	}
 	for _, want := range wantCalls {
 		if !containsCall(runner.calls, want) {
 			t.Fatalf("missing call %q in %#v", want, runner.calls)
 		}
 	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "connection up uuid 22222222-2222-2222-2222-222222222222") ||
+			strings.Contains(call, "802-11-wireless.bssid") {
+			t.Fatalf("coordination must leave upstream activation and BSSID selection to NetworkManager: %#v", runner.calls)
+		}
+	}
 }
 
-func TestReconcileAutoConnectReportsTheVisibleFailedNetwork(t *testing.T) {
+func TestReconcileAutoConnectLeavesOrdinaryReconnectToNetworkManager(t *testing.T) {
 	t.Parallel()
 	const (
 		invisibleUUID = "22222222-2222-2222-2222-222222222222"
 		visibleUUID   = "33333333-3333-3333-3333-333333333333"
 	)
-	connectCall := "nmcli --wait 15 connection up uuid " + visibleUUID + " ifname wlan0"
-	runner := &fakeRunner{
-		responses: map[string]string{
-			"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "ExampleWiFi-5G:" + invisibleUUID + ":802-11-wireless::yes\nExampleVisible-5G:" + visibleUUID + ":802-11-wireless::yes\n",
-			"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + invisibleUUID: "infrastructure\nExampleWiFi-5G\na\n0\nwpa-psk\nauto\n\n",
-			"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + visibleUUID:   "infrastructure\nExampleVisible-5G\na\n0\nwpa-psk\nauto\n\n",
-			"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:disconnected\n",
-			"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":ExampleVisible-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:161:WPA2\n",
-			"nmcli -g connection.autoconnect-priority connection show uuid " + invisibleUUID:                            "90\n",
-			"nmcli -g connection.autoconnect-priority connection show uuid " + visibleUUID:                              "10\n",
-			"nmcli -g GENERAL.STATE device show wlan0":                                                                  "30 (disconnected)\n",
-		},
-		failures: map[string][]error{
-			connectCall: {&system.CommandError{Code: 3, Output: "Error: Timeout expired (15 seconds)"}},
-		},
-	}
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "ExampleWiFi-5G:" + invisibleUUID + ":802-11-wireless::yes\nExampleVisible-5G:" + visibleUUID + ":802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + invisibleUUID: "infrastructure\nExampleWiFi-5G\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + visibleUUID:   "infrastructure\nExampleVisible-5G\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:disconnected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":ExampleVisible-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:161:WPA2\n",
+		"nmcli -g GENERAL.STATE device show wlan0":                                                                  "30 (disconnected)\n",
+	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	recovered, ssid, err := manager.reconcileAutoConnect(context.Background())
-	if err == nil {
-		t.Fatal("reconcileAutoConnect() error = nil")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if recovered || ssid != "ExampleVisible-5G" {
-		t.Fatalf("recovery = (%t, %q), want failed visible network ExampleVisible-5G", recovered, ssid)
+	if recovered || ssid != "" {
+		t.Fatalf("recovery = (%t, %q), want NetworkManager-owned reconnect", recovered, ssid)
 	}
-	if strings.Contains(err.Error(), "ExampleWiFi-5G") || !strings.Contains(err.Error(), "连接 ExampleVisible-5G") {
-		t.Fatalf("recovery error = %q, want only the attempted visible network", err)
+	for _, call := range runner.calls {
+		if strings.Contains(call, "device wifi rescan") ||
+			strings.Contains(call, "connection up") ||
+			strings.Contains(call, "connection.autoconnect-priority") {
+			t.Fatalf("ordinary reconnect issued TeslaBox recovery command %q", call)
+		}
 	}
 }
 
@@ -614,36 +681,20 @@ func TestReconcileAutoConnectWaitsForNetworkManagerActivation(t *testing.T) {
 	}
 }
 
-func TestReconcileAutoConnectTreatsWaitTimeoutAsPendingActivation(t *testing.T) {
+func TestActivationStateAfterWaitTimeoutTreatsNetworkManagerActivationAsPending(t *testing.T) {
 	t.Parallel()
-	const upstreamUUID = "22222222-2222-2222-2222-222222222222"
-	connectCall := "nmcli --wait 15 connection up uuid " + upstreamUUID + " ifname wlan0"
-	runner := &fakeRunner{
-		responses: map[string]string{
-			"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "ExampleVisible-5G:" + upstreamUUID + ":802-11-wireless::yes\n",
-			"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nExampleVisible-5G\na\n0\nwpa-psk\nauto\n\n",
-			"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:disconnected\n",
-			"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":ExampleVisible-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:161:WPA2\n",
-			"nmcli -g connection.autoconnect-priority connection show uuid " + upstreamUUID:                             "10\n",
-		},
-		responseSequences: map[string][]string{
-			"nmcli -g GENERAL.STATE device show wlan0": {"30 (disconnected)\n", "70 (getting IP configuration)\n"},
-		},
-		failures: map[string][]error{
-			connectCall: {&system.CommandError{Code: 3, Output: "Error: Timeout expired (15 seconds)"}},
-		},
-	}
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -g GENERAL.STATE device show wlan0": "70 (getting IP configuration)\n",
+	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	recovered, ssid, err := manager.reconcileAutoConnect(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered || ssid != "" {
-		t.Fatalf("timed-out activation = (%t, %q), want NetworkManager to finish without another attempt", recovered, ssid)
-	}
-	if !containsCall(runner.calls, connectCall) {
-		t.Fatalf("calls = %#v, want initial activation attempt", runner.calls)
+	activated, pending := manager.activationStateAfterWaitTimeout(
+		context.Background(),
+		"wlan0",
+		&system.CommandError{Code: 3, Output: "Error: Timeout expired (15 seconds)"},
+	)
+	if activated || !pending {
+		t.Fatalf("activation state = (%t, %t), want pending", activated, pending)
 	}
 }
 
@@ -691,8 +742,7 @@ func TestReconcileAutoConnectFollowsActiveUpstreamChannel(t *testing.T) {
 		"nmcli device disconnect wlan0",
 		"nmcli connection modify uuid 11111111-1111-1111-1111-111111111111 802-11-wireless.band a 802-11-wireless.channel 161",
 		"nmcli --wait 20 connection up uuid 11111111-1111-1111-1111-111111111111 ifname ap0",
-		"nmcli connection modify uuid 22222222-2222-2222-2222-222222222222 802-11-wireless.bssid AA:BB:CC:DD:EE:09",
-		"nmcli --wait 15 connection up uuid 22222222-2222-2222-2222-222222222222 ifname wlan0",
+		"nmcli --wait 15 connection up uuid 22222222-2222-2222-2222-222222222222 ifname wlan0 ap AA:BB:CC:DD:EE:09",
 	}
 	for _, want := range wantCalls {
 		if !containsCall(runner.calls, want) {

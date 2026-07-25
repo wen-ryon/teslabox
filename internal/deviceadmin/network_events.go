@@ -94,7 +94,7 @@ func watchNetworkManagerEvents(ctx context.Context, interfaceName string, notify
 			if event.Kind == networkEventInventory {
 				// 监听目标与 NetworkManager 的设备对象绑定；设备增删后退出并由上层
 				// 按新发现的接口重建监听，避免热插拔后永远停留在旧对象路径。
-				return fmt.Errorf("NetworkManager 无线设备清单已变化")
+				return errNetworkInventoryChanged
 			}
 		}
 	}

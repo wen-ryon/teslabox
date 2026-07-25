@@ -2,6 +2,18 @@
 set -eu
 
 AP_CONNECTION_NAME="TeslaBox-5G"
+AP_AUTOCONNECT=$(
+	/usr/bin/nmcli -g connection.autoconnect connection show id "$AP_CONNECTION_NAME" 2>/dev/null |
+		sed -n '1p' || true
+)
+case "$AP_AUTOCONNECT" in
+	yes|true|1) ;;
+	*)
+		echo "teslabox-ap-setup: 热点未启用开机自动连接，跳过接口创建" >&2
+		exit 0
+		;;
+esac
+
 AP_INTERFACE="${TESLABOX_AP_INTERFACE:-}"
 if [ -z "$AP_INTERFACE" ]; then
 	AP_INTERFACE=$(/usr/bin/nmcli -g connection.interface-name connection show id "$AP_CONNECTION_NAME" 2>/dev/null | sed -n '1p' || true)
