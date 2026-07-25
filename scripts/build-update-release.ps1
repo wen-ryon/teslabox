@@ -76,29 +76,19 @@ Copy-Item -Force $manifest $versionManifest
 
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 $helperHash = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
-$binaryChecksum = Join-Path $output "$(Split-Path -Leaf $binary).sha256"
-$helperChecksum = Join-Path $output "$(Split-Path -Leaf $helper).sha256"
+$binaryChecksum = Join-Path $output "teslabox-linux-arm64.sha256"
+$helperChecksum = Join-Path $output "teslabox-update-helper-linux-arm64.sha256"
 # 发布校验文件固定使用 LF；Windows PowerShell 的 Set-Content 默认会写入 CRLF。
-function Write-ChecksumFile {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Hash,
-        [Parameter(Mandatory = $true)][string]$FileName
-    )
-
-    $content = [Text.Encoding]::ASCII.GetBytes("$Hash  $FileName`n")
-    [IO.File]::WriteAllBytes($Path, $content)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Failed to create update checksum file: $Path"
-    }
-    $written = [IO.File]::ReadAllBytes($Path)
-    if ($written.Length -ne $content.Length -or
-        [Convert]::ToBase64String($written) -ne [Convert]::ToBase64String($content)) {
-        throw "Update checksum file verification failed: $Path"
+$binaryChecksumContent = [Text.Encoding]::ASCII.GetBytes("$binaryHash  teslabox-linux-arm64`n")
+$helperChecksumContent = [Text.Encoding]::ASCII.GetBytes("$helperHash  teslabox-update-helper-linux-arm64`n")
+[IO.File]::WriteAllBytes($binaryChecksum, $binaryChecksumContent)
+[IO.File]::WriteAllBytes($helperChecksum, $helperChecksumContent)
+foreach ($checksum in @($binaryChecksum, $helperChecksum)) {
+    if (-not (Test-Path -LiteralPath $checksum -PathType Leaf) -or
+        (Get-Item -LiteralPath $checksum).Length -eq 0) {
+        throw "Failed to create update checksum file: $checksum"
     }
 }
-Write-ChecksumFile -Path $binaryChecksum -Hash $binaryHash -FileName (Split-Path -Leaf $binary)
-Write-ChecksumFile -Path $helperChecksum -Hash $helperHash -FileName (Split-Path -Leaf $helper)
 
 Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest, $versionManifest, $binaryChecksum, $helperChecksum |
     Format-Table Path, Hash
