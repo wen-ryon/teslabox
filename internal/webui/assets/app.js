@@ -237,6 +237,7 @@ $("storage-init-form").addEventListener("submit", initializeStorageDevice);
 $("storage-music-enabled").addEventListener("change", renderStoragePartitionPreview);
 $("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
 $("maintenance-auto-recovery").addEventListener("click", toggleMaintenanceAutoRecovery);
+$("storage-reclaim").addEventListener("click", reclaimStorageSpace);
 $("password-change-open").addEventListener("click", () => openPasswordModal(false));
 $("password-change-form").addEventListener("submit", changeManagementPassword);
 document.querySelectorAll("[data-close-password]").forEach((element) => element.addEventListener("click", () => closePasswordModal(false)));
@@ -1041,6 +1042,7 @@ async function loadSettings() {
 function renderMaintenanceSettings(settings) {
   const enabled = Boolean(settings.auto_recovery);
   const toggle = $("maintenance-auto-recovery");
+  $("storage-reclaim").disabled = false;
   toggle.disabled = false;
   toggle.setAttribute("aria-pressed", String(enabled));
   $("maintenance-toggle-title").textContent = enabled ? "媒体自动恢复已开启" : "媒体自动恢复已禁用";
@@ -1058,6 +1060,7 @@ function renderMaintenanceUnavailable(message) {
   const toggle = $("maintenance-auto-recovery");
   toggle.setAttribute("aria-pressed", "false");
   toggle.disabled = true;
+  $("storage-reclaim").disabled = true;
   $("maintenance-toggle-title").textContent = "媒体自动恢复不可用";
   $("maintenance-toggle-detail").textContent = "请检查设备状态";
   $("maintenance-status").textContent = "不可用";
@@ -1088,6 +1091,41 @@ async function toggleMaintenanceAutoRecovery() {
     await loadSettings();
   } finally {
     toggle.disabled = false;
+  }
+}
+
+async function reclaimStorageSpace() {
+  const automatic = Boolean(state.maintenance?.auto_recovery);
+  const lifecycle = automatic
+    ? "TeslaBox 会自动断开 USB Gadget，完成后温重启恢复。"
+    : "请先物理拔掉车机或电脑的 OTG 线；完成后请插回 OTG，并在日志中心执行温重启恢复。";
+  const confirmed = await askConfirmation(
+    "回收虚拟盘旧空间",
+    `系统会先检查 exFAT，只对分配位图确认空闲的簇执行外层打洞。${lifecycle} 操作可能持续数分钟，请勿断电或拔出数据盘。`,
+    "确认回收",
+    true,
+  );
+  if (!confirmed) return;
+  const button = $("storage-reclaim");
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在回收…";
+  setSettingsNotice("正在检查 exFAT 分配位图并回收外层空间，请勿断电…", false, false);
+  try {
+    const result = await postJSON("/api/v1/storage/reclaim", {
+      confirm_otg_disconnected: !automatic,
+    });
+    const summary = `已检查 ${formatNumber(result.free_clusters || 0)} 个空闲簇，外层实际释放 ${formatBytes(result.reclaimed_bytes || 0)}。`;
+    setSettingsNotice(
+      automatic ? `${summary} 自动温重启恢复已提交。` : `${summary} 请插回 OTG 后到日志中心执行温重启恢复。`,
+      false,
+    );
+    if (!automatic) await loadStatus();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
   }
 }
 
@@ -1968,12 +2006,18 @@ function renderStatus(storage) {
   }
   $("video-count").textContent = `${formatNumber(storage.video_count || 0)} 个`;
 
-  const space = storage.snapshot_space || {};
-  const freePercent = Number(space.free_percent || 0);
-  $("space-value").textContent = formatBytes(space.free_bytes || 0);
+  const outerSpace = storage.snapshot_space || {};
+  const volumeSpace = storage.media_snapshot?.volume_space || {};
+  const hasVolumeSpace = Number(volumeSpace.total_bytes || 0) > 0;
+  const displayedSpace = hasVolumeSpace ? volumeSpace : outerSpace;
+  const freePercent = Number(displayedSpace.free_percent || 0);
+  $("space-value").textContent = formatBytes(displayedSpace.free_bytes || 0);
   $("space-progress").style.width = `${Math.max(0, Math.min(100, 100-freePercent))}%`;
   $("space-progress").style.background = freePercent < 10 ? "var(--warning)" : "var(--ok)";
-  $("space-detail").textContent = `外层 XFS 可用 ${freePercent.toFixed(1)}% · 镜像内删除不会立即缩小`;
+  const outerPercent = Number(outerSpace.free_percent || 0);
+  $("space-detail").textContent = hasVolumeSpace
+    ? `exFAT 可用 ${freePercent.toFixed(1)}% · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`
+    : `等待虚拟盘快照 · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`;
 
   const snapshot = storage.media_snapshot;
   $("snapshot-state").className = "badge";
@@ -2208,7 +2252,7 @@ async function deleteRecordingSession(session, button) {
     : "请先物理拔掉车机或电脑的 OTG 线；删除后 Gadget 会保持暂停，请插回 OTG 并在日志中心执行温重启恢复。";
   const confirmed = await askConfirmation(
     recent ? "清空最近录像" : "删除录像",
-    `${scope}包含 ${formatNumber(session.segment_count || 0)} 个录像片段、约 ${formatBytes(session.total_size || 0)}。${lifecycle} 此操作只释放虚拟盘内部 exFAT 空间，首页的外层数据盘占用不会立即下降。`,
+    `${scope}包含 ${formatNumber(session.segment_count || 0)} 个录像片段、约 ${formatBytes(session.total_size || 0)}。${lifecycle} 删除会立即释放虚拟盘内部空间；支持内核 discard 时也会同步返还外层空间。`,
     recent ? "确认清空" : "确认删除",
     true,
   );

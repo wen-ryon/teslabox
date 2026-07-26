@@ -35,6 +35,8 @@ type fakeMediaAssetsAdmin struct {
 	recordingDeleteCalls    int
 	recordingDeletePaths    []string
 	recordingDeleteReleased func() bool
+	reclaimCalls            int
+	reclaimResult           mediaassets.SpaceReclaimResult
 }
 
 func (a *fakeMediaAssetsAdmin) Status(context.Context) (mediaassets.Status, error) {
@@ -65,6 +67,11 @@ func (a *fakeMediaAssetsAdmin) DeleteRecordings(_ context.Context, request media
 		DeletedBytes:   11,
 		DeletedEvents:  1,
 	}, nil
+}
+
+func (a *fakeMediaAssetsAdmin) ReclaimSpace(context.Context) (mediaassets.SpaceReclaimResult, error) {
+	a.reclaimCalls++
+	return a.reclaimResult, nil
 }
 
 func (a *fakeMediaAssetsAdmin) Apply(context.Context) (mediaassets.Status, error) {
@@ -189,6 +196,52 @@ func TestAutomaticRecordingDeleteSchedulesWarmReboot(t *testing.T) {
 		gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
 		t.Fatalf("automatic delete = %d, calls = delete:%d pause:%d resume:%d power:%q body=%s",
 			response.Code, assets.recordingDeleteCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction, response.Body.String())
+	}
+}
+
+func TestSpaceReclaimRequiresConfirmationAndSupportsAutomaticRecovery(t *testing.T) {
+	previousDelay := automaticMaintenanceDisconnectDelay
+	automaticMaintenanceDisconnectDelay = 0
+	t.Cleanup(func() { automaticMaintenanceDisconnectDelay = previousDelay })
+
+	manualAssets := &fakeMediaAssetsAdmin{}
+	manualHandler := NewHandler(
+		fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMediaAssetsAdmin(manualAssets), WithMaintenanceAutomation(&fakeMaintenanceAutomation{}),
+	)
+	missing := httptest.NewRecorder()
+	manualHandler.ServeHTTP(missing, httptest.NewRequest(http.MethodPost, "/api/v1/storage/reclaim", strings.NewReader(`{}`)))
+	if missing.Code != http.StatusBadRequest || manualAssets.reclaimCalls != 0 {
+		t.Fatalf("unconfirmed reclaim = %d, calls = %d", missing.Code, manualAssets.reclaimCalls)
+	}
+
+	assets := &fakeMediaAssetsAdmin{reclaimResult: mediaassets.SpaceReclaimResult{CandidateBytes: 4096, ReclaimedBytes: 2048}}
+	gadget := &fakeGadgetAdmin{}
+	power := &fakeDeviceAdmin{}
+	handler := NewHandler(
+		fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMediaAssetsAdmin(assets), WithGadgetAdmin(gadget), WithDeviceAdmin(power),
+		WithMaintenanceAutomation(&fakeMaintenanceAutomation{settings: maintenancemode.Settings{AutoRecovery: true}}),
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/storage/reclaim", strings.NewReader(`{}`)))
+	if response.Code != http.StatusOK || assets.reclaimCalls != 1 ||
+		gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
+		t.Fatalf("automatic reclaim = %d, calls = reclaim:%d pause:%d resume:%d power:%q body=%s",
+			response.Code, assets.reclaimCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction, response.Body.String())
+	}
+}
+
+func TestAutomaticMaintenanceRecoverySurvivesExpiredOperationContext(t *testing.T) {
+	gadget := &fakeGadgetAdmin{}
+	power := &fakeDeviceAdmin{}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := finishAutomaticMaintenance(ctx, gadget, power); err != nil {
+		t.Fatalf("finishAutomaticMaintenance() error = %v", err)
+	}
+	if gadget.resumeCalls != 1 || gadget.resumeContextErr != nil || power.powerAction != "reboot" {
+		t.Fatalf("recovery = resume:%d context:%v power:%q", gadget.resumeCalls, gadget.resumeContextErr, power.powerAction)
 	}
 }
 

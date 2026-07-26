@@ -123,6 +123,16 @@ type RecordingDeleteResult struct {
 	DeletedEvents  int   `json:"deleted_events"`
 }
 
+// SpaceReclaimResult 区分 exFAT 可回收候选空间与外层 XFS 实际减少的物理占用。
+type SpaceReclaimResult struct {
+	CandidateBytes  uint64 `json:"candidate_bytes"`
+	ReclaimedBytes  uint64 `json:"reclaimed_bytes"`
+	FreeClusters    uint64 `json:"free_clusters"`
+	ClusterSize     uint64 `json:"cluster_size"`
+	RangeCount      int    `json:"range_count"`
+	ProcessedRanges int    `json:"processed_ranges"`
+}
+
 type manifest struct {
 	Version int     `json:"version"`
 	Assets  []Asset `json:"assets"`
@@ -134,6 +144,7 @@ type Manager struct {
 	runner      system.Runner
 	maintenance Maintenance
 	snapshots   SnapshotSource
+	reclaim     func(context.Context, string) (SpaceReclaimResult, error)
 	now         func() time.Time
 	mu          sync.Mutex
 }
@@ -169,7 +180,10 @@ func New(cfg Config, runner system.Runner, maintenance Maintenance, snapshots ..
 	if len(snapshots) > 1 {
 		return nil, errors.New("媒体快照来源不能重复配置")
 	}
-	manager := &Manager{cfg: cfg, runner: runner, maintenance: maintenance, now: time.Now}
+	manager := &Manager{
+		cfg: cfg, runner: runner, maintenance: maintenance,
+		reclaim: platformReclaimSpace, now: time.Now,
+	}
 	if len(snapshots) == 1 {
 		manager.snapshots = snapshots[0]
 	}
@@ -706,6 +720,55 @@ func (m *Manager) DeleteRecordings(ctx context.Context, request RecordingDeleteR
 	return result, nil
 }
 
+// ReclaimSpace 在 Gadget、快照和 loop 均已释放后，依据 exFAT 分配位图只回收未分配簇。
+// 直接读取位图而不是猜测文件内容，可让已经删除但未 discard 的历史录像安全返还外层 XFS。
+func (m *Manager) ReclaimSpace(ctx context.Context) (result SpaceReclaimResult, resultErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !regularFile(m.cfg.ImagePath) {
+		return SpaceReclaimResult{}, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return SpaceReclaimResult{}, fmt.Errorf("准备空间回收维护窗口: %w", err)
+	}
+	defer release()
+
+	loopDevice, err := m.attachLoop(ctx)
+	if err != nil {
+		return SpaceReclaimResult{}, err
+	}
+	attached := true
+	defer func() {
+		if attached {
+			if err := m.detachLoop(context.WithoutCancel(ctx), loopDevice); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
+	}()
+	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
+		return SpaceReclaimResult{}, fmt.Errorf("等待空间回收分区设备: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
+		var commandErr *system.CommandError
+		if !errors.As(err, &commandErr) || commandErr.Code != 1 {
+			return SpaceReclaimResult{}, fmt.Errorf("检查空间回收前的 exFAT 分区: %w", err)
+		}
+	}
+	if err := m.detachLoop(ctx, loopDevice); err != nil {
+		return SpaceReclaimResult{}, err
+	}
+	attached = false
+	if err := ctx.Err(); err != nil {
+		return SpaceReclaimResult{}, err
+	}
+	result, err = m.reclaim(ctx, m.cfg.ImagePath)
+	if err != nil {
+		return result, fmt.Errorf("回收 TeslaCam 虚拟盘外层空间: %w", err)
+	}
+	return result, nil
+}
+
 // Apply 在安全维护窗口内把所有待应用变更写入对应分区，并保持 Gadget 暂停等待温重启恢复。
 func (m *Manager) Apply(ctx context.Context) (Status, error) {
 	m.mu.Lock()
@@ -936,13 +999,36 @@ func (m *Manager) mountPartition(ctx context.Context, device string, partition i
 			}
 		}
 	}
-	if _, err := m.runner.Run(ctx, "mount", "--options", "rw,nosuid,nodev,noexec", "--", device, mountPath); err == nil {
+	const baseMountOptions = "rw,nosuid,nodev,noexec"
+	if !exFAT {
+		if _, err := m.runner.Run(ctx, "mount", "--options", baseMountOptions, "--", device, mountPath); err != nil {
+			return "", fmt.Errorf("挂载媒体分区: %w", err)
+		}
 		return mountPath, nil
-	} else if !exFAT || !unknownExFAT(err) {
-		return "", fmt.Errorf("挂载媒体分区: %w", err)
+	}
+
+	// 内核 exFAT 会把释放簇的 discard 传给 file-backed loop，从源头避免镜像外层只增不减。
+	// 某些旧板只安装了 exfat-fuse，无法识别 discard；先重试无 discard 挂载，不能让空间优化破坏删除功能。
+	_, discardErr := m.runner.Run(ctx, "mount", "--options", baseMountOptions+",discard", "--", device, mountPath)
+	if discardErr == nil {
+		return mountPath, nil
+	}
+	_, mountErr := m.runner.Run(ctx, "mount", "--options", baseMountOptions, "--", device, mountPath)
+	if mountErr == nil {
+		return mountPath, nil
+	}
+	if !unknownExFAT(mountErr) {
+		return "", errors.Join(
+			fmt.Errorf("使用 discard 挂载媒体 exFAT 分区: %w", discardErr),
+			fmt.Errorf("兼容模式挂载媒体 exFAT 分区: %w", mountErr),
+		)
 	}
 	if _, err := m.runner.Run(ctx, "mount.exfat-fuse", "-o", "rw,nosuid,nodev,noexec", device, mountPath); err != nil {
-		return "", fmt.Errorf("使用 exfat-fuse 挂载媒体分区: %w", err)
+		return "", errors.Join(
+			fmt.Errorf("使用 discard 挂载媒体 exFAT 分区: %w", discardErr),
+			fmt.Errorf("内核兼容模式挂载媒体 exFAT 分区: %w", mountErr),
+			fmt.Errorf("使用 exfat-fuse 挂载媒体分区: %w", err),
+		)
 	}
 	return mountPath, nil
 }

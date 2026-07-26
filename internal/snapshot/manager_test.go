@@ -262,6 +262,9 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	if view.ID != "20260716T080910.000000123Z" || view.MountPath != filepath.Join(mountRoot, view.ID) {
 		t.Fatalf("view = %#v", view)
 	}
+	if view.VolumeSpace.TotalBytes == 0 || view.VolumeSpace.FreeBytes == 0 {
+		t.Fatalf("view volume space = %#v", view.VolumeSpace)
+	}
 	if view.RepairApplied {
 		t.Fatal("Create() reported a repair for a directly mounted snapshot")
 	}

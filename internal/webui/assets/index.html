@@ -6,7 +6,7 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="stylesheet" href="/app.css?v=20260726-1">
-  <script src="/app.js?v=20260726-2" defer></script>
+  <script src="/app.js?v=20260726-3" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -97,7 +97,7 @@
           <p id="system-disk-detail" class="muted">读取中</p>
         </article>
         <article class="status-card">
-          <span>数据盘外层可用</span>
+          <span>车机虚拟盘可用</span>
           <strong id="space-value">—</strong>
           <div class="progress" aria-hidden="true"><i id="space-progress"></i></div>
           <p id="space-detail" class="muted">—</p>
@@ -248,9 +248,9 @@
         <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge">读取中</span></div>
         <article class="settings-card power-card">
           <div><h3>媒体自动断开与温重启</h3><p>启用后，应用媒体或删除直接写入文件会先由 TeslaBox 断开 USB Gadget，完成写入后自动重启恢复。上传文件本身只会暂存，不会触发重启。</p></div>
-          <div class="power-actions"><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
+          <div class="power-actions"><button id="storage-reclaim" class="secondary" type="button">回收旧空间</button><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
         </article>
-        <div class="settings-warning">媒体自动恢复默认关闭，避免改媒体时意外重启。在线更新则默认自动安全断开并整机重启恢复；两种操作都会让车机或电脑短暂失去 USB 存储。</div>
+        <div class="settings-warning">“回收旧空间”只处理 exFAT 分配位图已标记为空闲的簇，用于返还历史删除后仍被镜像占用的外层 XFS 空间。执行期间会暂停 USB Gadget；普通录像刷新不会触发该维护操作。</div>
       </section>
 
       <section class="settings-section security-section" aria-labelledby="security-title">

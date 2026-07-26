@@ -146,6 +146,31 @@ func (recordingDeleteRunner) Run(_ context.Context, name string, args ...string)
 	return nil, nil
 }
 
+type capturedCommand struct {
+	name string
+	args []string
+}
+
+type captureRunner struct {
+	commands    []capturedCommand
+	detached    bool
+	failDiscard bool
+}
+
+func (r *captureRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.commands = append(r.commands, capturedCommand{name: name, args: append([]string(nil), args...)})
+	if name == "mount" && r.failDiscard && len(args) >= 2 && args[1] == "rw,nosuid,nodev,noexec,discard" {
+		return nil, &system.CommandError{Name: "mount", Code: 32, Output: "unknown option discard"}
+	}
+	if name == "losetup" && len(args) > 0 && args[0] == "--find" {
+		return []byte("/dev/loop10\n"), nil
+	}
+	if name == "losetup" && len(args) > 0 && args[0] == "--detach" {
+		r.detached = true
+	}
+	return nil, nil
+}
+
 func TestManagerStagesValidWrapAndDoesNotExposeStagingPath(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -387,6 +412,108 @@ func TestManagerDeleteRecordingsUsesMaintenanceWindowAndServerPaths(t *testing.T
 	adjacentFile := filepath.Join(mountPath, "p1", "TeslaCam", "SavedClips", "2026-07-26_03-31-00", "event.json")
 	if content, err := os.ReadFile(adjacentFile); err != nil || string(content) != "other" {
 		t.Fatalf("adjacent event changed: %q, %v", content, err)
+	}
+}
+
+func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := &fakeMaintenance{}
+	runner := &captureRunner{}
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: filepath.Join(root, "mount"),
+	}, runner, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.reclaim = func(_ context.Context, path string) (SpaceReclaimResult, error) {
+		if path != imagePath || !runner.detached {
+			t.Fatalf("reclaim path = %q, detached = %t", path, runner.detached)
+		}
+		return SpaceReclaimResult{CandidateBytes: 4096, ReclaimedBytes: 2048, ProcessedRanges: 2}, nil
+	}
+	result, err := manager.ReclaimSpace(t.Context())
+	if err != nil {
+		t.Fatalf("ReclaimSpace() error = %v", err)
+	}
+	if maintenance.calls != 1 || result.ReclaimedBytes != 2048 {
+		t.Fatalf("ReclaimSpace() = %#v, maintenance calls = %d", result, maintenance.calls)
+	}
+	var checked bool
+	for _, command := range runner.commands {
+		if command.name == "fsck.exfat" {
+			checked = true
+		}
+	}
+	if !checked {
+		t.Fatal("ReclaimSpace() did not check exFAT before punching holes")
+	}
+}
+
+func TestManagerMountPartitionEnablesDiscardOnlyForKernelExFAT(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		exFAT       bool
+		wantOptions string
+	}{
+		{name: "exfat", exFAT: true, wantOptions: "rw,nosuid,nodev,noexec,discard"},
+		{name: "fat32", exFAT: false, wantOptions: "rw,nosuid,nodev,noexec"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			runner := &captureRunner{}
+			manager, err := New(Config{
+				ImagePath: filepath.Join(root, "image.img"), StatePath: filepath.Join(root, "state"),
+				StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+			}, runner, &fakeMaintenance{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.mountPartition(t.Context(), "/dev/loop10p1", 1, tt.exFAT); err != nil {
+				t.Fatalf("mountPartition() error = %v", err)
+			}
+			var options string
+			for _, command := range runner.commands {
+				if command.name == "mount" && len(command.args) >= 2 {
+					options = command.args[1]
+				}
+			}
+			if options != tt.wantOptions {
+				t.Fatalf("mount options = %q, want %q", options, tt.wantOptions)
+			}
+		})
+	}
+}
+
+func TestManagerMountPartitionFallsBackWhenDiscardIsUnsupported(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	runner := &captureRunner{failDiscard: true}
+	manager, err := New(Config{
+		ImagePath: filepath.Join(root, "image.img"), StatePath: filepath.Join(root, "state"),
+		StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+	}, runner, &fakeMaintenance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.mountPartition(t.Context(), "/dev/loop10p1", 1, true); err != nil {
+		t.Fatalf("mountPartition() error = %v", err)
+	}
+	var mountOptions []string
+	for _, command := range runner.commands {
+		if command.name == "mount" && len(command.args) >= 2 {
+			mountOptions = append(mountOptions, command.args[1])
+		}
+	}
+	want := []string{"rw,nosuid,nodev,noexec,discard", "rw,nosuid,nodev,noexec"}
+	if len(mountOptions) != len(want) || mountOptions[0] != want[0] || mountOptions[1] != want[1] {
+		t.Fatalf("mount options = %#v, want %#v", mountOptions, want)
 	}
 }
 

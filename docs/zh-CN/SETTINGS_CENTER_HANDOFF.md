@@ -58,6 +58,7 @@
 - 虚拟盘容量按物理盘动态计算：预留 5% 且不少于 20GB，车机可见镜像最大为 2TB。500GB 盘预计提供约 475GB，不再受旧版 96GB 上限影响。
 - 初始化可选创建 FAT32/MUSIC 分区，并用滑块调整 TeslaCam 与 MUSIC 比例；页面展示两个分区的预估容量。
 - 设置中心提供“媒体自动维护恢复”开关，默认关闭。用户明确确认风险后，应用媒体或删除直接写入媒体可由 TeslaBox 自动解绑 Gadget；媒体操作完成后安排温重启。在线更新默认自动解绑、健康检查并重启恢复，不受该媒体开关影响。
+- 设置中心提供独立“回收旧空间”操作。它不会绑定普通刷新；执行前必须进入媒体维护窗口、检查 exFAT 并解除 loop，只根据 Allocation Bitmap 的空闲簇返还镜像外层 XFS 空间。
 
 ### 后端
 
@@ -91,6 +92,7 @@
 | GET | `/api/v1/storage/devices` | 当前非系统 USB/NVMe 整盘、登记和可初始化状态 |
 | POST | `/api/v1/storage/initialize` | OTG、序列号和擦除确认后初始化、重新初始化或继续目标存储设备；可携带音乐分区比例 |
 | POST | `/api/v1/storage/initialize/cancel` | 放弃未完成初始化并恢复原活动设备选择 |
+| POST | `/api/v1/storage/reclaim` | 在独占媒体维护窗口内检查 exFAT 分配位图并回收历史删除后残留的外层镜像占用 |
 | GET | `/api/v1/media-assets` | 读取媒体中心受控资源、待应用状态和虚拟盘可用性 |
 | POST | `/api/v1/media-assets/upload?category=...` | 流式暂存锁车音效、皮肤、灯光秀或音乐文件 |
 | POST | `/api/v1/media-assets/{id}/delete` | 删除暂存文件或标记已应用文件待删除 |

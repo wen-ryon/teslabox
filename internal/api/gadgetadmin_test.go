@@ -13,9 +13,10 @@ import (
 )
 
 type fakeGadgetAdmin struct {
-	paused      bool
-	pauseCalls  int
-	resumeCalls int
+	paused           bool
+	pauseCalls       int
+	resumeCalls      int
+	resumeContextErr error
 }
 
 func (a *fakeGadgetAdmin) PauseGadget(context.Context) (service.Snapshot, error) {
@@ -24,9 +25,10 @@ func (a *fakeGadgetAdmin) PauseGadget(context.Context) (service.Snapshot, error)
 	return service.Snapshot{Phase: service.PhaseReadyForGadget, GadgetPaused: true}, nil
 }
 
-func (a *fakeGadgetAdmin) ResumeGadget(context.Context) (service.Snapshot, error) {
+func (a *fakeGadgetAdmin) ResumeGadget(ctx context.Context) (service.Snapshot, error) {
 	a.paused = true
 	a.resumeCalls++
+	a.resumeContextErr = ctx.Err()
 	return service.Snapshot{Phase: service.PhaseReadyForGadget, GadgetPaused: true, GadgetResumePending: true}, nil
 }
 

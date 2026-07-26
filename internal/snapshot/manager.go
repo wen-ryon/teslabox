@@ -36,6 +36,13 @@ type SpaceStatus struct {
 	Reason         string  `json:"reason,omitempty"`
 }
 
+// VolumeSpace 描述车机实际使用的 exFAT 虚拟盘容量，避免与承载镜像的外层 XFS 容量混淆。
+type VolumeSpace struct {
+	TotalBytes  uint64  `json:"total_bytes"`
+	FreeBytes   uint64  `json:"free_bytes"`
+	FreePercent float64 `json:"free_percent"`
+}
+
 // InsufficientSpaceError 保留实际容量，便于 API 和日志解释降级原因。
 type InsufficientSpaceError struct {
 	Status SpaceStatus
@@ -53,12 +60,13 @@ func (e *InsufficientSpaceError) Unwrap() error {
 
 // View 描述一个已经检查并只读挂载的 TeslaCam 快照。
 type View struct {
-	ID            string    `json:"id"`
-	ImagePath     string    `json:"image_path"`
-	MountPath     string    `json:"mount_path"`
-	LoopDevice    string    `json:"loop_device"`
-	CreatedAt     time.Time `json:"created_at"`
-	RepairApplied bool      `json:"repair_applied"`
+	ID            string      `json:"id"`
+	ImagePath     string      `json:"image_path"`
+	MountPath     string      `json:"mount_path"`
+	LoopDevice    string      `json:"loop_device"`
+	CreatedAt     time.Time   `json:"created_at"`
+	RepairApplied bool        `json:"repair_applied"`
+	VolumeSpace   VolumeSpace `json:"volume_space"`
 }
 
 // Config 固定原始镜像、快照目录和运行时只读挂载根目录。
@@ -279,6 +287,15 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 		}
 	}
 
+	totalBytes, freeBytes, err := platformSpace(mountPath)
+	if err != nil {
+		return View{}, fmt.Errorf("读取 TeslaCam 虚拟盘容量: %w", err)
+	}
+	freePercent := float64(0)
+	if totalBytes > 0 {
+		freePercent = float64(freeBytes) * 100 / float64(totalBytes)
+	}
+
 	cleanup = false
 	return View{
 		ID:            id,
@@ -287,6 +304,11 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 		LoopDevice:    loopDevice,
 		CreatedAt:     createdAt,
 		RepairApplied: repairApplied,
+		VolumeSpace: VolumeSpace{
+			TotalBytes:  totalBytes,
+			FreeBytes:   freeBytes,
+			FreePercent: freePercent,
+		},
 	}, nil
 }
 

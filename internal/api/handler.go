@@ -87,6 +87,7 @@ type MediaAssetsAdmin interface {
 	Delete(context.Context, string) (mediaassets.Status, error)
 	DeleteExternal(context.Context, mediaassets.Asset) (mediaassets.Status, error)
 	DeleteRecordings(context.Context, mediaassets.RecordingDeleteRequest) (mediaassets.RecordingDeleteResult, error)
+	ReclaimSpace(context.Context) (mediaassets.SpaceReclaimResult, error)
 	Apply(context.Context) (mediaassets.Status, error)
 	OpenPreview(context.Context, string) (*os.File, mediaassets.Asset, error)
 }
@@ -888,14 +889,16 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认删除直接写入的媒体"})
 			return
 		}
+		operationCtx, cancelOperation := mediaMaintenanceOperationContext(r.Context(), automatic)
+		defer cancelOperation()
 		if automatic {
-			if err := beginAutomaticMaintenance(r.Context(), gadget); err != nil {
+			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
 				logger.Warn("自动断开 USB Gadget 失败", "error", err)
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
 				return
 			}
 		}
-		status, err := admin.DeleteExternal(r.Context(), mediaassets.Asset{
+		status, err := admin.DeleteExternal(operationCtx, mediaassets.Asset{
 			ID:       input.ID,
 			Category: input.Category,
 			Files:    input.Files,
@@ -903,7 +906,7 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 			External: true,
 		})
 		if automatic {
-			if recoveryErr := finishAutomaticMaintenance(r.Context(), gadget, power); recoveryErr != nil {
+			if recoveryErr := finishAutomaticMaintenance(operationCtx, gadget, power); recoveryErr != nil {
 				logger.Warn("提交自动温重启恢复失败", "error", recoveryErr)
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体删除结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
 				return
@@ -952,12 +955,7 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 			return
 		}
 
-		operationCtx := r.Context()
-		cancelOperation := func() {}
-		if automatic {
-			// 用户在维护开始后关闭网页也必须完成卸载和温重启预约，避免 Gadget 永久停在半维护状态。
-			operationCtx, cancelOperation = context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
-		}
+		operationCtx, cancelOperation := mediaMaintenanceOperationContext(r.Context(), automatic)
 		defer cancelOperation()
 		if automatic {
 			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
@@ -992,6 +990,56 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 		)
 		writeJSON(w, http.StatusOK, result)
 	})
+	mux.HandleFunc("POST /api/v1/storage/reclaim", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		automatic := automaticMediaRecoveryEnabled(automation)
+		if !input.ConfirmOTGDisconnected && !automatic {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认回收空间"})
+			return
+		}
+
+		operationCtx, cancelOperation := mediaMaintenanceOperationContext(r.Context(), automatic)
+		defer cancelOperation()
+		if automatic {
+			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
+				logger.Warn("回收空间前自动断开 USB Gadget 失败", "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
+				return
+			}
+		}
+		result, reclaimErr := admin.ReclaimSpace(operationCtx)
+		if automatic {
+			if recoveryErr := finishAutomaticMaintenance(operationCtx, gadget, power); recoveryErr != nil {
+				logger.Warn("回收空间后提交自动温重启恢复失败", "error", recoveryErr)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "空间回收结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
+				return
+			}
+		}
+		if reclaimErr != nil {
+			logger.Warn("回收 TeslaCam 虚拟盘外层空间失败",
+				"candidate_bytes", result.CandidateBytes,
+				"processed_ranges", result.ProcessedRanges,
+				"error", reclaimErr,
+			)
+			if automatic {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "空间回收失败，但已安排温重启恢复 USB Gadget；请等待设备重新上线后查看日志"})
+				return
+			}
+			writeMediaAssetError(w, reclaimErr)
+			return
+		}
+		logger.Info("TeslaCam 虚拟盘外层空间回收完成",
+			"candidate_bytes", result.CandidateBytes,
+			"reclaimed_bytes", result.ReclaimedBytes,
+			"range_count", result.RangeCount,
+		)
+		writeJSON(w, http.StatusOK, result)
+	})
 	mux.HandleFunc("POST /api/v1/media-assets/apply", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
@@ -1004,16 +1052,18 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认应用媒体变更"})
 			return
 		}
+		operationCtx, cancelOperation := mediaMaintenanceOperationContext(r.Context(), automatic)
+		defer cancelOperation()
 		if automatic {
-			if err := beginAutomaticMaintenance(r.Context(), gadget); err != nil {
+			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
 				logger.Warn("自动断开 USB Gadget 失败", "error", err)
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
 				return
 			}
 		}
-		status, err := admin.Apply(r.Context())
+		status, err := admin.Apply(operationCtx)
 		if automatic {
-			if recoveryErr := finishAutomaticMaintenance(r.Context(), gadget, power); recoveryErr != nil {
+			if recoveryErr := finishAutomaticMaintenance(operationCtx, gadget, power); recoveryErr != nil {
 				logger.Warn("提交自动温重启恢复失败", "error", recoveryErr)
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体应用结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
 				return
@@ -1070,6 +1120,19 @@ func writeMediaAssetError(w http.ResponseWriter, err error) {
 
 var automaticMaintenanceDisconnectDelay = 2 * time.Second
 
+const (
+	automaticMaintenanceOperationTimeout = 15 * time.Minute
+	automaticMaintenanceRecoveryTimeout  = 30 * time.Second
+)
+
+func mediaMaintenanceOperationContext(ctx context.Context, automatic bool) (context.Context, context.CancelFunc) {
+	if !automatic {
+		return ctx, func() {}
+	}
+	// 自动维护一旦开始就必须完成资源释放和重启预约，不能由浏览器断开留下暂停的 Gadget。
+	return context.WithTimeout(context.WithoutCancel(ctx), automaticMaintenanceOperationTimeout)
+}
+
 func automaticMediaRecoveryEnabled(automation MaintenanceAutomation) bool {
 	return automation != nil && automation.Settings().AutoRecovery
 }
@@ -1099,7 +1162,9 @@ func finishAutomaticMaintenance(ctx context.Context, gadget GadgetAdmin, power P
 	if gadget == nil || power == nil {
 		return errors.New("USB Gadget 自动温重启恢复不可用")
 	}
-	if _, err := gadget.ResumeGadget(ctx); err != nil {
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), automaticMaintenanceRecoveryTimeout)
+	defer cancel()
+	if _, err := gadget.ResumeGadget(recoveryCtx); err != nil {
 		return err
 	}
 	return power.SchedulePower("reboot")
