@@ -55,7 +55,7 @@ func (a *fakeMediaAssetsAdmin) DeleteExternal(context.Context, mediaassets.Asset
 	return mediaassets.Status{}, nil
 }
 
-func (a *fakeMediaAssetsAdmin) DeleteRecordings(_ context.Context, request mediaassets.RecordingDeleteRequest) (mediaassets.RecordingDeleteResult, error) {
+func (a *fakeMediaAssetsAdmin) DeleteRecordingsAndReclaim(_ context.Context, request mediaassets.RecordingDeleteRequest) (mediaassets.RecordingDeleteResult, error) {
 	a.recordingDeleteCalls++
 	a.recordingDeletePaths = append([]string(nil), request.Paths...)
 	if a.recordingDeleteReleased != nil && !a.recordingDeleteReleased() {
@@ -66,6 +66,7 @@ func (a *fakeMediaAssetsAdmin) DeleteRecordings(_ context.Context, request media
 		DeletedFiles:   len(request.Paths),
 		DeletedBytes:   11,
 		DeletedEvents:  1,
+		SpaceReclaim:   a.reclaimResult,
 	}, nil
 }
 
@@ -196,6 +197,50 @@ func TestAutomaticRecordingDeleteSchedulesWarmReboot(t *testing.T) {
 		gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
 		t.Fatalf("automatic delete = %d, calls = delete:%d pause:%d resume:%d power:%q body=%s",
 			response.Code, assets.recordingDeleteCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction, response.Body.String())
+	}
+}
+
+func TestBatchRecordingDeleteUsesOneMaintenanceOperationAndReclaimsSpace(t *testing.T) {
+	base := time.Date(2026, 7, 26, 4, 0, 0, 0, time.Local)
+	var released bool
+	controller := fakeController{
+		state: service.Snapshot{
+			MediaSnapshot: &mediasnapshot.View{ID: "snapshot"},
+			Videos: []teslacam.Video{
+				{
+					ID: "saved-front", Path: "TeslaCam/SavedClips/2026-07-26_04-00-00/2026-07-26_04-00-00-front.mp4",
+					ClipType: "saved", Event: "2026-07-26_04-00-00", Camera: "front", RecordedAt: base,
+				},
+				{
+					ID: "sentry-front", Path: "TeslaCam/SentryClips/2026-07-26_04-05-00/2026-07-26_04-05-00-front.mp4",
+					ClipType: "sentry", Event: "2026-07-26_04-05-00", Camera: "front", RecordedAt: base.Add(5 * time.Minute),
+				},
+			},
+		},
+		released: func() { released = true },
+	}
+	sessions := groupVideoSessions(groupVideos(controller.state.Videos, videoGroupTolerance), sessionContinuityGap)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(sessions))
+	}
+	assets := &fakeMediaAssetsAdmin{
+		recordingDeleteReleased: func() bool { return released },
+		reclaimResult:           mediaassets.SpaceReclaimResult{ReclaimedBytes: 2048},
+	}
+	handler := NewHandler(
+		controller, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMediaAssetsAdmin(assets), WithMaintenanceAutomation(&fakeMaintenanceAutomation{}),
+	)
+	body := `{"session_ids":["` + sessions[0].ID + `","` + sessions[1].ID + `"],"confirm_otg_disconnected":true}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/video-sessions/delete", strings.NewReader(body)))
+
+	if response.Code != http.StatusOK || assets.recordingDeleteCalls != 1 || !released {
+		t.Fatalf("batch delete = %d, calls = %d, released = %t, body = %s",
+			response.Code, assets.recordingDeleteCalls, released, response.Body.String())
+	}
+	if len(assets.recordingDeletePaths) != 2 || !strings.Contains(response.Body.String(), `"reclaimed_bytes":2048`) {
+		t.Fatalf("batch paths = %#v, body = %s", assets.recordingDeletePaths, response.Body.String())
 	}
 }
 

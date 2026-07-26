@@ -117,10 +117,12 @@ type RecordingDeleteRequest struct {
 
 // RecordingDeleteResult 返回实际从虚拟盘删除的普通文件、事件目录和字节数。
 type RecordingDeleteResult struct {
-	RequestedFiles int   `json:"requested_files"`
-	DeletedFiles   int   `json:"deleted_files"`
-	DeletedBytes   int64 `json:"deleted_bytes"`
-	DeletedEvents  int   `json:"deleted_events"`
+	RequestedFiles int                `json:"requested_files"`
+	DeletedFiles   int                `json:"deleted_files"`
+	DeletedBytes   int64              `json:"deleted_bytes"`
+	DeletedEvents  int                `json:"deleted_events"`
+	SpaceReclaim   SpaceReclaimResult `json:"space_reclaim"`
+	ReclaimError   string             `json:"reclaim_error,omitempty"`
 }
 
 // SpaceReclaimResult 区分 exFAT 可回收候选空间与外层 XFS 实际减少的物理占用。
@@ -663,13 +665,49 @@ func (m *Manager) DeleteRecordings(ctx context.Context, request RecordingDeleteR
 	if !regularFile(m.cfg.ImagePath) {
 		return RecordingDeleteResult{}, errors.New("TeslaCam 虚拟盘尚未初始化")
 	}
-	result.RequestedFiles = len(paths)
 	release, err := m.maintenance.BeginMediaMaintenance(ctx)
 	if err != nil {
 		return RecordingDeleteResult{}, fmt.Errorf("准备录像删除维护窗口: %w", err)
 	}
 	defer release()
+	return m.deleteRecordingsLocked(ctx, paths)
+}
 
+// DeleteRecordingsAndReclaim 在同一个维护窗口内完成录像删除和外层空间回收，
+// 避免批量删除后还要再次暂停 Gadget 和温重启。
+func (m *Manager) DeleteRecordingsAndReclaim(ctx context.Context, request RecordingDeleteRequest) (result RecordingDeleteResult, resultErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	paths, err := normalizeRecordingPaths(request.Paths)
+	if err != nil {
+		return RecordingDeleteResult{}, err
+	}
+	if !regularFile(m.cfg.ImagePath) {
+		return RecordingDeleteResult{}, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return RecordingDeleteResult{}, fmt.Errorf("准备录像删除和空间回收维护窗口: %w", err)
+	}
+	defer release()
+
+	result, err = m.deleteRecordingsLocked(ctx, paths)
+	if err != nil {
+		return result, err
+	}
+	reclaim, reclaimErr := m.reclaimSpaceLocked(ctx)
+	result.SpaceReclaim = reclaim
+	if reclaimErr != nil {
+		// 删除已经同步落盘，不能把部分成功伪装成整体失败，否则用户可能重复删除。
+		// 回收错误随成功响应返回，页面可以明确提示只需稍后处理历史空间。
+		result.ReclaimError = reclaimErr.Error()
+	}
+	return result, nil
+}
+
+func (m *Manager) deleteRecordingsLocked(ctx context.Context, paths []string) (result RecordingDeleteResult, resultErr error) {
+	result.RequestedFiles = len(paths)
 	if err := os.MkdirAll(m.cfg.MountPath, 0o750); err != nil {
 		return RecordingDeleteResult{}, fmt.Errorf("创建录像删除挂载目录: %w", err)
 	}
@@ -733,7 +771,10 @@ func (m *Manager) ReclaimSpace(ctx context.Context) (result SpaceReclaimResult, 
 		return SpaceReclaimResult{}, fmt.Errorf("准备空间回收维护窗口: %w", err)
 	}
 	defer release()
+	return m.reclaimSpaceLocked(ctx)
+}
 
+func (m *Manager) reclaimSpaceLocked(ctx context.Context) (result SpaceReclaimResult, resultErr error) {
 	loopDevice, err := m.attachLoop(ctx)
 	if err != nil {
 		return SpaceReclaimResult{}, err

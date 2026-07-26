@@ -146,6 +146,19 @@ func (recordingDeleteRunner) Run(_ context.Context, name string, args ...string)
 	return nil, nil
 }
 
+type recordingDeleteReclaimRunner struct {
+	recordingDeleteRunner
+	detached bool
+}
+
+func (r *recordingDeleteReclaimRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	output, err := r.recordingDeleteRunner.Run(ctx, name, args...)
+	if name == "losetup" && len(args) > 0 && args[0] == "--detach" {
+		r.detached = true
+	}
+	return output, err
+}
+
 type capturedCommand struct {
 	name string
 	args []string
@@ -412,6 +425,39 @@ func TestManagerDeleteRecordingsUsesMaintenanceWindowAndServerPaths(t *testing.T
 	adjacentFile := filepath.Join(mountPath, "p1", "TeslaCam", "SavedClips", "2026-07-26_03-31-00", "event.json")
 	if content, err := os.ReadFile(adjacentFile); err != nil || string(content) != "other" {
 		t.Fatalf("adjacent event changed: %q, %v", content, err)
+	}
+}
+
+func TestManagerDeleteRecordingsAndReclaimUsesOneMaintenanceWindow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := &fakeMaintenance{}
+	runner := &recordingDeleteReclaimRunner{}
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"),
+		StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: filepath.Join(root, "mount"),
+	}, runner, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.reclaim = func(_ context.Context, path string) (SpaceReclaimResult, error) {
+		if path != imagePath || !runner.detached {
+			t.Fatalf("reclaim path = %q, detached = %t", path, runner.detached)
+		}
+		return SpaceReclaimResult{CandidateBytes: 4096, ReclaimedBytes: 2048, ProcessedRanges: 2}, nil
+	}
+	result, err := manager.DeleteRecordingsAndReclaim(t.Context(), RecordingDeleteRequest{Paths: []string{
+		"TeslaCam/SavedClips/2026-07-26_03-30-00/2026-07-26_03-30-00-front.mp4",
+	}})
+	if err != nil {
+		t.Fatalf("DeleteRecordingsAndReclaim() error = %v", err)
+	}
+	if maintenance.calls != 1 || result.DeletedEvents != 1 || result.SpaceReclaim.ReclaimedBytes != 2048 || result.ReclaimError != "" {
+		t.Fatalf("DeleteRecordingsAndReclaim() = %#v, maintenance calls = %d", result, maintenance.calls)
 	}
 }
 

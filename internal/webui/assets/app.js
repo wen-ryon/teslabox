@@ -44,6 +44,8 @@ let loadToken = 0;
 let activeDisplay = normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6"));
 let recentSessions = [];
 let archivedSessions = [];
+const selectedRecordingSessions = new Set();
+let recordingDeleteInProgress = false;
 let compositeTracks = new Map();
 let pendingCompositeTracks = new Map();
 let lastCompositeSync = 0;
@@ -253,6 +255,8 @@ $("update-history-load").addEventListener("click", loadUpdateHistory);
 $("update-download").addEventListener("click", downloadUpdate);
 $("update-install").addEventListener("click", installUpdate);
 $("filter-form").addEventListener("submit", (event) => { event.preventDefault(); loadSessions(false); });
+$("recording-select-all").addEventListener("change", toggleAllRecordingSelections);
+$("recording-delete-selected").addEventListener("click", deleteSelectedRecordingSessions);
 $("play-toggle").addEventListener("click", togglePlayback);
 $("session-timeline").addEventListener("input", previewTimelinePosition);
 $("session-timeline").addEventListener("change", seekTimelinePosition);
@@ -2111,6 +2115,7 @@ async function loadSessions(silent = false) {
     ]);
     recentSessions = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
     archivedSessions = (archivePayload.items || []).filter((session) => ["saved", "sentry"].includes(session.clip_type));
+    reconcileRecordingSelection();
     state.total = archivedSessions.length;
     renderArchiveTimeline();
     $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
@@ -2144,11 +2149,13 @@ function renderArchiveTimeline() {
     group.append(heading, content);
     timelineList.append(group);
   });
+  updateRecordingBulkActions();
 }
 
 function createSessionTimeline(session) {
   const card = document.createElement("article");
   card.className = `session-card clip-${clipTypeClass(session.clip_type)}`;
+  card.classList.toggle("selected", selectedRecordingSessions.has(session.id));
   const head = document.createElement("div");
   head.className = "session-head";
   if (session.thumbnail_url) {
@@ -2168,6 +2175,22 @@ function createSessionTimeline(session) {
     head.append(thumbnail);
   }
   const heading = document.createElement("div");
+  const selector = document.createElement("label");
+  selector.className = "session-select";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = selectedRecordingSessions.has(session.id);
+  checkbox.disabled = recordingDeleteInProgress;
+  checkbox.setAttribute("aria-label", `选择 ${formatSessionRange(session.start_at, session.end_at)}`);
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) selectedRecordingSessions.add(session.id);
+    else selectedRecordingSessions.delete(session.id);
+    card.classList.toggle("selected", checkbox.checked);
+    updateRecordingBulkActions();
+  });
+  const selectorText = document.createElement("span");
+  selectorText.textContent = "选择此段";
+  selector.append(checkbox, selectorText);
   const title = document.createElement("h3");
   title.className = "session-title";
   title.textContent = formatSessionRange(session.start_at, session.end_at);
@@ -2193,7 +2216,7 @@ function createSessionTimeline(session) {
   }
   asideMeta.append(duration);
   aside.append(asideMeta);
-  heading.append(title, meta);
+  heading.append(selector, title, meta);
   const eventSummary = createEventSummary(session.event_metadata);
   if (eventSummary) heading.append(eventSummary);
 
@@ -2208,6 +2231,7 @@ function createSessionTimeline(session) {
   const remove = document.createElement("button");
   remove.className = "ghost session-delete";
   remove.type = "button";
+  remove.disabled = recordingDeleteInProgress;
   remove.textContent = session.clip_type === "recent" ? "清空最近录像" : "删除整段录像";
   remove.addEventListener("click", () => deleteRecordingSession(session, remove));
   const actions = document.createElement("div");
@@ -2236,6 +2260,20 @@ function createSessionTimeline(session) {
 }
 
 async function deleteRecordingSession(session, button) {
+  await deleteRecordingSessions([session], button);
+}
+
+async function deleteSelectedRecordingSessions() {
+  const selected = currentRecordingSessions().filter((session) => selectedRecordingSessions.has(session.id));
+  if (selected.length === 0) {
+    setNotice("请先选择要删除的录像", true);
+    return;
+  }
+  await deleteRecordingSessions(selected, $("recording-delete-selected"));
+}
+
+async function deleteRecordingSessions(sessions, button) {
+  if (recordingDeleteInProgress || sessions.length === 0) return;
   let maintenance;
   try {
     maintenance = await request("/api/v1/maintenance");
@@ -2245,37 +2283,94 @@ async function deleteRecordingSession(session, button) {
     return;
   }
   const automatic = Boolean(maintenance.auto_recovery);
-  const recent = session.clip_type === "recent";
-  const scope = recent ? "当前全部最近录像" : "这段录像及其整个事件目录";
+  const recentCount = sessions.filter((session) => session.clip_type === "recent").length;
+  const segmentCount = sessions.reduce((total, session) => total+Number(session.segment_count || 0), 0);
+  const totalSize = sessions.reduce((total, session) => total+Number(session.total_size || 0), 0);
+  const single = sessions.length === 1;
+  const scope = single
+    ? (recentCount ? "当前全部最近录像" : "这段录像及其整个事件目录")
+    : `已选择 ${formatNumber(sessions.length)} 段录像${recentCount ? `（包含最近录像 ${formatNumber(recentCount)} 段）` : ""}`;
   const lifecycle = automatic
-    ? "TeslaBox 会先自动断开 USB Gadget，删除完成后安排温重启恢复。"
-    : "请先物理拔掉车机或电脑的 OTG 线；删除后 Gadget 会保持暂停，请插回 OTG 并在日志中心执行温重启恢复。";
+    ? "TeslaBox 会只断开一次 USB Gadget，在同一个维护窗口内完成批量删除和空间回收，然后只安排一次温重启恢复。"
+    : "请先物理拔掉车机或电脑的 OTG 线；删除和空间回收完成后 Gadget 会保持暂停，请插回 OTG 并只执行一次温重启恢复。";
   const confirmed = await askConfirmation(
-    recent ? "清空最近录像" : "删除录像",
-    `${scope}包含 ${formatNumber(session.segment_count || 0)} 个录像片段、约 ${formatBytes(session.total_size || 0)}。${lifecycle} 删除会立即释放虚拟盘内部空间；支持内核 discard 时也会同步返还外层空间。`,
-    recent ? "确认清空" : "确认删除",
+    single && recentCount ? "清空最近录像" : single ? "删除录像" : "批量删除录像",
+    `${scope}，共 ${formatNumber(segmentCount)} 个录像片段、约 ${formatBytes(totalSize)}。${lifecycle} 删除完成后会依据 exFAT 空闲位图自动返还外层数据盘空间，无需再到设置中心点“回收历史旧空间”。`,
+    single && recentCount ? "确认清空" : single ? "确认删除" : `确认删除 ${formatNumber(sessions.length)} 段`,
     true,
   );
   if (!confirmed) return;
 
   const originalLabel = button.textContent;
+  recordingDeleteInProgress = true;
   button.disabled = true;
-  button.textContent = "删除中…";
+  button.textContent = "删除并恢复空间中…";
+  renderArchiveTimeline();
   try {
-    if (activeSession?.id === session.id) closePlayer();
-    const result = await postJSON(`/api/v1/video-sessions/${encodeURIComponent(session.id)}/delete`, {
+    if (activeSession && sessions.some((session) => session.id === activeSession.id)) closePlayer();
+    const result = await postJSON("/api/v1/video-sessions/delete", {
+      session_ids: sessions.map((session) => session.id),
       confirm_otg_disconnected: !automatic,
     });
     const eventSummary = result.deleted_events ? `，包含 ${formatNumber(result.deleted_events)} 个事件目录` : "";
-    const summary = `已删除 ${formatNumber(result.deleted_files || 0)} 个文件${eventSummary}，释放虚拟盘内部 ${formatBytes(result.deleted_bytes || 0)}。`;
-    setNotice(automatic ? `${summary} 自动温重启恢复已提交。` : `${summary} 请插回 OTG 后到日志中心执行温重启恢复。`, false);
+    const reclaim = result.space_reclaim || {};
+    const reclaimSummary = result.reclaim_error
+      ? ` 外层空间自动恢复失败：${result.reclaim_error}；录像已经删除，可稍后使用“回收历史旧空间”补做。`
+      : ` 外层数据盘实际恢复 ${formatBytes(reclaim.reclaimed_bytes || 0)}；若显示 0，通常表示 discard 已在删除时完成释放或这些空闲簇此前已经回收。`;
+    const summary = `已处理 ${formatNumber(sessions.length)} 段录像，删除 ${formatNumber(result.deleted_files || 0)} 个文件${eventSummary}，释放虚拟盘内部 ${formatBytes(result.deleted_bytes || 0)}。${reclaimSummary}`;
+    const deletedIDs = new Set(sessions.map((session) => session.id));
+    recentSessions = recentSessions.filter((session) => !deletedIDs.has(session.id));
+    archivedSessions = archivedSessions.filter((session) => !deletedIDs.has(session.id));
+    state.total = archivedSessions.length;
+    $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
+    selectedRecordingSessions.clear();
+    setNotice(
+      automatic ? `${summary} 已提交一次温重启恢复。` : `${summary} 请插回 OTG 后到日志中心执行一次温重启恢复。`,
+      Boolean(result.reclaim_error),
+    );
     if (!automatic) await Promise.allSettled([loadStatus(), loadSessions(true)]);
   } catch (error) {
     setNotice(error.message, true);
   } finally {
+    recordingDeleteInProgress = false;
     button.disabled = false;
     button.textContent = originalLabel;
+    renderArchiveTimeline();
   }
+}
+
+function currentRecordingSessions() {
+  return [...recentSessions, ...archivedSessions];
+}
+
+function reconcileRecordingSelection() {
+  const available = new Set(currentRecordingSessions().map((session) => session.id));
+  for (const id of selectedRecordingSessions) {
+    if (!available.has(id)) selectedRecordingSessions.delete(id);
+  }
+}
+
+function toggleAllRecordingSelections(event) {
+  const sessions = currentRecordingSessions();
+  if (event.target.checked) sessions.forEach((session) => selectedRecordingSessions.add(session.id));
+  else sessions.forEach((session) => selectedRecordingSessions.delete(session.id));
+  renderArchiveTimeline();
+}
+
+function updateRecordingBulkActions() {
+  const sessions = currentRecordingSessions();
+  const selected = sessions.filter((session) => selectedRecordingSessions.has(session.id));
+  const toolbar = $("recording-bulk-actions");
+  const selectAll = $("recording-select-all");
+  const deleteButton = $("recording-delete-selected");
+  toolbar.hidden = sessions.length === 0;
+  selectAll.disabled = recordingDeleteInProgress || sessions.length === 0;
+  selectAll.checked = sessions.length > 0 && selected.length === sessions.length;
+  selectAll.indeterminate = selected.length > 0 && selected.length < sessions.length;
+  deleteButton.disabled = recordingDeleteInProgress || selected.length === 0;
+  $("recording-selected-count").textContent = selected.length === 0
+    ? `当前列表 ${formatNumber(sessions.length)} 段，未选择`
+    : `已选择 ${formatNumber(selected.length)} / ${formatNumber(sessions.length)} 段`;
 }
 
 function createTrackRow(session, labelText, camera) {
