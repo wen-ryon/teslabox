@@ -1973,13 +1973,13 @@ function renderStatus(storage) {
   $("space-value").textContent = formatBytes(space.free_bytes || 0);
   $("space-progress").style.width = `${Math.max(0, Math.min(100, 100-freePercent))}%`;
   $("space-progress").style.background = freePercent < 10 ? "var(--warning)" : "var(--ok)";
-  $("space-detail").textContent = `可用 ${freePercent.toFixed(1)}% · 总计 ${formatBytes(space.total_bytes || 0)}`;
+  $("space-detail").textContent = `外层 XFS 可用 ${freePercent.toFixed(1)}% · 镜像内删除不会立即缩小`;
 
   const snapshot = storage.media_snapshot;
   $("snapshot-state").className = "badge";
   $("snapshot-state").textContent = snapshot ? "可播放" : "尚未建立";
   $("snapshot-state").classList.add(snapshot ? "ok" : "error");
-  $("snapshot-detail").textContent = storage.snapshot_error || (snapshot ? `单路视频 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照");
+  $("snapshot-detail").textContent = storage.snapshot_error || (snapshot ? `当前快照内的单路 MP4 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照");
 }
 
 function renderSystemStatus(system) {
@@ -2161,13 +2161,21 @@ function createSessionTimeline(session) {
     const display = state.view === "multi" ? "composite" : "single";
     openSessionPlayer(session, preferredCamera(session), 0, display);
   });
+  const remove = document.createElement("button");
+  remove.className = "ghost session-delete";
+  remove.type = "button";
+  remove.textContent = session.clip_type === "recent" ? "清空最近录像" : "删除整段录像";
+  remove.addEventListener("click", () => deleteRecordingSession(session, remove));
+  const actions = document.createElement("div");
+  actions.className = "session-actions";
+  actions.append(open, remove);
   if (!session.complete) {
     const status = document.createElement("span");
     status.className = "session-warning";
     status.textContent = "部分分钟存在视角缺失";
     aside.append(status);
   }
-  aside.append(open);
+  aside.append(actions);
   head.append(heading, aside);
 
   const body = document.createElement("div");
@@ -2181,6 +2189,49 @@ function createSessionTimeline(session) {
 
   card.append(head, body);
   return card;
+}
+
+async function deleteRecordingSession(session, button) {
+  let maintenance;
+  try {
+    maintenance = await request("/api/v1/maintenance");
+    state.maintenance = maintenance;
+  } catch (error) {
+    setNotice(`无法确认 Gadget 维护策略：${error.message}`, true);
+    return;
+  }
+  const automatic = Boolean(maintenance.auto_recovery);
+  const recent = session.clip_type === "recent";
+  const scope = recent ? "当前全部最近录像" : "这段录像及其整个事件目录";
+  const lifecycle = automatic
+    ? "TeslaBox 会先自动断开 USB Gadget，删除完成后安排温重启恢复。"
+    : "请先物理拔掉车机或电脑的 OTG 线；删除后 Gadget 会保持暂停，请插回 OTG 并在日志中心执行温重启恢复。";
+  const confirmed = await askConfirmation(
+    recent ? "清空最近录像" : "删除录像",
+    `${scope}包含 ${formatNumber(session.segment_count || 0)} 个录像片段、约 ${formatBytes(session.total_size || 0)}。${lifecycle} 此操作只释放虚拟盘内部 exFAT 空间，首页的外层数据盘占用不会立即下降。`,
+    recent ? "确认清空" : "确认删除",
+    true,
+  );
+  if (!confirmed) return;
+
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    if (activeSession?.id === session.id) closePlayer();
+    const result = await postJSON(`/api/v1/video-sessions/${encodeURIComponent(session.id)}/delete`, {
+      confirm_otg_disconnected: !automatic,
+    });
+    const eventSummary = result.deleted_events ? `，包含 ${formatNumber(result.deleted_events)} 个事件目录` : "";
+    const summary = `已删除 ${formatNumber(result.deleted_files || 0)} 个文件${eventSummary}，释放虚拟盘内部 ${formatBytes(result.deleted_bytes || 0)}。`;
+    setNotice(automatic ? `${summary} 自动温重启恢复已提交。` : `${summary} 请插回 OTG 后到日志中心执行温重启恢复。`, false);
+    if (!automatic) await Promise.allSettled([loadStatus(), loadSessions(true)]);
+  } catch (error) {
+    setNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
 }
 
 function createTrackRow(session, labelText, camera) {

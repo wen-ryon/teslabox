@@ -2,16 +2,22 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
+	"github.com/wen-ryon/teslabox/internal/service"
+	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
+	"github.com/wen-ryon/teslabox/internal/teslacam"
 	"github.com/wen-ryon/teslabox/internal/updater"
 )
 
@@ -24,7 +30,12 @@ func (a *fakeMaintenanceAutomation) SetAutoRecovery(enabled bool) (maintenancemo
 	return a.settings, nil
 }
 
-type fakeMediaAssetsAdmin struct{ applyCalls int }
+type fakeMediaAssetsAdmin struct {
+	applyCalls              int
+	recordingDeleteCalls    int
+	recordingDeletePaths    []string
+	recordingDeleteReleased func() bool
+}
 
 func (a *fakeMediaAssetsAdmin) Status(context.Context) (mediaassets.Status, error) {
 	return mediaassets.Status{}, nil
@@ -40,6 +51,20 @@ func (a *fakeMediaAssetsAdmin) Delete(context.Context, string) (mediaassets.Stat
 
 func (a *fakeMediaAssetsAdmin) DeleteExternal(context.Context, mediaassets.Asset) (mediaassets.Status, error) {
 	return mediaassets.Status{}, nil
+}
+
+func (a *fakeMediaAssetsAdmin) DeleteRecordings(_ context.Context, request mediaassets.RecordingDeleteRequest) (mediaassets.RecordingDeleteResult, error) {
+	a.recordingDeleteCalls++
+	a.recordingDeletePaths = append([]string(nil), request.Paths...)
+	if a.recordingDeleteReleased != nil && !a.recordingDeleteReleased() {
+		return mediaassets.RecordingDeleteResult{}, errors.New("媒体快照租约尚未释放")
+	}
+	return mediaassets.RecordingDeleteResult{
+		RequestedFiles: len(request.Paths),
+		DeletedFiles:   len(request.Paths),
+		DeletedBytes:   11,
+		DeletedEvents:  1,
+	}, nil
 }
 
 func (a *fakeMediaAssetsAdmin) Apply(context.Context) (mediaassets.Status, error) {
@@ -85,6 +110,98 @@ func TestAutomaticMaintenanceAppliesMediaAndSchedulesReboot(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/media-assets/apply", strings.NewReader(`{}`)))
 	if response.Code != http.StatusOK || assets.applyCalls != 1 || gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
 		t.Fatalf("apply = %d, calls = apply:%d pause:%d resume:%d power:%q", response.Code, assets.applyCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction)
+	}
+}
+
+func TestRecordingDeleteRequiresConfirmationAndUsesSnapshotPaths(t *testing.T) {
+	base := time.Date(2026, 7, 26, 3, 30, 0, 0, time.Local)
+	var released bool
+	controller := fakeController{
+		state: service.Snapshot{
+			MediaSnapshot: &mediasnapshot.View{ID: "snapshot"},
+			Videos: []teslacam.Video{
+				{
+					ID: "front", Path: "TeslaCam/SavedClips/2026-07-26_03-30-00/2026-07-26_03-30-00-front.mp4",
+					ClipType: "saved", Event: "2026-07-26_03-30-00", Camera: "front", RecordedAt: base,
+				},
+				{
+					ID: "back", Path: "TeslaCam/SavedClips/2026-07-26_03-30-00/2026-07-26_03-30-00-back.mp4",
+					ClipType: "saved", Event: "2026-07-26_03-30-00", Camera: "back", RecordedAt: base,
+				},
+			},
+		},
+		released: func() { released = true },
+	}
+	sessionID := groupVideoSessions(groupVideos(controller.state.Videos, videoGroupTolerance), sessionContinuityGap)[0].ID
+	assets := &fakeMediaAssetsAdmin{recordingDeleteReleased: func() bool { return released }}
+	handler := NewHandler(
+		controller, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMediaAssetsAdmin(assets), WithMaintenanceAutomation(&fakeMaintenanceAutomation{}),
+	)
+
+	missing := httptest.NewRecorder()
+	missingRequest := httptest.NewRequest(http.MethodPost, "/api/v1/video-sessions/"+sessionID+"/delete", strings.NewReader(`{}`))
+	handler.ServeHTTP(missing, missingRequest)
+	if missing.Code != http.StatusBadRequest || assets.recordingDeleteCalls != 0 {
+		t.Fatalf("unconfirmed delete = %d, calls = %d", missing.Code, assets.recordingDeleteCalls)
+	}
+
+	confirmed := httptest.NewRecorder()
+	confirmedRequest := httptest.NewRequest(http.MethodPost, "/api/v1/video-sessions/"+sessionID+"/delete", strings.NewReader(`{"confirm_otg_disconnected":true}`))
+	handler.ServeHTTP(confirmed, confirmedRequest)
+	if confirmed.Code != http.StatusOK || assets.recordingDeleteCalls != 1 || !released {
+		t.Fatalf("confirmed delete = %d, calls = %d, released = %t, body = %s", confirmed.Code, assets.recordingDeleteCalls, released, confirmed.Body.String())
+	}
+	expectedPaths := []string{controller.state.Videos[0].Path, controller.state.Videos[1].Path}
+	slices.Sort(expectedPaths)
+	slices.Sort(assets.recordingDeletePaths)
+	if !slices.Equal(assets.recordingDeletePaths, expectedPaths) {
+		t.Fatalf("recording paths = %#v", assets.recordingDeletePaths)
+	}
+}
+
+func TestAutomaticRecordingDeleteSchedulesWarmReboot(t *testing.T) {
+	previousDelay := automaticMaintenanceDisconnectDelay
+	automaticMaintenanceDisconnectDelay = 0
+	t.Cleanup(func() { automaticMaintenanceDisconnectDelay = previousDelay })
+
+	video := teslacam.Video{
+		ID: "recent", Path: "TeslaCam/RecentClips/2026-07-26_03-30-00-front.mp4",
+		ClipType: "recent", Camera: "front", RecordedAt: time.Date(2026, 7, 26, 3, 30, 0, 0, time.Local),
+	}
+	controller := fakeController{state: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot"},
+		Videos:        []teslacam.Video{video},
+	}}
+	assets := &fakeMediaAssetsAdmin{}
+	gadget := &fakeGadgetAdmin{}
+	power := &fakeDeviceAdmin{}
+	automation := &fakeMaintenanceAutomation{settings: maintenancemode.Settings{AutoRecovery: true}}
+	handler := NewHandler(
+		controller, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMediaAssetsAdmin(assets), WithGadgetAdmin(gadget), WithDeviceAdmin(power), WithMaintenanceAutomation(automation),
+	)
+	sessionID := groupVideoSessions(groupVideos(controller.state.Videos, videoGroupTolerance), sessionContinuityGap)[0].ID
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/video-sessions/"+sessionID+"/delete", strings.NewReader(`{}`))
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || assets.recordingDeleteCalls != 1 ||
+		gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
+		t.Fatalf("automatic delete = %d, calls = delete:%d pause:%d resume:%d power:%q body=%s",
+			response.Code, assets.recordingDeleteCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction, response.Body.String())
+	}
+}
+
+func TestRecordingSessionPathsRejectsMultipleEventDirectories(t *testing.T) {
+	session := videoSession{
+		ClipType: "sentry",
+		Moments: []videoGroup{
+			{Videos: []teslacam.Video{{Path: "TeslaCam/SentryClips/event-a/2026-07-26_03-30-00-front.mp4"}}},
+			{Videos: []teslacam.Video{{Path: "TeslaCam/SentryClips/event-b/2026-07-26_03-31-00-front.mp4"}}},
+		},
+	}
+	if _, err := recordingSessionPaths(session); err == nil {
+		t.Fatal("multiple event directories were accepted")
 	}
 }
 

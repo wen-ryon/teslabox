@@ -90,6 +90,62 @@ func (externalDeleteRunner) Run(_ context.Context, name string, args ...string) 
 	return nil, nil
 }
 
+type recordingDeleteRunner struct{}
+
+func (recordingDeleteRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	switch name {
+	case "losetup":
+		if len(args) > 0 && args[0] == "--find" {
+			return []byte("/dev/loop9\n"), nil
+		}
+	case "mount":
+		mountPath := args[len(args)-1]
+		eventPath := filepath.Join(mountPath, "TeslaCam", "SavedClips", "2026-07-26_03-30-00")
+		if err := os.MkdirAll(eventPath, 0o750); err != nil {
+			return nil, err
+		}
+		for name, content := range map[string]string{
+			"2026-07-26_03-30-00-front.mp4": "front",
+			"2026-07-26_03-30-00-back.mp4":  "back!!",
+			"notes.txt":                     "keep",
+			"event.json":                    "{}",
+			"thumb.png":                     "thumb",
+		} {
+			if err := os.WriteFile(filepath.Join(eventPath, name), []byte(content), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		adjacentPath := filepath.Join(mountPath, "TeslaCam", "SavedClips", "2026-07-26_03-31-00")
+		if err := os.MkdirAll(adjacentPath, 0o750); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(adjacentPath, "event.json"), []byte("other"), 0o644); err != nil {
+			return nil, err
+		}
+		recentPath := filepath.Join(mountPath, "TeslaCam", "RecentClips")
+		if err := os.MkdirAll(recentPath, 0o750); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(recentPath, "2026-07-26_03-32-00-front.mp4"), []byte("recent"), 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(recentPath, "thumb.png"), []byte("recent-thumb"), 0o644); err != nil {
+			return nil, err
+		}
+		sentryPath := filepath.Join(mountPath, "TeslaCam", "SentryClips", "2026-07-26_03-33-00")
+		if err := os.MkdirAll(sentryPath, 0o750); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(sentryPath, "2026-07-26_03-33-00-front.mp4"), []byte("sentry"), 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(sentryPath, "event.json"), []byte("{}"), 0o644); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
 func TestManagerStagesValidWrapAndDoesNotExposeStagingPath(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -296,6 +352,131 @@ func TestManagerDeleteExternalMediaUsesMaintenanceWindow(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(mountPath, "p2", "合集", "第一辑", "manual-song.mp3")); !os.IsNotExist(err) {
 		t.Fatalf("direct media exists after deletion: %v", err)
+	}
+}
+
+func TestManagerDeleteRecordingsUsesMaintenanceWindowAndServerPaths(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := &fakeMaintenance{}
+	mountPath := filepath.Join(root, "mount")
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: mountPath,
+	}, recordingDeleteRunner{}, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.DeleteRecordings(t.Context(), RecordingDeleteRequest{Paths: []string{
+		"TeslaCam/SavedClips/2026-07-26_03-30-00/2026-07-26_03-30-00-front.mp4",
+		"TeslaCam/SavedClips/2026-07-26_03-30-00/2026-07-26_03-30-00-back.mp4",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maintenance.calls != 1 || result.DeletedFiles != 5 || result.DeletedBytes != 22 || result.DeletedEvents != 1 {
+		t.Fatalf("DeleteRecordings() = %#v, maintenance calls = %d", result, maintenance.calls)
+	}
+	eventPath := filepath.Join(mountPath, "p1", "TeslaCam", "SavedClips", "2026-07-26_03-30-00")
+	if _, err := os.Stat(eventPath); !os.IsNotExist(err) {
+		t.Fatalf("event directory exists after deletion: %v", err)
+	}
+	adjacentFile := filepath.Join(mountPath, "p1", "TeslaCam", "SavedClips", "2026-07-26_03-31-00", "event.json")
+	if content, err := os.ReadFile(adjacentFile); err != nil || string(content) != "other" {
+		t.Fatalf("adjacent event changed: %q, %v", content, err)
+	}
+}
+
+func TestManagerDeleteRecordingsRejectsUntrustedPathsBeforeMaintenance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := &fakeMaintenance{}
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: filepath.Join(root, "mount"),
+	}, unusedRunner{}, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unsafe := range []string{
+		"../etc/passwd",
+		"TeslaCam/SavedClips/event/../../secret.mp4",
+		"TeslaCam/RecentClips/not-a-video.txt",
+		"TeslaTrackMode/2026-07-26_03-30-00-front.mp4",
+	} {
+		if _, err := manager.DeleteRecordings(t.Context(), RecordingDeleteRequest{Paths: []string{unsafe}}); err == nil {
+			t.Fatalf("unsafe recording path accepted: %q", unsafe)
+		}
+	}
+	if maintenance.calls != 0 {
+		t.Fatalf("unsafe requests entered maintenance %d times", maintenance.calls)
+	}
+}
+
+func TestManagerDeleteRecentRecordingPreservesSharedDirectoryMetadata(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mountPath := filepath.Join(root, "mount")
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: mountPath,
+	}, recordingDeleteRunner{}, &fakeMaintenance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.DeleteRecordings(t.Context(), RecordingDeleteRequest{Paths: []string{
+		"TeslaCam/RecentClips/2026-07-26_03-32-00-front.mp4",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedFiles != 1 || result.DeletedBytes != 6 || result.DeletedEvents != 0 {
+		t.Fatalf("DeleteRecordings() = %#v", result)
+	}
+	recentPath := filepath.Join(mountPath, "p1", "TeslaCam", "RecentClips")
+	if _, err := os.Stat(filepath.Join(recentPath, "2026-07-26_03-32-00-front.mp4")); !os.IsNotExist(err) {
+		t.Fatalf("recent recording exists after deletion: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(recentPath, "thumb.png")); err != nil || string(content) != "recent-thumb" {
+		t.Fatalf("shared recent metadata changed: %q, %v", content, err)
+	}
+}
+
+func TestManagerDeleteSentryRecordingRemovesWholeEventDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mountPath := filepath.Join(root, "mount")
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: mountPath,
+	}, recordingDeleteRunner{}, &fakeMaintenance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.DeleteRecordings(t.Context(), RecordingDeleteRequest{Paths: []string{
+		"TeslaCam/SentryClips/2026-07-26_03-33-00/2026-07-26_03-33-00-front.mp4",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedFiles != 2 || result.DeletedBytes != 8 || result.DeletedEvents != 1 {
+		t.Fatalf("DeleteRecordings() = %#v", result)
+	}
+	eventPath := filepath.Join(mountPath, "p1", "TeslaCam", "SentryClips", "2026-07-26_03-33-00")
+	if _, err := os.Stat(eventPath); !os.IsNotExist(err) {
+		t.Fatalf("sentry event directory exists after deletion: %v", err)
 	}
 }
 

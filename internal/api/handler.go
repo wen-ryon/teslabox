@@ -86,6 +86,7 @@ type MediaAssetsAdmin interface {
 	UploadStream(context.Context, mediaassets.Category, func(func(mediaassets.UploadFile) error) error) ([]mediaassets.Asset, error)
 	Delete(context.Context, string) (mediaassets.Status, error)
 	DeleteExternal(context.Context, mediaassets.Asset) (mediaassets.Status, error)
+	DeleteRecordings(context.Context, mediaassets.RecordingDeleteRequest) (mediaassets.RecordingDeleteResult, error)
 	Apply(context.Context) (mediaassets.Status, error)
 	OpenPreview(context.Context, string) (*os.File, mediaassets.Asset, error)
 }
@@ -268,7 +269,7 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		registerMediaRoutes(mux, controller, settings.mediaInspector, logger)
 	}
 	if settings.mediaAssets != nil {
-		registerMediaAssetRoutes(mux, settings.mediaAssets, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
+		registerMediaAssetRoutes(mux, controller, settings.mediaAssets, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
 	}
 	if settings.mediaCompositor != nil {
 		registerCompositeRoutes(mux, controller, settings.mediaCompositor, logger)
@@ -810,7 +811,7 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 
 const maximumMediaUploadRequestBytes int64 = 512 * 1024 * 1024
 
-func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, gadget GadgetAdmin, power PowerAdmin, automation MaintenanceAutomation, logger *slog.Logger) {
+func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin MediaAssetsAdmin, gadget GadgetAdmin, power PowerAdmin, automation MaintenanceAutomation, logger *slog.Logger) {
 	mux.HandleFunc("GET /api/v1/media-assets", func(w http.ResponseWriter, r *http.Request) {
 		status, err := admin.Status(r.Context())
 		if err != nil {
@@ -918,6 +919,78 @@ func registerMediaAssetRoutes(mux *http.ServeMux, admin MediaAssetsAdmin, gadget
 			return
 		}
 		writeJSON(w, http.StatusOK, status)
+	})
+	mux.HandleFunc("POST /api/v1/video-sessions/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		automatic := automaticMediaRecoveryEnabled(automation)
+		if !input.ConfirmOTGDisconnected && !automatic {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认删除录像"})
+			return
+		}
+
+		state, release := controller.AcquireMediaSnapshot()
+		if state.MediaSnapshot == nil {
+			release()
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用，请刷新录像列表后重试"})
+			return
+		}
+		session, found := findVideoSession(state.Videos, r.PathValue("id"))
+		if !found {
+			release()
+			http.NotFound(w, r)
+			return
+		}
+		paths, err := recordingSessionPaths(session)
+		release()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		operationCtx := r.Context()
+		cancelOperation := func() {}
+		if automatic {
+			// 用户在维护开始后关闭网页也必须完成卸载和温重启预约，避免 Gadget 永久停在半维护状态。
+			operationCtx, cancelOperation = context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
+		}
+		defer cancelOperation()
+		if automatic {
+			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
+				logger.Warn("删除录像前自动断开 USB Gadget 失败", "session_id", session.ID, "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请关闭自动恢复或手工拔掉 OTG 后重试"})
+				return
+			}
+		}
+		result, deleteErr := admin.DeleteRecordings(operationCtx, mediaassets.RecordingDeleteRequest{Paths: paths})
+		if automatic {
+			if recoveryErr := finishAutomaticMaintenance(operationCtx, gadget, power); recoveryErr != nil {
+				logger.Warn("删除录像后提交自动温重启恢复失败", "session_id", session.ID, "error", recoveryErr)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "录像删除结束，但自动温重启恢复提交失败；请在日志中心手工执行温重启恢复"})
+				return
+			}
+		}
+		if deleteErr != nil {
+			logger.Warn("删除录像失败", "session_id", session.ID, "clip_type", session.ClipType, "error", deleteErr)
+			if automatic {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "录像删除失败，但已安排温重启恢复 USB Gadget；请等待设备重新上线后查看日志"})
+				return
+			}
+			writeMediaAssetError(w, deleteErr)
+			return
+		}
+		logger.Info("录像删除完成",
+			"session_id", session.ID,
+			"clip_type", session.ClipType,
+			"deleted_files", result.DeletedFiles,
+			"deleted_events", result.DeletedEvents,
+			"deleted_bytes", result.DeletedBytes,
+		)
+		writeJSON(w, http.StatusOK, result)
 	})
 	mux.HandleFunc("POST /api/v1/media-assets/apply", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
@@ -1535,6 +1608,41 @@ func findVideoSession(videos []teslacam.Video, id string) (videoSession, bool) {
 		}
 	}
 	return videoSession{}, false
+}
+
+func recordingSessionPaths(session videoSession) ([]string, error) {
+	switch session.ClipType {
+	case "recent", "saved", "sentry":
+	default:
+		return nil, errors.New("该录像类型不允许从网页删除")
+	}
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, session.SegmentCount*len(session.Cameras))
+	eventDirectory := ""
+	for _, moment := range session.Moments {
+		for _, video := range moment.Videos {
+			if session.ClipType == "saved" || session.ClipType == "sentry" {
+				parts := strings.Split(video.Path, "/")
+				if len(parts) != 4 {
+					return nil, errors.New("录像事件路径不完整，拒绝删除")
+				}
+				currentDirectory := strings.Join(parts[:3], "/")
+				if eventDirectory != "" && currentDirectory != eventDirectory {
+					return nil, errors.New("同一录像会话包含多个事件目录，拒绝批量删除")
+				}
+				eventDirectory = currentDirectory
+			}
+			if _, found := seen[video.Path]; found {
+				continue
+			}
+			seen[video.Path] = struct{}{}
+			paths = append(paths, video.Path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, errors.New("当前快照没有可删除的录像文件")
+	}
+	return paths, nil
 }
 
 func exportSource(snapshotRoot string, session videoSession) (media.ExportSource, error) {

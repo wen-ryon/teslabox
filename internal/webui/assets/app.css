@@ -185,8 +185,11 @@ input:not([type="range"]):focus, select:focus { border-color: var(--accent); box
 .duration-pill { padding: 6px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--text); background: #050505; font-size: 12px; font-weight: 760; white-space: nowrap; }
 .session-head-aside { display: flex; max-width: 48%; align-items: flex-end; justify-content: flex-start; gap: 8px; flex-direction: column; }
 .session-aside-meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
-.session-head-aside .session-open { margin-top: auto; border-color: var(--accent); color: var(--accent); background: transparent; box-shadow: none; }
+.session-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: auto; flex-wrap: wrap; }
+.session-head-aside .session-open { border-color: var(--accent); color: var(--accent); background: transparent; box-shadow: none; }
 .session-head-aside .session-open:hover { border-color: var(--accent-strong); color: var(--accent-strong); background: transparent; }
+.session-delete { min-height: 38px; padding: 0 11px; border-color: rgba(239,68,68,.4); color: #fca5a5; font-size: 12px; }
+.session-delete:hover { border-color: rgba(239,68,68,.75); color: #fecaca; background: rgba(127,29,29,.22); }
 .session-location { overflow: hidden; max-width: 280px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 99px; color: #d4d4d8; background: #050505; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .session-timeline-body { padding: 0 18px 18px; }
 .track-row { display: grid; grid-template-columns: 84px 1fr; min-height: 28px; align-items: center; gap: 10px; }
@@ -473,7 +476,8 @@ html[data-ui-font] .wifi-ipv4-static-fields label { font-size: var(--ui-meta-fon
   .session-head.has-thumbnail { grid-template-columns: 112px minmax(0,1fr); gap: 12px; }
   .session-head.has-thumbnail .session-head-aside { grid-column: 1 / -1; align-items: flex-end; max-width: none; }
   .session-head.has-thumbnail .session-aside-meta { justify-content: flex-end; }
-  .session-head-aside { max-width: 46%; }
+  .session-head-aside { max-width: 52%; }
+  .session-actions { width: 100%; }
   .session-location { max-width: 150px; }
   .session-timeline-body { padding: 0 15px 15px; }
   .video-grid { padding-left: 25px; }

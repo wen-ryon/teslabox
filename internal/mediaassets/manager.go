@@ -1,4 +1,4 @@
-// Package mediaassets 管理写入 Tesla 虚拟盘的非录像媒体文件。
+// Package mediaassets 管理 Tesla 虚拟盘内需要独占维护窗口的媒体写入和录像删除。
 package mediaassets
 
 import (
@@ -40,6 +40,7 @@ const (
 var (
 	assetIDPattern        = regexp.MustCompile(`^[a-f0-9]{32}$`)
 	loopDevicePattern     = regexp.MustCompile(`^/dev/loop[0-9]+$`)
+	recordingFilePattern  = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-[a-z_]+\.mp4$`)
 	ErrPreviewUnavailable = errors.New("当前媒体没有可用预览")
 )
 
@@ -107,6 +108,19 @@ type Status struct {
 	NeedsApply     bool    `json:"needs_apply"`
 	Assets         []Asset `json:"assets"`
 	Message        string  `json:"message,omitempty"`
+}
+
+// RecordingDeleteRequest 只接收服务端从当前媒体快照解析出的录像相对路径。
+type RecordingDeleteRequest struct {
+	Paths []string
+}
+
+// RecordingDeleteResult 返回实际从虚拟盘删除的普通文件、事件目录和字节数。
+type RecordingDeleteResult struct {
+	RequestedFiles int   `json:"requested_files"`
+	DeletedFiles   int   `json:"deleted_files"`
+	DeletedBytes   int64 `json:"deleted_bytes"`
+	DeletedEvents  int   `json:"deleted_events"`
 }
 
 type manifest struct {
@@ -619,6 +633,77 @@ func (m *Manager) DeleteExternal(ctx context.Context, asset Asset) (Status, erro
 		return Status{}, fmt.Errorf("删除直接写入媒体: %w", err)
 	}
 	return m.statusLocked(assets), nil
+}
+
+// DeleteRecordings 在独占维护窗口内删除当前快照已经确认的 TeslaCam 录像。
+// 已保存和哨兵录像按事件目录整体删除，最近录像只删除快照列出的 MP4，避免破坏共享目录。
+// 路径在进入维护前全部归一化，避免无效请求先断开正在工作的 Gadget。
+func (m *Manager) DeleteRecordings(ctx context.Context, request RecordingDeleteRequest) (result RecordingDeleteResult, resultErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	paths, err := normalizeRecordingPaths(request.Paths)
+	if err != nil {
+		return RecordingDeleteResult{}, err
+	}
+	if !regularFile(m.cfg.ImagePath) {
+		return RecordingDeleteResult{}, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	result.RequestedFiles = len(paths)
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return RecordingDeleteResult{}, fmt.Errorf("准备录像删除维护窗口: %w", err)
+	}
+	defer release()
+
+	if err := os.MkdirAll(m.cfg.MountPath, 0o750); err != nil {
+		return RecordingDeleteResult{}, fmt.Errorf("创建录像删除挂载目录: %w", err)
+	}
+	loopDevice, err := m.attachLoop(ctx)
+	if err != nil {
+		return RecordingDeleteResult{}, err
+	}
+	defer func() {
+		if err := m.detachLoop(context.WithoutCancel(ctx), loopDevice); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
+		return RecordingDeleteResult{}, fmt.Errorf("等待录像分区设备: %w", err)
+	}
+	primary, err := m.mountPartition(ctx, loopDevice+"p1", 1, true)
+	if err != nil {
+		return RecordingDeleteResult{}, err
+	}
+	defer func() {
+		if err := m.unmountPartition(context.WithoutCancel(ctx), primary); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
+	targets, err := recordingDeleteTargets(primary, paths)
+	if err != nil {
+		return RecordingDeleteResult{}, err
+	}
+	for _, target := range targets {
+		if target.event {
+			err = os.RemoveAll(target.name)
+		} else {
+			err = os.Remove(target.name)
+		}
+		if err != nil {
+			return RecordingDeleteResult{}, fmt.Errorf("删除 TeslaCam 录像目标: %w", err)
+		}
+		result.DeletedFiles += target.files
+		result.DeletedBytes += target.size
+		if target.event {
+			result.DeletedEvents++
+		}
+	}
+	if _, err := m.runner.Run(ctx, "sync"); err != nil {
+		return RecordingDeleteResult{}, fmt.Errorf("同步 TeslaCam 虚拟盘: %w", err)
+	}
+	return result, nil
 }
 
 // Apply 在安全维护窗口内把所有待应用变更写入对应分区，并保持 Gadget 暂停等待温重启恢复。
@@ -1378,6 +1463,158 @@ func regularFile(name string) bool {
 
 func safeTargetName(name string) bool {
 	return name != "" && filepath.Base(name) == name && !strings.ContainsAny(name, "/\\\x00\r\n") && !strings.HasPrefix(name, ".")
+}
+
+const maximumRecordingDeleteFiles = 10000
+
+func normalizeRecordingPaths(values []string) ([]string, error) {
+	if len(values) == 0 || len(values) > maximumRecordingDeleteFiles {
+		return nil, fmt.Errorf("录像删除文件数量必须在 1 到 %d 之间", maximumRecordingDeleteFiles)
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" || strings.ContainsAny(value, "\\\x00\r\n") || strings.HasPrefix(value, "/") {
+			return nil, errors.New("录像路径不合法")
+		}
+		cleaned := path.Clean(value)
+		if cleaned != value || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+			return nil, errors.New("录像路径越过 TeslaCam 目录")
+		}
+		parts := strings.Split(cleaned, "/")
+		validLayout := len(parts) == 3 && parts[0] == "TeslaCam" && parts[1] == "RecentClips"
+		validLayout = validLayout || len(parts) == 4 && parts[0] == "TeslaCam" &&
+			(parts[1] == "SavedClips" || parts[1] == "SentryClips")
+		if !validLayout {
+			return nil, errors.New("录像路径不属于可删除的 TeslaCam 目录")
+		}
+		for _, part := range parts {
+			if !safeTargetName(part) {
+				return nil, errors.New("录像路径包含不安全目录名")
+			}
+		}
+		if !recordingFilePattern.MatchString(strings.ToLower(parts[len(parts)-1])) {
+			return nil, errors.New("录像文件名不符合 TeslaCam 规则")
+		}
+		if _, found := seen[cleaned]; found {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		result = append(result, cleaned)
+	}
+	if len(result) == 0 {
+		return nil, errors.New("录像删除文件为空")
+	}
+	return result, nil
+}
+
+type recordingDeleteTarget struct {
+	name  string
+	size  int64
+	files int
+	event bool
+}
+
+func recordingDeleteTargets(root string, paths []string) ([]recordingDeleteTarget, error) {
+	if _, err := trustedDirectory(root); err != nil {
+		return nil, fmt.Errorf("检查录像分区挂载点: %w", err)
+	}
+	targets := make([]recordingDeleteTarget, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, relative := range paths {
+		parts := strings.Split(relative, "/")
+		event := len(parts) == 4 && (parts[1] == "SavedClips" || parts[1] == "SentryClips")
+		targetRelative := relative
+		if event {
+			targetRelative = strings.Join(parts[:3], "/")
+		}
+		if _, found := seen[targetRelative]; found {
+			continue
+		}
+		seen[targetRelative] = struct{}{}
+
+		target, info, found, err := recordingDeleteTargetPath(root, targetRelative, event)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if !event {
+			targets = append(targets, recordingDeleteTarget{name: target, size: info.Size(), files: 1})
+			continue
+		}
+		files, size, err := recordingEventUsage(target)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, recordingDeleteTarget{name: target, size: size, files: files, event: true})
+	}
+	return targets, nil
+}
+
+func recordingDeleteTargetPath(root, relative string, directory bool) (string, os.FileInfo, bool, error) {
+	parts := strings.Split(relative, "/")
+	parent := filepath.Clean(root)
+	for _, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		info, err := os.Lstat(parent)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil, false, nil
+		}
+		if err != nil {
+			return "", nil, false, fmt.Errorf("检查录像目录: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", nil, false, errors.New("拒绝经过非普通目录删除录像")
+		}
+	}
+	target := filepath.Join(parent, parts[len(parts)-1])
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, fmt.Errorf("检查待删除录像: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, false, errors.New("拒绝删除非普通录像文件")
+	}
+	if directory && !info.IsDir() {
+		return "", nil, false, errors.New("录像事件目标不是可信目录")
+	}
+	if !directory && !info.Mode().IsRegular() {
+		return "", nil, false, errors.New("录像目标不是可信普通文件")
+	}
+	return target, info, true, nil
+}
+
+func recordingEventUsage(directory string) (files int, size int64, resultErr error) {
+	err := filepath.WalkDir(directory, func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("读取录像事件目录: %w", walkErr)
+		}
+		if name == directory || entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("录像事件目录包含符号链接，拒绝递归删除")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("读取录像事件文件: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("录像事件目录包含非普通文件，拒绝递归删除")
+		}
+		files++
+		size += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return files, size, nil
 }
 
 func safeExternalFileName(category Category, name string) bool {
