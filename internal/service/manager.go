@@ -844,6 +844,25 @@ func (m *Manager) pollGadgetEnumeration(ctx context.Context, initial gadget.Stat
 	}
 }
 
+// canRefreshMediaSnapshot 只允许在车机持有 LUN，或 Gadget 已明确暂停并解绑时读取原镜像。
+// 后一种状态不会重新绑定 UDC，因而既避免与 USB 主机并发写入，也保持 ROCK 3A 的启动期安全限制。
+func canRefreshMediaSnapshot(state Snapshot) bool {
+	if !state.Backing.Ready {
+		return false
+	}
+
+	switch state.Phase {
+	case PhaseGadgetActive:
+		return state.GadgetStatus.Bound
+	case PhaseSnapshotReady, PhaseDegraded:
+		return state.GadgetStatus.Bound || (state.GadgetPaused && !state.GadgetStatus.Bound)
+	case PhaseReadyForGadget:
+		return state.GadgetPaused && !state.GadgetStatus.Bound
+	default:
+		return false
+	}
+}
+
 func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -851,10 +870,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	startedAt := time.Now()
 
 	previous := m.Snapshot()
-	if previous.Phase != PhaseGadgetActive && previous.Phase != PhaseSnapshotReady && previous.Phase != PhaseDegraded {
-		return ErrSnapshotUnavailable
-	}
-	if !previous.GadgetStatus.Bound || !previous.Backing.Ready {
+	if !canRefreshMediaSnapshot(previous) {
 		return ErrSnapshotUnavailable
 	}
 

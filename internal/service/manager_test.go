@@ -600,6 +600,72 @@ func TestManagerStopsUnconfiguredBootAttemptAndDoesNotRetry(t *testing.T) {
 	}
 }
 
+func TestManagerActivatesOfflineMediaAfterUnconfiguredBootAttempt(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	lifecycle := &fakeLifecycle{}
+	snapshotter := &fakeSnapshotter{}
+	scanner := &fakeVideoScanner{videos: []teslacam.Video{{ID: "offline-video"}}}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, lifecycle, snapshotter, scanner,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	manager.waitForEnumeration = func(context.Context, gadget.Status) (gadget.Status, bool, error) {
+		return lifecycle.status, false, nil
+	}
+
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	startsBeforeMedia := lifecycle.startCalls
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatalf("ActivateMedia() error = %v", err)
+	}
+
+	state := manager.Snapshot()
+	if state.Phase != PhaseSnapshotReady || !state.GadgetPaused || state.GadgetStatus.Bound {
+		t.Fatalf("state = %#v", state)
+	}
+	if snapshotter.createCalls != 1 || scanner.root == "" || state.VideoCount != 1 {
+		t.Fatalf("snapshot calls = %d, scanner root = %q, video count = %d", snapshotter.createCalls, scanner.root, state.VideoCount)
+	}
+	if lifecycle.startCalls != startsBeforeMedia {
+		t.Fatalf("offline media unexpectedly started Gadget: before = %d, after = %d", startsBeforeMedia, lifecycle.startCalls)
+	}
+}
+
+func TestManagerRejectsOfflineMediaWithoutExplicitGadgetPause(t *testing.T) {
+	t.Parallel()
+	snapshotter := &fakeSnapshotter{}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{},
+		fakeInspector{},
+		fakeProber{},
+		&fakeMounter{},
+		&fakeLifecycle{},
+		snapshotter,
+		&fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	manager.store(Snapshot{
+		Phase:   PhaseReadyForGadget,
+		Backing: backing.Status{State: backing.StateReady, Ready: true},
+	})
+
+	err := manager.ActivateMedia(t.Context())
+	if !errors.Is(err, ErrSnapshotUnavailable) {
+		t.Fatalf("ActivateMedia() error = %v, want ErrSnapshotUnavailable", err)
+	}
+	if snapshotter.createCalls != 0 {
+		t.Fatalf("snapshot creation calls = %d, want 0", snapshotter.createCalls)
+	}
+}
+
 func TestManagerPauseSurvivesServiceRestart(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
