@@ -130,12 +130,12 @@
           <label>日期<input id="date" name="date" type="date"></label>
           <label>事件目录<input id="event" name="event" type="search" placeholder="可选，精确匹配"></label>
           <button class="primary filter-submit" type="submit">筛选录像</button>
+          <button id="recording-delete-selected" class="recording-delete-selected" type="button">删除录像</button>
         </form>
 
         <div id="recording-bulk-actions" class="recording-bulk-actions" hidden>
-          <label class="recording-select-all"><input id="recording-select-all" type="checkbox"><span>全选当前列表</span></label>
-          <span id="recording-selected-count" class="muted">未选择录像</span>
-          <button id="recording-delete-selected" class="recording-delete-selected" type="button" disabled>删除已选并恢复空间</button>
+          <button id="recording-select-all" class="secondary recording-select-all" type="button" hidden>全选已保存/哨兵</button>
+          <span id="recording-selected-count" class="muted" hidden>点击已保存或哨兵录像进行选择</span>
         </div>
         <div id="notice" class="notice" role="status" aria-live="polite"></div>
         <div id="video-grid" class="video-grid"></div>
