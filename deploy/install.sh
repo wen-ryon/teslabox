@@ -1,10 +1,12 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="0.1.16"
-RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.16"
+INSTALLER_VERSION="0.1.20"
+RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.20"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256="af9e64e374be99a66addddd7e8dfdc8dbdb49658582ec15fcd06e6ede1632557"
+BOOTSTRAP_SHA256="e4c5e35185492502f57a83395822e751faaf4bdd01b983817fcf2d0f3bf7cabc"
+# MT7922 测试内核只使用已在 ROCK 3A 上验证的固定归档，首装主程序升级不应隐式更换内核基线。
+MT7922_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.16"
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
@@ -627,7 +629,7 @@ EOF
     MT_PATH="${WORK_DIR}/${MT7922_ARCHIVE}"
     MT_DIR="${WORK_DIR}/mt7922"
     curl --fail --location --retry 3 --connect-timeout 15 \
-        --output "${MT_PATH}" "${RELEASE_BASE}/${MT7922_ARCHIVE}"
+        --output "${MT_PATH}" "${MT7922_RELEASE_BASE}/${MT7922_ARCHIVE}"
     ACTUAL_MT_SHA256="$(sha256sum "${MT_PATH}" | awk '{print tolower($1)}')"
     if [ "${ACTUAL_MT_SHA256}" != "${MT7922_SHA256}" ]; then
         die "MT7922 测试内核包 SHA-256 校验失败。"
