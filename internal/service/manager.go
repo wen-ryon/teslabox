@@ -136,6 +136,9 @@ type Manager struct {
 	bindOwnerRecorded   bool
 	bindWindowEnforced  bool
 	bindWindowEndsAt    time.Time
+	startedAt           time.Time
+	bootUptime          time.Duration
+	bootUptimeKnown     bool
 	waitForEnumeration  func(context.Context, gadget.Status) (gadget.Status, bool, error)
 	waitForDriveConfirm func(context.Context) error
 	now                 func() time.Time
@@ -191,6 +194,9 @@ func NewManager(
 		bindOwnerRecorded:   guard.exists && guard.mode == gadgetGuardService && guard.bootID == bootID,
 		bindWindowEnforced:  bindWindowEnforced,
 		bindWindowEndsAt:    bindWindowEndsAt,
+		startedAt:           now,
+		bootUptime:          bootUptime,
+		bootUptimeKnown:     bindWindowEnforced && uptimeErr == nil,
 		now:                 time.Now,
 	}
 	manager.waitForEnumeration = manager.pollGadgetEnumeration
@@ -790,7 +796,19 @@ func (m *Manager) reconcileLocked(ctx context.Context) error {
 		return nil
 	}
 	attemptCompleted = true
-	now := time.Now()
+	now := m.now()
+	if startedNow {
+		startupElapsed := now.Sub(m.startedAt)
+		attributes := []any{
+			"manager_elapsed_ms", startupElapsed.Milliseconds(),
+			"udc", gadgetStatus.UDC,
+			"current_speed", gadgetStatus.CurrentSpeed,
+		}
+		if m.bootUptimeKnown {
+			attributes = append(attributes, "kernel_uptime_ms", (m.bootUptime + startupElapsed).Milliseconds())
+		}
+		m.logger.Info("TeslaUSB Gadget 已完成本次冷启动绑定和枚举", attributes...)
+	}
 	state := Snapshot{
 		Phase:               PhaseGadgetActive,
 		DataDrive:           &device,

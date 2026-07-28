@@ -40,6 +40,7 @@ import (
 )
 
 func main() {
+	processStartedAt := time.Now()
 	reloadCh, stopReloadSignals := subscribeReloadSignals()
 	defer stopReloadSignals()
 
@@ -166,6 +167,13 @@ func main() {
 		MinFreePercent: cfg.MinFreePercent,
 	})
 	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(teslaTimeLocation), logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// TeslaUSB 是车辆启动时最有时效性的链路；Web、网络和媒体管理组件不应占用其首次绑定机会。
+	go manager.Run(ctx)
+	logger.Info("TeslaUSB 核心状态机已启动", "startup_elapsed_ms", time.Since(processStartedAt).Milliseconds())
+
 	driveInspector := driveinit.NewLSBLKInspector(runner)
 	storageAdmin := storageadmin.New(storageadmin.Config{
 		DataRoot:   cfg.DataMountPath,
@@ -265,11 +273,6 @@ func main() {
 		api.WithDiagnostics(diagnostics.New(runner)),
 	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	go manager.Run(ctx)
 	go deviceAdmin.Run(ctx)
 	go mediaExporter.Run(ctx)
 	watchReloadSignal(ctx, manager, reloadCh)
