@@ -21,6 +21,7 @@ const (
 	defaultIndexPath       = "index"
 	defaultStatePath       = "state"
 	defaultExportPath      = "exports"
+	defaultExportStatePath = "/var/lib/teslabox-system/export-state.json"
 	defaultRegistryPath    = "/var/lib/teslabox-system/storage-registry.json"
 	defaultWebAuthPath     = "/var/lib/teslabox-system/web-auth.json"
 	defaultMaintenancePath = "/var/lib/teslabox-system/maintenance.json"
@@ -66,6 +67,7 @@ type Config struct {
 	IndexPath            string
 	StatePath            string
 	ExportPath           string
+	ExportStatePath      string
 	RegistryPath         string
 	WebAuthStatePath     string
 	MaintenanceStatePath string
@@ -185,6 +187,7 @@ func Load() (Config, error) {
 		IndexPath:            envString("TESLABOX_INDEX_PATH", defaultIndexPath),
 		StatePath:            envString("TESLABOX_STATE_PATH", defaultStatePath),
 		ExportPath:           envString("TESLABOX_EXPORT_PATH", defaultExportPath),
+		ExportStatePath:      envString("TESLABOX_EXPORT_STATE", defaultExportStatePath),
 		RegistryPath:         envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		WebAuthStatePath:     envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
 		MaintenanceStatePath: envString("TESLABOX_MAINTENANCE_STATE", defaultMaintenancePath),
@@ -288,6 +291,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaintenanceStatePath != "" && !isSafeAbsolutePath(c.MaintenanceStatePath) {
 		return fmt.Errorf("TESLABOX_MAINTENANCE_STATE 必须是非根目录的绝对路径")
+	}
+	if !isSafeAbsolutePath(c.ExportStatePath) {
+		return fmt.Errorf("TESLABOX_EXPORT_STATE 必须是非根目录的绝对路径")
 	}
 	timeZone := strings.TrimSpace(c.TeslaTimeZone)
 	if timeZone == "" {

@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260726-2">
-  <script src="/app.js?v=20260726-4" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260730-2">
+  <script src="/app.js?v=20260730-4" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -44,6 +44,16 @@
       </div>
     </header>
     <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-relevant="additions"></div>
+    <div id="network-loading" class="network-loading" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <i class="loading-spinner" aria-hidden="true"></i><span id="network-loading-message">正在与 TeslaBox 通信…</span>
+    </div>
+    <div id="page-loading" class="page-loading" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <div class="page-loading-card">
+        <i class="loading-spinner large" aria-hidden="true"></i>
+        <strong id="page-loading-message">正在读取设备状态…</strong>
+        <small>数据仍在加载，请勿重复操作。</small>
+      </div>
+    </div>
 
     <div id="nav-backdrop" class="nav-backdrop" hidden></div>
     <aside id="nav-drawer" class="nav-drawer" aria-label="主导航" hidden>
@@ -258,6 +268,20 @@
         <div class="settings-warning">网页删除录像时已经自动回收空间，此按钮只处理旧版本或电脑直接删除后遗留的历史占用。它只回收 exFAT 分配位图确认空闲的簇，执行期间会暂停 USB Gadget。</div>
       </section>
 
+      <section class="settings-section" aria-labelledby="export-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">EXPORTS</p><h2 id="export-settings-title">导出文件</h2></div><span id="export-retention-status" class="badge">读取中</span></div>
+        <article class="settings-card export-settings-card">
+          <div class="settings-card-head"><div><h3>下载后的保留方式</h3><p>导出完成后会保存在数据盘；可再次下载的历史文件会占用空间，保留数量超出时会自动清理最旧文件。</p></div></div>
+          <div class="export-retention-controls">
+            <label class="inline-check"><input id="export-delete-after-download" type="checkbox"><span>浏览器完整下载后立即清空该导出</span></label>
+            <label>否则保留最近<select id="export-retain-count" aria-label="历史导出保留数量"><option value="1">1 个</option><option value="3">3 个</option><option value="5">5 个</option><option value="8">8 个</option><option value="12">12 个</option><option value="20">20 个</option></select>导出文件</label>
+          </div>
+          <div class="form-actions"><p id="export-settings-detail" class="muted">正在读取导出策略…</p><button id="export-settings-save" class="primary" type="button">保存导出设置</button></div>
+          <div class="export-history-head"><div><h3>历史导出</h3><p>只显示仍保留在数据盘、可再次下载的文件。</p></div><button id="export-history-refresh" class="secondary compact" type="button">刷新历史</button></div>
+          <div id="export-history-list" class="export-history-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+      </section>
+
       <section class="settings-section security-section" aria-labelledby="security-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SECURITY</p><h2 id="security-title">安全与账户</h2></div><span id="password-status" class="badge">密码已设置</span></div>
         <article class="settings-card account-card">
@@ -424,7 +448,7 @@
       </div>
       <div class="playback-diagnostics" aria-live="polite"><span id="playback-path">链路：检测中</span><span id="playback-throughput">媒体吞吐：等待数据</span><span id="playback-buffer">缓冲：0.0 秒</span><span id="playback-stalls">卡顿：0 次</span></div>
       <div id="session-player-view" class="session-player-view">
-        <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><p id="player-message" class="player-message" hidden></p></div>
+        <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><div id="playback-telemetry" class="playback-telemetry" hidden><strong id="playback-timestamp">—</strong><span id="playback-sei">正在读取 Tesla SEI 信息…</span></div><p id="player-message" class="player-message" hidden></p></div>
         <div id="camera-switcher" class="camera-switcher" aria-label="摄像头视角"></div>
         <div class="unified-controls">
           <button id="play-toggle" class="primary play-toggle" type="button" aria-label="播放">▶</button>
@@ -444,7 +468,7 @@
       <p class="eyebrow">EXPORT RECORDING</p><h2 id="export-title">导出录像</h2>
       <div class="export-mode-tabs" role="tablist" aria-label="导出方式">
         <button id="export-mode-clip" class="active" type="button" role="tab" aria-selected="true">剪辑视频</button>
-        <button id="export-mode-source" type="button" role="tab" aria-selected="false">原始片段</button>
+        <button id="export-mode-source" type="button" role="tab" aria-selected="false">多路原画</button>
       </div>
       <div id="export-clip-options">
         <p class="muted">跨分钟拼接所选视角，并按录像绝对时间对齐最多约 1–2 帧的时间差。</p>
@@ -456,11 +480,12 @@
           <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>
           <label id="export-camera-field">单路摄像头<select id="export-camera"></select></label>
         </div>
-        <label>导出画质<select id="export-quality"><option value="smooth">流畅（480p · 20 FPS）</option><option value="standard" selected>标准（720p · 24 FPS）</option><option value="high">高清（1080p · 30 FPS）</option><option value="original">原画（源分辨率 · 36 FPS，仅单路）</option></select></label>
+        <label>导出画质<select id="export-quality"><option value="high" selected>高保真合成（多路 H.265 · 1080 高度 · 30 FPS）</option><option value="original">单路原画（源分辨率 · 36 FPS）</option></select></label>
         <p id="export-quality-help" class="muted"></p>
+        <fieldset class="export-overlay-options"><legend>画面信息叠加</legend><label class="inline-check"><input id="export-burn-timestamp" type="checkbox" checked><span>左上角显示录像时间</span></label><label class="inline-check"><input id="export-burn-sei" type="checkbox"><span>右上角显示 Tesla SEI 信息</span></label><p class="muted">SEI 仅在原始录像实际包含该信息时显示；原画文件下载不转码，不能叠加。</p></fieldset>
       </div>
       <div id="export-source-options" hidden>
-        <p class="muted">按完整分钟直接打包源 MP4，不裁剪、不转码，压缩包内附带清单文件。</p>
+        <p class="muted">按完整分钟直接打包源 MP4，不裁剪、不转码。解压压缩包后打开 <code>player.html</code>，即可在电脑上同步查看所选多路原画；多个文件建议下载压缩包，速度更稳定。</p>
         <div class="export-source-toolbar"><button id="export-source-current" class="secondary" type="button">当前分钟</button><button id="export-source-all" class="secondary" type="button">全选本段</button><button id="export-source-clear" class="secondary" type="button">清除</button><button id="export-source-cameras-all" class="secondary" type="button">全选六路</button><button id="export-source-cameras-layout" class="secondary" type="button">当前布局</button></div>
         <div id="export-source-moments" class="export-source-moments" aria-label="选择原始录像分钟"></div>
         <fieldset class="export-camera-fieldset"><legend>导出视角</legend><div id="export-source-cameras" class="export-source-cameras" aria-label="选择原始录像视角"></div></fieldset>

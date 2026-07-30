@@ -25,6 +25,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
+	"github.com/wen-ryon/teslabox/internal/teslasei"
 	"github.com/wen-ryon/teslabox/internal/updater"
 )
 
@@ -103,6 +104,10 @@ type ExportAdmin interface {
 	Task(string) (media.ExportTask, error)
 	Cancel(string) (media.ExportTask, error)
 	Open(string) (*os.File, media.ExportTask, error)
+	Settings() media.ExportSettings
+	UpdateSettings(media.ExportSettings) (media.ExportSettings, error)
+	History() []media.ExportTask
+	Consume(string) error
 }
 
 // UpdateAdmin 定义设置中心所需的签名更新能力。
@@ -570,6 +575,24 @@ func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAd
 }
 
 func registerExportRoutes(mux *http.ServeMux, controller Controller, admin ExportAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/export-settings", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, admin.Settings())
+	})
+	mux.HandleFunc("PUT /api/v1/export-settings", func(w http.ResponseWriter, r *http.Request) {
+		var settings media.ExportSettings
+		if !decodeJSON(w, r, &settings) {
+			return
+		}
+		updated, err := admin.UpdateSettings(settings)
+		if err != nil {
+			writeExportError(w, logger, "更新导出设置失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
+	})
+	mux.HandleFunc("GET /api/v1/exports/history", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, admin.History())
+	})
 	mux.HandleFunc("POST /api/v1/exports", func(w http.ResponseWriter, r *http.Request) {
 		var request media.ExportRequest
 		if !decodeJSON(w, r, &request) {
@@ -608,6 +631,17 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
 			return
 		}
+		if request.Mode != media.ExportModeSource && (request.BurnTimestamp || request.BurnSEI) {
+			if err := attachExportOverlayCues(r.Context(), request, &source, logger); err != nil {
+				release()
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				logger.Warn("准备导出时间叠加失败", "session_id", request.SessionID, "error", err)
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法准备导出时间信息"})
+				return
+			}
+		}
 		task, err := admin.Create(request, source, release)
 		if err != nil {
 			writeExportError(w, logger, "创建导出任务失败", err)
@@ -644,14 +678,31 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "导出文件暂不可用"})
 			return
 		}
-		filename := "teslabox-" + task.ID + ".mp4"
+		filename := media.ExportDownloadFilename(task)
 		contentType := "video/mp4"
 		if task.Request.Mode == media.ExportModeSource {
-			filename = "teslabox-source-" + task.ID + ".zip"
 			contentType = "application/zip"
 		}
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 		w.Header().Set("Content-Type", contentType)
+		if admin.Settings().DeleteAfterDownload {
+			w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+			if r.Method == http.MethodHead {
+				return
+			}
+			if _, err := io.Copy(w, file); err != nil {
+				logger.Warn("发送导出文件失败，已保留历史文件", "task_id", task.ID, "error", err)
+				return
+			}
+			if err := file.Close(); err != nil {
+				logger.Warn("关闭已下载导出文件失败，已保留历史文件", "task_id", task.ID, "error", err)
+				return
+			}
+			if err := admin.Consume(task.ID); err != nil {
+				logger.Warn("导出文件已下载但自动清理失败", "task_id", task.ID, "error", err)
+			}
+			return
+		}
 		http.ServeContent(w, r, filename, info.ModTime(), file)
 	})
 }
@@ -821,6 +872,52 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 		}
 		writeJSON(w, http.StatusOK, metadata)
 	})
+	mux.HandleFunc("GET /api/v1/videos/{id}/sei", func(w http.ResponseWriter, r *http.Request) {
+		activateMedia(controller, logger, r.Context())
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		if state.MediaSnapshot == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
+			return
+		}
+		video, found := findVideo(state.Videos, r.PathValue("id"))
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		name, err := snapshotVideoPath(state.MediaSnapshot.MountPath, video.Path)
+		if err != nil {
+			logger.Warn("解析 SEI 视频路径失败", "video_id", video.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频文件暂不可用"})
+			return
+		}
+		items, err := teslasei.Read(r.Context(), name)
+		if errors.Is(err, teslasei.ErrNoMetadata) {
+			writeJSON(w, http.StatusOK, seiTimelineResponse{Available: false, Message: "该录像没有可识别的 Tesla SEI 信息"})
+			return
+		}
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			logger.Warn("读取 Tesla SEI 失败", "video_id", video.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取 Tesla SEI 信息"})
+			return
+		}
+		duration := video.Duration
+		if duration <= 0 {
+			duration = defaultSegmentDuration.Seconds()
+		}
+		writeJSON(w, http.StatusOK, seiTimelineResponse{
+			Available: true, Samples: teslasei.Timeline(items, time.Duration(duration*float64(time.Second)), 300),
+		})
+	})
+}
+
+type seiTimelineResponse struct {
+	Available bool              `json:"available"`
+	Samples   []teslasei.Sample `json:"samples,omitempty"`
+	Message   string            `json:"message,omitempty"`
 }
 
 const maximumMediaUploadRequestBytes int64 = 512 * 1024 * 1024
@@ -1830,11 +1927,102 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 			// 最近录像会压缩掉缺失时间段，导出必须沿用页面时间轴，否则点击的范围会落到错误片段。
 			recordedAt := momentStart.Add(video.RecordedAt.Sub(moment.RecordedAt))
 			source.Videos = append(source.Videos, media.ExportVideo{
-				Camera: video.Camera, Path: name, RecordedAt: recordedAt, Duration: duration,
+				Camera: video.Camera, Path: name, RecordedAt: recordedAt, WallClockAt: video.RecordedAt, Duration: duration,
 			})
 		}
 	}
 	return source, nil
+}
+
+func attachExportOverlayCues(ctx context.Context, request media.ExportRequest, source *media.ExportSource, logger *slog.Logger) error {
+	if source == nil || (!request.BurnTimestamp && !request.BurnSEI) {
+		return nil
+	}
+	duration := time.Duration(request.DurationSeconds * float64(time.Second))
+	if duration <= 0 {
+		return &media.InputError{Message: "导出时长无效"}
+	}
+	startAt := source.SessionStart.Add(time.Duration(request.StartSeconds * float64(time.Second)))
+	preferredCamera := "front"
+	if !slices.ContainsFunc(source.Videos, func(video media.ExportVideo) bool { return video.Camera == preferredCamera }) {
+		preferredCamera = ""
+		for _, camera := range request.Cameras {
+			if slices.ContainsFunc(source.Videos, func(video media.ExportVideo) bool { return video.Camera == camera }) {
+				preferredCamera = camera
+				break
+			}
+		}
+	}
+	type telemetryVideo struct {
+		video    media.ExportVideo
+		metadata []teslasei.Metadata
+	}
+	telemetry := make([]telemetryVideo, 0)
+	timestampVideos := make([]media.ExportVideo, 0)
+	if preferredCamera != "" {
+		for _, video := range source.Videos {
+			if video.Camera == preferredCamera {
+				timestampVideos = append(timestampVideos, video)
+			}
+		}
+		slices.SortFunc(timestampVideos, func(left, right media.ExportVideo) int { return left.RecordedAt.Compare(right.RecordedAt) })
+	}
+	if request.BurnSEI && preferredCamera != "" {
+		for _, video := range timestampVideos {
+			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
+			if !videoEnd.After(startAt) || !video.RecordedAt.Before(startAt.Add(duration)) {
+				continue
+			}
+			items, err := teslasei.Read(ctx, video.Path)
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			if errors.Is(err, teslasei.ErrNoMetadata) {
+				continue
+			}
+			if err != nil {
+				logger.Warn("导出录像缺少可用 Tesla SEI", "path", video.Path, "error", err)
+				continue
+			}
+			telemetry = append(telemetry, telemetryVideo{video: video, metadata: items})
+		}
+	}
+	for offset := time.Duration(0); offset < duration; offset += time.Second {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := min(offset+time.Second, duration)
+		cue := media.ExportOverlayCue{Start: offset, End: end}
+		absolute := startAt.Add(offset)
+		if request.BurnTimestamp {
+			cue.Timestamp = absolute.Format("2006-01-02 15:04:05")
+			for _, video := range timestampVideos {
+				videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
+				if absolute.Before(video.RecordedAt) || !absolute.Before(videoEnd) || video.WallClockAt.IsZero() {
+					continue
+				}
+				cue.Timestamp = video.WallClockAt.Add(absolute.Sub(video.RecordedAt)).Format("2006-01-02 15:04:05")
+				break
+			}
+		}
+		if request.BurnSEI {
+			for _, item := range telemetry {
+				videoEnd := item.video.RecordedAt.Add(time.Duration(item.video.Duration * float64(time.Second)))
+				if absolute.Before(item.video.RecordedAt) || !absolute.Before(videoEnd) {
+					continue
+				}
+				metadata, found := teslasei.At(item.metadata, time.Duration(item.video.Duration*float64(time.Second)), absolute.Sub(item.video.RecordedAt))
+				if found {
+					cue.SEIText = teslasei.Display(metadata)
+				}
+				break
+			}
+		}
+		if cue.Timestamp != "" || cue.SEIText != "" {
+			source.OverlayCues = append(source.OverlayCues, cue)
+		}
+	}
+	return nil
 }
 
 func sourceFileExportSource(snapshotRoot string, session videoSession, request media.ExportRequest) (media.ExportSource, error) {

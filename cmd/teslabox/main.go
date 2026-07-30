@@ -215,6 +215,7 @@ func main() {
 	mediaExporter, err := media.NewExporter(runner, media.ExportConfig{
 		FFmpegPath:  cfg.FFmpegPath,
 		OutputDir:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
+		StatePath:   cfg.ExportStatePath,
 		QueueSize:   cfg.ExportQueueSize,
 		MaxDuration: cfg.ExportMaxDuration,
 		Logger:      logger,

@@ -41,8 +41,8 @@ func TestLoad(t *testing.T) {
 	if cfg.FFmpegPath != "/opt/teslabox/media/bin/ffmpeg" || cfg.FFprobePath != "/opt/teslabox/media/bin/ffprobe" || cfg.MediaProbeTimeout != 10*time.Second {
 		t.Errorf("media config = %q, %q, %s", cfg.FFmpegPath, cfg.FFprobePath, cfg.MediaProbeTimeout)
 	}
-	if cfg.ExportPath != "exports" || cfg.ExportMaxDuration != 2*time.Minute || cfg.ExportQueueSize != 4 {
-		t.Errorf("export config = %q, %s, %d", cfg.ExportPath, cfg.ExportMaxDuration, cfg.ExportQueueSize)
+	if cfg.ExportPath != "exports" || cfg.ExportStatePath != "/var/lib/teslabox-system/export-state.json" || cfg.ExportMaxDuration != 2*time.Minute || cfg.ExportQueueSize != 4 {
+		t.Errorf("export config = %q, %q, %s, %d", cfg.ExportPath, cfg.ExportStatePath, cfg.ExportMaxDuration, cfg.ExportQueueSize)
 	}
 	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {
 		t.Errorf("WebAuthStatePath = %q", cfg.WebAuthStatePath)
@@ -138,6 +138,7 @@ func TestConfigValidate(t *testing.T) {
 		IndexPath:            "index",
 		StatePath:            "state",
 		ExportPath:           "exports",
+		ExportStatePath:      "/var/lib/teslabox-system/export-state.json",
 		RegistryPath:         "/var/lib/teslabox-system/storage-registry.json",
 		WebAuthStatePath:     "/var/lib/teslabox-system/web-auth.json",
 		UpdateChannel:        "stable",
@@ -184,6 +185,7 @@ func TestConfigValidate(t *testing.T) {
 		{name: "escaping image path", mutate: func(cfg *Config) { cfg.ImagePath = "../system.img" }, wantErr: true},
 		{name: "absolute snapshot path", mutate: func(cfg *Config) { cfg.SnapshotPath = "/tmp/snapshots" }, wantErr: true},
 		{name: "escaping export path", mutate: func(cfg *Config) { cfg.ExportPath = "../exports" }, wantErr: true},
+		{name: "relative export state path", mutate: func(cfg *Config) { cfg.ExportStatePath = "var/lib/export-state.json" }, wantErr: true},
 		{name: "relative snapshot mount path", mutate: func(cfg *Config) { cfg.SnapshotMountPath = "run/teslabox/snapshots" }, wantErr: true},
 		{name: "relative registry path", mutate: func(cfg *Config) { cfg.RegistryPath = "var/lib/registry.json" }, wantErr: true},
 		{name: "relative web auth path", mutate: func(cfg *Config) { cfg.WebAuthStatePath = "var/lib/web-auth.json" }, wantErr: true},

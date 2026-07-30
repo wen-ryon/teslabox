@@ -73,24 +73,152 @@ let exportMode = "clip";
 let sourceExportSessionID = "";
 const sourceExportMomentIDs = new Set();
 const sourceExportCameras = new Set();
+const telemetryByVideo = new Map();
+let activeTelemetry = null;
+let telemetryAbortController = null;
 let passwordChangeForced = false;
 let updatePollTimer = 0;
 let logsRefreshTimer = 0;
 let activeLogSource = "usb";
 const observedMediaEntries = new Set();
 const playbackDiagnosticLastSent = new Map();
+let pendingRequestControl = null;
+let pendingRequestControlTimer = 0;
+let loadingSequence = 0;
+const networkLoadingTasks = new Map();
+const pageLoadingTasks = new Map();
+const requestLoadingControls = new Map();
+let networkLoadingTimer = 0;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
 applyViewState();
 showPage(state.page, false);
 
-async function request(path, options = {}) {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
-  if (response.status === 401) {
-    showLogin();
-    throw new Error("登录状态已失效");
+function rememberRequestControl(control) {
+  if (!(control instanceof HTMLButtonElement) || control.disabled) return;
+  pendingRequestControl = control;
+  window.clearTimeout(pendingRequestControlTimer);
+  pendingRequestControlTimer = window.setTimeout(() => {
+    if (pendingRequestControl === control) pendingRequestControl = null;
+  }, 0);
+}
+
+function takeRequestControl() {
+  const control = pendingRequestControl;
+  pendingRequestControl = null;
+  window.clearTimeout(pendingRequestControlTimer);
+  return control instanceof HTMLButtonElement && control.isConnected ? control : null;
+}
+
+function setRequestControlLoading(control) {
+  if (!control) return () => {};
+  const current = requestLoadingControls.get(control);
+  if (current) {
+    current.count++;
+    return () => clearRequestControlLoading(control);
   }
+  requestLoadingControls.set(control, {
+    count: 1,
+    disabled: control.disabled,
+    ariaBusy: control.getAttribute("aria-busy"),
+    loadingClass: control.classList.contains("is-loading"),
+  });
+  control.disabled = true;
+  control.classList.add("is-loading");
+  control.setAttribute("aria-busy", "true");
+  return () => clearRequestControlLoading(control);
+}
+
+function clearRequestControlLoading(control) {
+  const current = requestLoadingControls.get(control);
+  if (!current) return;
+  current.count--;
+  if (current.count > 0) return;
+  requestLoadingControls.delete(control);
+  if (!current.loadingClass) control.classList.remove("is-loading");
+  if (current.ariaBusy === null) control.removeAttribute("aria-busy");
+  else control.setAttribute("aria-busy", current.ariaBusy);
+  if (!current.disabled) control.disabled = false;
+}
+
+function latestLoadingMessage(tasks, fallback) {
+  const messages = [...tasks.values()];
+  return messages.length ? messages[messages.length-1] : fallback;
+}
+
+function renderNetworkLoading() {
+  const root = $("network-loading");
+  if (networkLoadingTasks.size === 0) {
+    window.clearTimeout(networkLoadingTimer);
+    networkLoadingTimer = 0;
+    root.hidden = true;
+    return;
+  }
+  $("network-loading-message").textContent = latestLoadingMessage(networkLoadingTasks, "正在与 TeslaBox 通信…");
+  if (networkLoadingTimer || !root.hidden) return;
+  networkLoadingTimer = window.setTimeout(() => {
+    networkLoadingTimer = 0;
+    if (networkLoadingTasks.size > 0) root.hidden = false;
+  }, 250);
+}
+
+function startNetworkLoading(message) {
+  const token = ++loadingSequence;
+  const releaseControl = setRequestControlLoading(takeRequestControl());
+  networkLoadingTasks.set(token, message || "正在与 TeslaBox 通信…");
+  renderNetworkLoading();
+  return () => {
+    networkLoadingTasks.delete(token);
+    releaseControl();
+    renderNetworkLoading();
+  };
+}
+
+function renderPageLoading() {
+  const root = $("page-loading");
+  const loading = pageLoadingTasks.size > 0 && !appView.hidden;
+  root.hidden = !loading;
+  appView.toggleAttribute("aria-busy", loading);
+  if (loading) $("page-loading-message").textContent = latestLoadingMessage(pageLoadingTasks, "正在读取设备状态…");
+}
+
+function startPageLoading(message) {
+  const token = ++loadingSequence;
+  pageLoadingTasks.set(token, message || "正在读取设备状态…");
+  renderPageLoading();
+  return () => {
+    pageLoadingTasks.delete(token);
+    renderPageLoading();
+  };
+}
+
+async function withPageLoading(message, operation) {
+  const finish = startPageLoading(message);
+  try {
+    return await operation();
+  } finally {
+    finish();
+  }
+}
+
+async function requestResponse(path, options = {}) {
+  const {loading = true, loadingMessage, ...fetchOptions} = options;
+  const finish = loading ? startNetworkLoading(loadingMessage) : () => {};
+  try {
+    const response = await fetch(path, { credentials: "same-origin", ...fetchOptions });
+    if (response.status === 401) {
+      showLogin();
+      throw new Error("登录状态已失效");
+    }
+    return response;
+  } finally {
+    finish();
+  }
+}
+
+async function request(path, options = {}) {
+  const response = await requestResponse(path, options);
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）`;
     try { message = (await response.json()).error || message; } catch (_) { /* 保留通用提示 */ }
@@ -99,6 +227,12 @@ async function request(path, options = {}) {
   if (response.status === 204) return null;
   return response.json();
 }
+
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  rememberRequestControl(event.target.closest("button"));
+}, true);
+document.addEventListener("submit", (event) => rememberRequestControl(event.submitter));
 
 function showLogin() {
   appView.hidden = true;
@@ -114,7 +248,7 @@ function showApp() {
 
 async function initialize() {
   try {
-    const session = await fetch("/api/v1/auth/session", { credentials: "same-origin" }).then((response) => response.json());
+    const session = await requestResponse("/api/v1/auth/session", {loading:false}).then((response) => response.json());
     state.authEnabled = session.enabled;
     state.mustChangePassword = Boolean(session.must_change_password);
     if (session.enabled && !session.authenticated) {
@@ -142,9 +276,10 @@ loginForm.addEventListener("submit", async (event) => {
   const button = loginForm.querySelector("button");
   button.disabled = true;
   try {
-    const response = await fetch("/api/v1/auth/login", {
+    const response = await requestResponse("/api/v1/auth/login", {
       method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: $("password").value }),
+      loadingMessage:"正在验证登录…",
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "登录失败");
@@ -164,7 +299,7 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 $("logout-button").addEventListener("click", async () => {
-  await fetch("/api/v1/auth/logout", { method: "POST", credentials: "same-origin" });
+  await requestResponse("/api/v1/auth/logout", { method: "POST", loadingMessage:"正在退出管理页面…" });
   closeAppearanceMenu();
   closePasswordModal(true);
   closePlayer();
@@ -236,6 +371,9 @@ $("saved-network-toggle").addEventListener("click", () => toggleNetworkPanel("sa
 $("available-network-toggle").addEventListener("click", () => toggleNetworkPanel("available-network-panel", "available-network-toggle"));
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
 $("ap-form").addEventListener("submit", saveAPSettings);
+$("export-settings-save").addEventListener("click", saveExportSettings);
+$("export-history-refresh").addEventListener("click", loadExportSettings);
+$("export-delete-after-download").addEventListener("change", renderExportRetentionControls);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
 $("wifi-ipv4-form").addEventListener("submit", saveWiFiIPv4Settings);
 $("wifi-ipv4-mode").addEventListener("change", renderWiFiIPv4Fields);
@@ -312,7 +450,9 @@ document.addEventListener("fullscreenchange", handlePlayerViewportChange);
 document.addEventListener("webkitfullscreenchange", handlePlayerViewportChange);
 
 async function refreshAll() {
-  await Promise.allSettled([loadStatus(), loadSessions(false)]);
+  await withPageLoading("正在同步设备状态与录像索引…", async () => {
+    await Promise.allSettled([loadStatus(), loadSessions(false)]);
+  });
 }
 
 async function refreshRecordings() {
@@ -443,24 +583,28 @@ window.addEventListener("popstate", () => {
   showPage(page, false);
 });
 
-async function loadLogs() {
+async function loadLogs({background = false} = {}) {
   if (state.page !== "logs" || appView.hidden) return;
-  $("logs-refresh").disabled = true;
-  setLogsNotice("", false);
-  try {
-    const lineCount = Number($("logs-lines").value) || 200;
-    const [report, storage] = await Promise.all([
-      request(`/api/v1/logs?source=${encodeURIComponent(activeLogSource)}&lines=${lineCount}`),
-      request("/api/v1/storage"),
-    ]);
-    renderLogDiagnostics(storage);
-    renderLogs(report);
-  } catch (error) {
-    setLogsNotice(error.message, true);
-  } finally {
-    $("logs-refresh").disabled = false;
-    scheduleLogsRefresh();
-  }
+  const load = async () => {
+    $("logs-refresh").disabled = true;
+    setLogsNotice("", false);
+    try {
+      const lineCount = Number($("logs-lines").value) || 200;
+      const [report, storage] = await Promise.all([
+        request(`/api/v1/logs?source=${encodeURIComponent(activeLogSource)}&lines=${lineCount}`, {loading:!background}),
+        request("/api/v1/storage", {loading:!background}),
+      ]);
+      renderLogDiagnostics(storage);
+      renderLogs(report);
+    } catch (error) {
+      setLogsNotice(error.message, true);
+    } finally {
+      $("logs-refresh").disabled = false;
+      scheduleLogsRefresh();
+    }
+  };
+  if (background) return load();
+  return withPageLoading("正在读取日志与 USB Gadget 状态…", load);
 }
 
 async function downloadDiagnosticReport() {
@@ -469,11 +613,7 @@ async function downloadDiagnosticReport() {
   button.disabled = true;
   button.textContent = "正在收集…";
   try {
-    const response = await fetch("/api/v1/diagnostics/report", {credentials:"same-origin", cache:"no-store"});
-    if (response.status === 401) {
-      showLogin();
-      throw new Error("登录状态已失效");
-    }
+    const response = await requestResponse("/api/v1/diagnostics/report", {cache:"no-store", loadingMessage:"正在生成完整诊断报告…"});
     if (!response.ok) {
       let message = `生成诊断报告失败（HTTP ${response.status}）`;
       try { message = (await response.json()).error || message; } catch (_) { /* 保留通用提示 */ }
@@ -501,18 +641,20 @@ async function downloadDiagnosticReport() {
 
 async function loadMediaAssets() {
   if (state.page !== "media" || appView.hidden) return;
-  $("media-refresh").disabled = true;
-  setMediaNotice("", false);
-  try {
-    const payload = await request("/api/v1/media-assets");
-    state.mediaAssets = payload;
-    renderMediaAssets(payload);
-  } catch (error) {
-    setMediaNotice(error.message, true);
-    renderMediaUnavailable(error.message);
-  } finally {
-    $("media-refresh").disabled = false;
-  }
+  return withPageLoading("正在读取媒体中心内容…", async () => {
+    $("media-refresh").disabled = true;
+    setMediaNotice("", false);
+    try {
+      const payload = await request("/api/v1/media-assets");
+      state.mediaAssets = payload;
+      renderMediaAssets(payload);
+    } catch (error) {
+      setMediaNotice(error.message, true);
+      renderMediaUnavailable(error.message);
+    } finally {
+      $("media-refresh").disabled = false;
+    }
+  });
 }
 
 function renderMediaAssets(payload) {
@@ -975,7 +1117,7 @@ function scheduleLogsRefresh() {
   window.clearTimeout(logsRefreshTimer);
   logsRefreshTimer = 0;
   if (state.page !== "logs" || appView.hidden || !logsAutoRefreshEnabled()) return;
-  logsRefreshTimer = window.setTimeout(loadLogs, 10000);
+  logsRefreshTimer = window.setTimeout(() => loadLogs({background:true}), 10000);
 }
 
 function logsAutoRefreshEnabled() {
@@ -1018,42 +1160,154 @@ async function postJSON(path, body) {
 }
 
 async function loadSettings() {
-  setSettingsNotice("正在读取网络设置…", false, false);
-  const [wifiResult, apResult, storageResult, updateResult, maintenanceResult] = await Promise.allSettled([
-    request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"),
+  return withPageLoading("正在读取网络、存储与系统设置…", async () => {
+    setSettingsNotice("正在读取网络设置…", false, false);
+    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, exportSettingsResult, exportHistoryResult] = await Promise.allSettled([
+      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/export-settings"), request("/api/v1/exports/history"),
+    ]);
+    if (wifiResult.status === "fulfilled") {
+      state.wifi = wifiResult.value;
+      renderWiFiSettings(state.wifi);
+    } else {
+      renderWiFiUnavailable(wifiResult.reason.message);
+    }
+    if (apResult.status === "fulfilled") {
+      state.ap = apResult.value;
+      renderAPSettings(state.ap);
+    } else {
+      renderAPUnavailable(apResult.reason.message);
+    }
+    if (storageResult.status === "fulfilled") {
+      state.storage = storageResult.value;
+      renderStorageDevices(state.storage);
+    } else {
+      renderStorageUnavailable(storageResult.reason.message);
+    }
+    if (updateResult.status === "fulfilled") {
+      state.update = updateResult.value;
+      renderUpdate(state.update);
+    } else {
+      renderUpdateUnavailable(updateResult.reason.message);
+    }
+    if (maintenanceResult.status === "fulfilled") {
+      state.maintenance = maintenanceResult.value;
+      renderMaintenanceSettings(state.maintenance);
+    } else {
+      renderMaintenanceUnavailable(maintenanceResult.reason.message);
+    }
+    if (exportSettingsResult.status === "fulfilled" && exportHistoryResult.status === "fulfilled") {
+      state.exportSettings = exportSettingsResult.value;
+      state.exportHistory = exportHistoryResult.value;
+      renderExportSettings();
+    } else {
+      renderExportSettingsUnavailable(exportSettingsResult.status === "rejected" ? exportSettingsResult.reason.message : exportHistoryResult.reason.message);
+    }
+    if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false, false);
+    else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
+  });
+}
+
+async function loadExportSettings() {
+  const [settingsResult, historyResult] = await Promise.allSettled([
+    request("/api/v1/export-settings"), request("/api/v1/exports/history"),
   ]);
-  if (wifiResult.status === "fulfilled") {
-    state.wifi = wifiResult.value;
-    renderWiFiSettings(state.wifi);
-  } else {
-    renderWiFiUnavailable(wifiResult.reason.message);
+  if (settingsResult.status !== "fulfilled" || historyResult.status !== "fulfilled") {
+    const reason = settingsResult.status === "rejected" ? settingsResult.reason : historyResult.reason;
+    renderExportSettingsUnavailable(reason.message);
+    setSettingsNotice(`导出设置不可用：${reason.message}`, true);
+    return;
   }
-  if (apResult.status === "fulfilled") {
-    state.ap = apResult.value;
-    renderAPSettings(state.ap);
-  } else {
-    renderAPUnavailable(apResult.reason.message);
+  state.exportSettings = settingsResult.value;
+  state.exportHistory = historyResult.value;
+  renderExportSettings();
+}
+
+function renderExportSettings() {
+  const settings = state.exportSettings || {delete_after_download:false, retain_count:8};
+  const deleteAfterDownload = Boolean(settings.delete_after_download);
+  $("export-delete-after-download").checked = deleteAfterDownload;
+  const retainSelect = $("export-retain-count");
+  if ([...retainSelect.options].some((option) => Number(option.value) === Number(settings.retain_count))) retainSelect.value = String(settings.retain_count);
+  else retainSelect.value = "8";
+  $("export-settings-save").disabled = false;
+  $("export-history-refresh").disabled = false;
+  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${retainSelect.value} 个`;
+  $("export-retention-status").className = "badge ok";
+  renderExportRetentionControls();
+  const history = Array.isArray(state.exportHistory) ? state.exportHistory : [];
+  const root = $("export-history-list");
+  root.replaceChildren();
+  if (history.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = deleteAfterDownload ? "下载即清空已开启；后续导出完整下载后不会保留在历史中。" : "暂时没有可再次下载的导出文件。";
+    root.append(empty);
+    return;
   }
-  if (storageResult.status === "fulfilled") {
-    state.storage = storageResult.value;
-    renderStorageDevices(state.storage);
-  } else {
-    renderStorageUnavailable(storageResult.reason.message);
+  history.forEach((task) => {
+    const row = document.createElement("div");
+    row.className = "export-history-row";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    const source = task.request?.mode === "source";
+    title.textContent = source ? "多路原画压缩包" : exportTaskLabel(task.request);
+    const detail = document.createElement("small");
+    const completedAt = task.completed_at || task.created_at;
+    detail.textContent = `${formatDate(completedAt)}${task.estimated_bytes ? ` · 约 ${formatBytes(task.estimated_bytes)}` : ""}`;
+    copy.append(title, detail);
+    const download = document.createElement("a");
+    download.className = "secondary compact";
+    download.href = `/api/v1/exports/${encodeURIComponent(task.id)}/download`;
+    download.download = "";
+    download.textContent = "再次下载";
+    row.append(copy, download);
+    root.append(row);
+  });
+}
+
+function renderExportRetentionControls() {
+  const deleteAfterDownload = $("export-delete-after-download").checked;
+  $("export-retain-count").disabled = deleteAfterDownload;
+  $("export-settings-detail").textContent = deleteAfterDownload
+    ? "仅在浏览器完整接收文件后删除；网络中断或关闭页面时会保留，方便再次下载。"
+    : `将保留最近 ${$("export-retain-count").value} 个已完成导出，超过后自动清理最旧文件。`;
+}
+
+function renderExportSettingsUnavailable(message) {
+  state.exportSettings = null;
+  state.exportHistory = [];
+  $("export-settings-save").disabled = true;
+  $("export-history-refresh").disabled = true;
+  $("export-retention-status").textContent = "不可用";
+  $("export-retention-status").className = "badge error";
+  $("export-settings-detail").textContent = `导出设置暂不可用：${message}`;
+  $("export-history-list").replaceChildren();
+}
+
+async function saveExportSettings() {
+  const button = $("export-settings-save");
+  button.disabled = true;
+  try {
+    state.exportSettings = await request("/api/v1/export-settings", {
+      method:"PUT", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        delete_after_download:$("export-delete-after-download").checked,
+        retain_count:Number($("export-retain-count").value),
+      }),
+    });
+    await loadExportSettings();
+    setSettingsNotice("导出文件保留设置已保存", false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
   }
-  if (updateResult.status === "fulfilled") {
-    state.update = updateResult.value;
-    renderUpdate(state.update);
-  } else {
-    renderUpdateUnavailable(updateResult.reason.message);
-  }
-  if (maintenanceResult.status === "fulfilled") {
-    state.maintenance = maintenanceResult.value;
-    renderMaintenanceSettings(state.maintenance);
-  } else {
-    renderMaintenanceUnavailable(maintenanceResult.reason.message);
-  }
-  if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false, false);
-  else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
+}
+
+function exportTaskLabel(request) {
+  const labels = {composite6:"六路合成视频", composite4a:"四路合成 A 视频", composite4b:"四路合成 B 视频", composite3:"三路合成视频"};
+  if (request?.layout === "single") return `${cameraLabel(request.cameras?.[0] || "front")}单路视频`;
+  return labels[request?.layout] || "导出视频";
 }
 
 function renderMaintenanceSettings(settings) {
@@ -1199,7 +1453,7 @@ function scheduleUpdatePoll() {
   clearUpdatePoll();
   updatePollTimer = window.setTimeout(async () => {
     try {
-      state.update = await request("/api/v1/update");
+      state.update = await request("/api/v1/update", {loading:false});
       renderUpdate(state.update);
     } catch (_) {
       if (state.update?.state === "installing") {
@@ -2111,34 +2365,36 @@ function renderPercent(prefix, value) {
 
 async function loadSessions(silent = false) {
   if (state.loading) return;
-  state.loading = true;
-  if (!silent) {
-    timelineList.replaceChildren();
-    setNotice("正在整理完整录像时间轴…", false, false);
-  }
-  try {
-    const archiveParams = new URLSearchParams({ limit: "1000" });
-    for (const id of ["clip-type", "date", "event"]) {
-      const value = $(id).value.trim();
-      if (value) archiveParams.set(id.replace("-", "_"), value);
+  return withPageLoading(silent ? "正在同步录像索引…" : "正在整理完整录像时间轴…", async () => {
+    state.loading = true;
+    if (!silent) {
+      timelineList.replaceChildren();
+      setNotice("正在整理完整录像时间轴…", false, false);
     }
-    const [recentPayload, archivePayload] = await Promise.all([
-      request("/api/v1/video-sessions?clip_type=recent&limit=1000"),
-      request(`/api/v1/video-sessions?${archiveParams}`),
-    ]);
-    recentSessions = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
-    archivedSessions = (archivePayload.items || []).filter((session) => ["saved", "sentry"].includes(session.clip_type));
-    reconcileRecordingSelection();
-    state.total = archivedSessions.length;
-    renderArchiveTimeline();
-    $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
-    $("load-more").hidden = true;
-    if (!silent) setNotice(archivedSessions.length === 0 ? "当前筛选条件下没有已保存或哨兵录像" : "", false, false);
-  } catch (error) {
-    setNotice(error.message, true);
-  } finally {
-    state.loading = false;
-  }
+    try {
+      const archiveParams = new URLSearchParams({ limit: "1000" });
+      for (const id of ["clip-type", "date", "event"]) {
+        const value = $(id).value.trim();
+        if (value) archiveParams.set(id.replace("-", "_"), value);
+      }
+      const [recentPayload, archivePayload] = await Promise.all([
+        request("/api/v1/video-sessions?clip_type=recent&limit=1000"),
+        request(`/api/v1/video-sessions?${archiveParams}`),
+      ]);
+      recentSessions = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
+      archivedSessions = (archivePayload.items || []).filter((session) => ["saved", "sentry"].includes(session.clip_type));
+      reconcileRecordingSelection();
+      state.total = archivedSessions.length;
+      renderArchiveTimeline();
+      $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
+      $("load-more").hidden = true;
+      if (!silent) setNotice(archivedSessions.length === 0 ? "当前筛选条件下没有已保存或哨兵录像" : "", false, false);
+    } catch (error) {
+      setNotice(error.message, true);
+    } finally {
+      state.loading = false;
+    }
+  });
 }
 
 function renderArchiveTimeline() {
@@ -2581,6 +2837,7 @@ async function loadSessionPosition(position, autoplay) {
     hidePlayerMessage();
     activeMomentIndex = selection.momentIndex;
     activeVideo = selection.video;
+    setPlaybackTelemetryVideo(activeVideo, token);
     if (usesServerTranscode()) return await loadServerSingle(selection, autoplay, token);
     $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
     $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
@@ -2640,6 +2897,7 @@ async function loadCompositePosition(position, autoplay, token) {
   const masterVideo = layoutVideos.find((video) => video.camera === "front") || layoutVideos[0];
   activeCamera = masterVideo.camera;
   activeVideo = masterVideo;
+  setPlaybackTelemetryVideo(activeVideo, token);
   if (usesServerComposite()) {
     return await loadServerComposite(selection, layout, masterVideo, autoplay, token);
   }
@@ -2755,6 +3013,7 @@ async function loadServerSingle(selection, autoplay, token) {
   }
   if (token !== loadToken) return false;
   activeVideo = selection.video;
+  setPlaybackTelemetryVideo(activeVideo, token);
   const localTime = Math.max(0, selection.localTime);
   sessionVideo.currentTime = Number.isFinite(sessionVideo.duration)
     ? Math.min(localTime, Math.max(0, sessionVideo.duration-.05))
@@ -2966,7 +3225,84 @@ function updateUnifiedTimeline() {
   requestedPosition = Math.min(position, activeSession.duration_seconds);
   $("session-timeline").value = String(requestedPosition);
   $("current-time").textContent = formatDuration(requestedPosition);
+  renderPlaybackTelemetry();
   if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) synchronizeCompositeTracks();
+}
+
+function setPlaybackTelemetryVideo(video, token) {
+  telemetryAbortController?.abort();
+  telemetryAbortController = null;
+  activeTelemetry = null;
+  if (!video?.id) {
+    renderPlaybackTelemetry();
+    return;
+  }
+  const cached = telemetryByVideo.get(video.id);
+  if (cached) {
+    activeTelemetry = cached;
+    renderPlaybackTelemetry();
+    return;
+  }
+  const controller = new AbortController();
+  telemetryAbortController = controller;
+  renderPlaybackTelemetry();
+  request(`/api/v1/videos/${encodeURIComponent(video.id)}/sei`, {signal:controller.signal, loading:false}).then((timeline) => {
+    if (controller.signal.aborted || token !== loadToken || activeVideo?.id !== video.id) return;
+    if (telemetryByVideo.size >= 24) telemetryByVideo.clear();
+    telemetryByVideo.set(video.id, timeline);
+    activeTelemetry = timeline;
+    renderPlaybackTelemetry();
+  }).catch((error) => {
+    if (controller.signal.aborted || token !== loadToken || activeVideo?.id !== video.id) return;
+    activeTelemetry = {available:false, message:`Tesla SEI 信息暂不可用：${error.message}`, samples:[]};
+    renderPlaybackTelemetry();
+  });
+}
+
+function renderPlaybackTelemetry() {
+  const container = $("playback-telemetry");
+  if (!activeVideo || playerModal.hidden) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  $("playback-timestamp").textContent = formatRecordingTimestamp(activeVideo.recorded_at, Math.max(0, sessionVideo.currentTime || 0));
+  if (!activeTelemetry) {
+    $("playback-sei").textContent = "正在读取 Tesla SEI 信息…";
+    return;
+  }
+  if (!activeTelemetry.available) {
+    $("playback-sei").textContent = activeTelemetry.message || "该录像没有 Tesla SEI 信息";
+    return;
+  }
+  const samples = Array.isArray(activeTelemetry.samples) ? activeTelemetry.samples : [];
+  const currentMS = Math.max(0, Math.round((sessionVideo.currentTime || 0)*1000));
+  let selected = samples[0];
+  for (const sample of samples) {
+    if (Number(sample.offset_ms || 0) > currentMS) break;
+    selected = sample;
+  }
+  $("playback-sei").textContent = selected?.text || "该录像没有可显示的 Tesla SEI 字段";
+}
+
+function formatRecordingTimestamp(recordedAt, seconds) {
+  const base = new Date(recordedAt);
+  if (!Number.isFinite(base.getTime())) return "录像时间未知";
+  const source = String(recordedAt || "");
+  const match = source.match(/([+-])(\d{2}):(\d{2})$/);
+  let offsetMS = 0;
+  if (match) {
+    const direction = match[1] === "+" ? 1 : -1;
+    offsetMS = direction*(Number(match[2])*60+Number(match[3]))*60*1000;
+  }
+  const value = new Date(base.getTime()+Math.max(0, seconds)*1000+offsetMS);
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth()+1).padStart(2, "0");
+  const day = String(value.getUTCDate()).padStart(2, "0");
+  const hour = String(value.getUTCHours()).padStart(2, "0");
+  const minute = String(value.getUTCMinutes()).padStart(2, "0");
+  const second = String(value.getUTCSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 function advanceToNextSegment() {
@@ -3050,7 +3386,9 @@ function openExportModal() {
   $("export-duration").value = Math.min(60, Math.max(1, activeSession.duration_seconds-position)).toFixed(1);
   $("export-layout").value = isCompositeDisplay(activeDisplay) ? activeDisplay : "single";
   $("export-camera").value = activeCamera;
-  $("export-quality").value = effectivePlaybackQuality === "original" ? "original" : effectivePlaybackQuality;
+  $("export-quality").value = effectivePlaybackQuality === "original" && !isCompositeDisplay(activeDisplay) ? "original" : "high";
+  $("export-burn-timestamp").checked = true;
+  $("export-burn-sei").checked = false;
   resetSourceExportSelection();
   setExportMode("clip");
   renderExportOptions();
@@ -3087,7 +3425,7 @@ function setExportMode(mode) {
   $("export-clip-options").hidden = source;
   $("export-source-options").hidden = !source;
   $("export-source-direct").hidden = !source;
-  $("export-title").textContent = source ? "导出原始片段" : "导出剪辑视频";
+  $("export-title").textContent = source ? "导出多路原画" : "导出剪辑视频";
   if (source) {
     if (sourceExportSessionID !== activeSession?.id) resetSourceExportSelection();
     renderSourceExportOptions();
@@ -3120,8 +3458,8 @@ function renderExportOptions() {
   originalOption.disabled = $("export-layout").value !== "single";
   if (originalOption.disabled && $("export-quality").value === "original") $("export-quality").value = "high";
   $("export-quality-help").textContent = $("export-layout").value === "single"
-    ? "单路可选择源分辨率原画；跨分钟或精确裁剪时仍会进行高质量重新编码。"
-    : "多路必须重新合成编码，最高输出 1080p。";
+    ? "高保真合成使用恒定质量硬编；单路原画保留源分辨率，但跨分钟或精确裁剪仍需重新编码。"
+    : "高保真多路合成会导出 H.265（HEVC）MP4，以避开 RKMPP H.264 多路残块；请使用支持 HEVC 的本地播放器。需要最广兼容或与网页原画完全一致时，请切换到“多路原画”下载原始文件和离线浏览页。";
 }
 
 function renderSourceExportOptions() {
@@ -3237,21 +3575,17 @@ function selectSourceCamerasForCurrentLayout() {
   renderSourceExportOptions();
 }
 
-async function downloadSourceFiles() {
+function downloadSourceFiles() {
   const videos = selectedSourceVideos();
   $("export-error").textContent = "";
   if (videos.length === 0) {
     $("export-error").textContent = "请至少选择一个包含录像的分钟和摄像头视角";
     return;
   }
-  const confirmed = await askConfirmation(
-    "分别下载原视频",
-    `将同时开始下载 ${videos.length} 个原始 MP4 文件。浏览器可能要求允许此站点下载多个文件。`,
-    "开始下载", false,
-  );
-  if (!confirmed) return;
   const button = $("export-source-direct");
   button.disabled = true;
+  button.classList.add("is-loading");
+  button.setAttribute("aria-busy", "true");
   const anchors = [];
   videos.forEach((video) => {
     const anchor = document.createElement("a");
@@ -3263,8 +3597,12 @@ async function downloadSourceFiles() {
     anchor.click();
   });
   window.setTimeout(() => anchors.forEach((anchor) => anchor.remove()), 0);
-  window.setTimeout(() => { button.disabled = false; }, 1200);
-  $("export-error").textContent = `已向浏览器发起 ${videos.length} 个原始 MP4 下载请求。`;
+  window.setTimeout(() => {
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    button.removeAttribute("aria-busy");
+  }, 1200);
+  $("export-error").textContent = `已立即向浏览器发起 ${videos.length} 个原始 MP4 下载请求。浏览器如询问，请允许多个文件下载；若选中文件较多，建议使用“打包多路原画”后下载一个压缩包。`;
 }
 
 async function createExportTask(event) {
@@ -3313,7 +3651,10 @@ async function createExportTask(event) {
     showPlayerMessage("导出任务已接管硬件媒体资源，当前播放已停止");
     exportTask = await request("/api/v1/exports", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({mode:"clip", session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value}),
+      body: JSON.stringify({
+        mode:"clip", session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
+        burn_timestamp:$("export-burn-timestamp").checked, burn_sei:$("export-burn-sei").checked,
+      }),
     });
     renderExportTask(exportTask);
     scheduleExportPoll(1000);
@@ -3374,7 +3715,7 @@ function renderExportTask(task) {
 
 function updateExportSubmitLabel(task = exportTask) {
   const source = (task?.request?.mode || exportMode) === "source";
-  $("export-submit").textContent = task?.state === "completed" ? (source ? "再次打包" : "再次导出") : (source ? "打包原始片段" : "开始导出");
+  $("export-submit").textContent = task?.state === "completed" ? (source ? "再次打包" : "再次导出") : (source ? "打包多路原画" : "开始导出");
 }
 
 function resetExportTaskUI() {
@@ -3576,6 +3917,9 @@ function hidePlayerMessage() { $("player-message").hidden = true; }
 
 function closePlayerMedia() {
   loadToken++;
+  telemetryAbortController?.abort();
+  telemetryAbortController = null;
+  activeTelemetry = null;
   timelinePositionRequestID++;
   timelinePositionPending = false;
   pauseCompositeTracks();
@@ -3593,6 +3937,7 @@ function closePlayerMedia() {
   $("segment-markers").replaceChildren();
   $("event-marker-layer").replaceChildren();
   hidePlayerMessage();
+  $("playback-telemetry").hidden = true;
   stopPlaybackDiagnostics();
 }
 

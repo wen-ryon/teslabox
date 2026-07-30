@@ -125,6 +125,87 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 	if releases.Load() != 1 || task.ProgressPercent != 100 || !task.DownloadReady {
 		t.Fatalf("releases = %d, task = %+v", releases.Load(), task)
 	}
+	if got, want := ExportDownloadFilename(task), "export-前视-20260720-120000.mp4"; got != want {
+		t.Fatalf("ExportDownloadFilename() = %q, want %q", got, want)
+	}
+}
+
+func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "export-state.json")
+	exporter, err := NewExporter(&fakeExportRunner{}, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go exporter.Run(ctx)
+	task, err := exporter.Create(validExportRequest(), validExportSource(), func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for task.State != ExportCompleted {
+		if time.Now().After(deadline) {
+			t.Fatalf("task state = %s", task.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+		task, err = exporter.Task(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := exporter.UpdateSettings(ExportSettings{RetainCount: 3}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewExporter(&fakeExportRunner{}, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := reloaded.History()
+	if len(history) != 1 || history[0].ID != task.ID || reloaded.Settings().RetainCount != 3 {
+		t.Fatalf("history = %#v, settings = %#v", history, reloaded.Settings())
+	}
+	if err := reloaded.Consume(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.History()) != 0 {
+		t.Fatalf("history after consume = %#v", reloaded.History())
+	}
+	if _, err := os.Stat(filepath.Join(directory, task.ID+".mp4")); !os.IsNotExist(err) {
+		t.Fatalf("completed output was not removed: %v", err)
+	}
+}
+
+func TestExportOverlaySubtitlesAreEscapedAndMapped(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".task.tmp.ass")
+	hasSubtitles, err := writeOverlaySubtitles(path, []ExportOverlayCue{{
+		Start: 0, End: time.Second, Timestamp: "2026-07-30 12:00:00", SEIText: "档位 D\n时速 20.0 km/h {test}",
+	}}, true, true)
+	if err != nil || !hasSubtitles {
+		t.Fatalf("writeOverlaySubtitles() = %t, %v", hasSubtitles, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "0:00:00.00,0:00:01.00,Timestamp") || !strings.Contains(string(content), "时速 20.0 km/h \\{test\\}") || !strings.Contains(string(content), "档位 D\\N") {
+		t.Fatalf("subtitle content = %s", content)
+	}
+	args, err := exportArgs(validExportRequest(), validExportSource(), "/exports/task.mp4", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "subtitles=filename='") || !strings.Contains(joined, "-map [overlay]") {
+		t.Fatalf("overlay args = %s", joined)
+	}
 }
 
 func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
@@ -198,16 +279,20 @@ func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
 		contents[item.Name] = string(body)
 	}
 	if contents[filepath.Base(firstPath)] != "front-source" || contents[filepath.Base(secondPath)] != "back-source" ||
-		!strings.Contains(contents["manifest.json"], `"moment_id": "minute-1"`) {
+		!strings.Contains(contents["manifest.json"], `"moment_id": "minute-1"`) ||
+		!strings.Contains(contents["manifest.json"], `"archive_name": "2026-07-20_10-00-00-front.mp4"`) ||
+		!strings.Contains(contents["player.html"], "TeslaBox 原画多路浏览包") ||
+		!strings.Contains(contents["player.html"], "archive_name") {
 		t.Fatalf("archive contents = %#v", contents)
 	}
 }
 
-func TestExporterFirstCreateRemovesOnlyManagedArtifacts(t *testing.T) {
+func TestExporterFirstCreateRemovesOnlyManagedTemporaryArtifacts(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	managed := []string{"0123456789abcdef01234567.mp4", ".0123456789abcdef01234567.tmp.mp4"}
-	for _, name := range append(managed, "keep.mp4") {
+	temporary := ".0123456789abcdef01234567.tmp.mp4"
+	completed := "0123456789abcdef01234567.mp4"
+	for _, name := range []string{temporary, completed, "keep.mp4"} {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte("video"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -221,10 +306,11 @@ func TestExporterFirstCreateRemovesOnlyManagedArtifacts(t *testing.T) {
 	if _, err := exporter.Create(validExportRequest(), validExportSource(), func() {}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range managed {
-		if _, err := os.Stat(filepath.Join(directory, name)); !os.IsNotExist(err) {
-			t.Fatalf("managed artifact %q was not removed: %v", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(directory, temporary)); !os.IsNotExist(err) {
+		t.Fatalf("temporary artifact %q was not removed: %v", temporary, err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, completed)); err != nil {
+		t.Fatalf("completed artifact %q was removed: %v", completed, err)
 	}
 	if _, err := os.Stat(filepath.Join(directory, "keep.mp4")); err != nil {
 		t.Fatalf("unmanaged file was removed: %v", err)
@@ -357,7 +443,7 @@ func TestValidateExportRejectsOriginalComposite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateExport(request, validExportSource(), time.Minute); err == nil || !strings.Contains(err.Error(), "原画导出仅支持单路") {
+	if err := validateExport(request, validExportSource(), time.Minute); err == nil || !strings.Contains(err.Error(), "原画 MP4 仅支持单路") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -390,7 +476,7 @@ func TestValidateExportRejectsTooManyHardwareDecoderInputs(t *testing.T) {
 	}
 }
 
-func TestExportHighLayoutsUsePlaybackAspectWithoutPadding(t *testing.T) {
+func TestExportHighLayoutsUseHEVCEncoderWithHardwarePipeline(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		layout string
@@ -421,10 +507,65 @@ func TestExportHighLayoutsUsePlaybackAspectWithoutPadding(t *testing.T) {
 					t.Fatalf("args do not contain %q: %s", expected, joined)
 				}
 			}
-			if strings.Contains(joined, "pad=") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
-				t.Fatalf("导出布局不应补黑边: %s", joined)
+			if !strings.Contains(joined, "-hwaccel rkmpp") || !strings.Contains(joined, "-hwaccel_output_format drm_prime") || !strings.Contains(joined, "hwdownload,format=nv12") {
+				t.Fatalf("高保真多路导出必须保持 MPP 硬件解码和 RGA 缩放: %s", joined)
+			}
+			if !strings.Contains(joined, "pad=w=ceil(iw/16)*16:h=ceil(ih/16)*16:x=0:y=0:color=black") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
+				t.Fatalf("高保真 HEVC 导出必须保持内容画布并按 MPP 边界补齐: %s", joined)
+			}
+			if !strings.Contains(joined, "-c:v hevc_rkmpp") || !strings.Contains(joined, "-tag:v hvc1") {
+				t.Fatalf("高保真多路导出必须改用 HEVC: %s", joined)
 			}
 		})
+	}
+}
+
+func TestExportHighUsesConstrainedQualityAndReservesSpace(t *testing.T) {
+	t.Parallel()
+	request, err := normalizeExportRequest(ExportRequest{
+		SessionID: "session", DurationSeconds: 60, Layout: "composite6", Quality: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := exportArgs(request, sourceForCameras(request.Cameras), "/exports/high.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{"-c:v hevc_rkmpp", "-tag:v hvc1", "-rc_mode CQP", "-qp_init 18", "-qp_min 16", "-qp_max 20"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("high-quality args do not contain %q: %s", expected, joined)
+		}
+	}
+	if strings.Contains(joined, "-b:v") || strings.Contains(joined, "-maxrate") {
+		t.Fatalf("高保真 HEVC 导出不应被 CBR 限制: %s", joined)
+	}
+	if got, want := EstimateExportBytes(request), uint64(552_000_000); got != want {
+		t.Fatalf("EstimateExportBytes() = %d, want %d", got, want)
+	}
+}
+
+func TestExportHighSingleKeepsRKMPPPath(t *testing.T) {
+	t.Parallel()
+	request, err := normalizeExportRequest(ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := exportArgs(request, sourceForCameras(request.Cameras), "/exports/high-single.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{"-hwaccel rkmpp", "-c:v h264_rkmpp", "scale_rkrga", "-rc_mode CQP", "-qp_init 18"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("单路高保真参数缺少 %q: %s", expected, joined)
+		}
+	}
+	if strings.Contains(joined, "hevc_rkmpp") {
+		t.Fatalf("单路高保真不应被多路 HEVC 修复路径影响: %s", joined)
 	}
 }
 
