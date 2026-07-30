@@ -277,6 +277,7 @@ $("export-source-all").addEventListener("click", selectAllSourceMoments);
 $("export-source-clear").addEventListener("click", clearSourceMomentSelection);
 $("export-source-cameras-all").addEventListener("click", selectAllSourceCameras);
 $("export-source-cameras-layout").addEventListener("click", selectSourceCamerasForCurrentLayout);
+$("export-source-direct").addEventListener("click", downloadSourceFiles);
 document.querySelectorAll("[data-close-export]").forEach((element) => element.addEventListener("click", closeExportModal));
 refreshPlaybackQualityControl();
 $("player-quality").addEventListener("change", (event) => setPlaybackQuality(event.target.value));
@@ -3085,6 +3086,7 @@ function setExportMode(mode) {
   $("export-mode-source").setAttribute("aria-selected", String(source));
   $("export-clip-options").hidden = source;
   $("export-source-options").hidden = !source;
+  $("export-source-direct").hidden = !source;
   $("export-title").textContent = source ? "导出原始片段" : "导出剪辑视频";
   if (source) {
     if (sourceExportSessionID !== activeSession?.id) resetSourceExportSelection();
@@ -3181,17 +3183,27 @@ function sourceExportFileSummary() {
   const byCamera = new Map();
   let count = 0;
   let bytes = 0;
-  if (!activeSession) return {count, bytes, byCamera};
+  selectedSourceVideos().forEach((video) => {
+    count++;
+    bytes += Math.max(0, Number(video.size || 0));
+    byCamera.set(video.camera, (byCamera.get(video.camera) || 0)+1);
+  });
+  return {count, bytes, byCamera};
+}
+
+function selectedSourceVideos() {
+  if (!activeSession) return [];
+  const selected = [];
+  const seen = new Set();
   activeSession.moments?.forEach((moment) => {
     if (!sourceExportMomentIDs.has(moment.id)) return;
     (moment.videos || []).forEach((video) => {
-      if (!sourceExportCameras.has(video.camera)) return;
-      count++;
-      bytes += Math.max(0, Number(video.size || 0));
-      byCamera.set(video.camera, (byCamera.get(video.camera) || 0)+1);
+      if (!sourceExportCameras.has(video.camera) || !video.id || seen.has(video.id)) return;
+      seen.add(video.id);
+      selected.push(video);
     });
   });
-  return {count, bytes, byCamera};
+  return selected;
 }
 
 function selectCurrentSourceMoment() {
@@ -3223,6 +3235,36 @@ function selectSourceCamerasForCurrentLayout() {
   const cameras = isCompositeDisplay(activeDisplay) ? compositeLayouts[activeDisplay]?.cameras : [activeCamera];
   (cameras || []).forEach((camera) => sourceExportCameras.add(camera));
   renderSourceExportOptions();
+}
+
+async function downloadSourceFiles() {
+  const videos = selectedSourceVideos();
+  $("export-error").textContent = "";
+  if (videos.length === 0) {
+    $("export-error").textContent = "请至少选择一个包含录像的分钟和摄像头视角";
+    return;
+  }
+  const confirmed = await askConfirmation(
+    "分别下载原视频",
+    `将同时开始下载 ${videos.length} 个原始 MP4 文件。浏览器可能要求允许此站点下载多个文件。`,
+    "开始下载", false,
+  );
+  if (!confirmed) return;
+  const button = $("export-source-direct");
+  button.disabled = true;
+  const anchors = [];
+  videos.forEach((video) => {
+    const anchor = document.createElement("a");
+    anchor.href = `/api/v1/videos/${encodeURIComponent(video.id)}/download`;
+    anchor.download = "";
+    anchor.hidden = true;
+    document.body.append(anchor);
+    anchors.push(anchor);
+    anchor.click();
+  });
+  window.setTimeout(() => anchors.forEach((anchor) => anchor.remove()), 0);
+  window.setTimeout(() => { button.disabled = false; }, 1200);
+  $("export-error").textContent = `已向浏览器发起 ${videos.length} 个原始 MP4 下载请求。`;
 }
 
 async function createExportTask(event) {
@@ -3325,6 +3367,7 @@ function renderExportTask(task) {
   $("export-download").hidden = task.state !== "completed" || !task.download_ready;
   $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";
   $("export-download").textContent = source ? "下载压缩包" : "下载视频";
+  $("export-source-direct").hidden = !source;
   $("export-submit").disabled = running;
   updateExportSubmitLabel(task);
 }
@@ -3341,6 +3384,7 @@ function resetExportTaskUI() {
   $("export-download").hidden = true;
   $("export-download").href = "#";
   $("export-download").textContent = "下载视频";
+  $("export-source-direct").hidden = exportMode !== "source";
   $("export-submit").disabled = false;
   updateExportSubmitLabel(null);
 }

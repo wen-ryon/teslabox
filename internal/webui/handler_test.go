@@ -131,6 +131,8 @@ func TestHandlerServesCustomExportWorkflow(t *testing.T) {
 		"createExportTask", `request("/api/v1/exports"`, "scheduleExportPoll", "cancelExportTask",
 		"start_seconds", "duration_seconds", "releaseVideoElement(sessionVideo)",
 		`layout === "single"`, "originalOption.disabled", "layout, cameras",
+		"downloadSourceFiles", "selectedSourceVideos", "/api/v1/videos/${encodeURIComponent(video.id)}/download",
+		"浏览器可能要求允许此站点下载多个文件",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("自定义导出脚本缺少标记 %q", marker)
