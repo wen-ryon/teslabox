@@ -351,6 +351,7 @@ input:not([type="range"]):focus, select:focus { border-color: var(--accent); box
 .media-apply-actions .inline-check { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--ui-small-font); }
 .media-apply-actions input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .action-modal { position: fixed; z-index: 60; inset: 0; display: grid; padding: 18px; place-items: center; }
+#confirm-modal { z-index: 70; }
 .action-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.86); backdrop-filter: blur(7px); }
 .action-modal-card { position: relative; width: min(450px,100%); padding: 26px; border: 1px solid var(--line); border-radius: 19px; background: #080808; box-shadow: var(--shadow); }
 .action-modal-card h2 { margin-bottom: 10px; font-size: 27px; }

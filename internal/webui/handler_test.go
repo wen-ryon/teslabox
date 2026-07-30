@@ -152,6 +152,7 @@ func TestHandlerServesCompositeLayoutGeometry(t *testing.T) {
 	for _, marker := range []string{
 		`.composite-grid[data-layout="composite4b"]`, `grid-template-rows: 3fr 1fr`,
 		`.composite-grid[data-layout="composite3"]`, `grid-template-rows: 2fr 1fr`, `width: 100vw !important`,
+		`#confirm-modal { z-index: 70; }`,
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("播放器布局样式缺少标记 %q", marker)
