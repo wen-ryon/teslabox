@@ -1,11 +1,14 @@
 package media
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -34,16 +37,29 @@ const (
 	ExportCanceled         ExportState = "canceled"
 	maxExportHistory                   = 8
 	maxExportDecoderInputs             = 12
+	maxSourceExportFiles               = 120
+	maxSourceExportBytes   uint64      = 4 * 1024 * 1024 * 1024
+	maxSourceExportHistory             = 2
+)
+
+// ExportMode 标识导出任务是重新编码剪辑还是归档原始片段。
+type ExportMode string
+
+const (
+	ExportModeClip   ExportMode = "clip"
+	ExportModeSource ExportMode = "source"
 )
 
 // ExportRequest 只接受结构化选项，避免把 FFmpeg 参数暴露给客户端。
 type ExportRequest struct {
-	SessionID       string   `json:"session_id"`
-	StartSeconds    float64  `json:"start_seconds"`
-	DurationSeconds float64  `json:"duration_seconds"`
-	Layout          string   `json:"layout"`
-	Cameras         []string `json:"cameras"`
-	Quality         string   `json:"quality"`
+	Mode            ExportMode `json:"mode,omitempty"`
+	SessionID       string     `json:"session_id"`
+	MomentIDs       []string   `json:"moment_ids,omitempty"`
+	StartSeconds    float64    `json:"start_seconds"`
+	DurationSeconds float64    `json:"duration_seconds"`
+	Layout          string     `json:"layout"`
+	Cameras         []string   `json:"cameras"`
+	Quality         string     `json:"quality"`
 }
 
 // ExportVideo 是已通过快照边界校验的单个输入片段。
@@ -54,11 +70,22 @@ type ExportVideo struct {
 	Duration   float64
 }
 
+// SourceExportFile 是已通过快照边界校验、可直接归档的原始录像文件。
+type SourceExportFile struct {
+	MomentID   string
+	Camera     string
+	Name       string
+	Path       string
+	RecordedAt time.Time
+	Size       uint64
+}
+
 // ExportSource 固定任务创建时的只读快照和完整录像时间轴。
 type ExportSource struct {
 	SessionStart time.Time
 	SessionEnd   time.Time
 	Videos       []ExportVideo
+	SourceFiles  []SourceExportFile
 }
 
 // ExportTask 是不包含板端文件路径的任务状态。
@@ -73,6 +100,7 @@ type ExportTask struct {
 	Error           string        `json:"error,omitempty"`
 	DownloadReady   bool          `json:"download_ready"`
 	EstimatedBytes  uint64        `json:"estimated_bytes"`
+	FileCount       int           `json:"file_count,omitempty"`
 }
 
 // ExportConfig 限制导出路径、队列和单任务资源占用。
@@ -197,7 +225,7 @@ func (e *Exporter) Create(request ExportRequest, source ExportSource, release fu
 	safeRelease := func() { releaseOnce.Do(release) }
 	task := ExportTask{
 		ID: id, State: ExportQueued, Request: request, CreatedAt: time.Now(),
-		EstimatedBytes: EstimateExportBytes(request),
+		EstimatedBytes: estimateExportBytes(request, source), FileCount: len(source.SourceFiles),
 	}
 	job := exportJob{id: id, request: request, source: source, release: safeRelease}
 	e.mu.Lock()
@@ -255,6 +283,7 @@ func (e *Exporter) Task(id string) (ExportTask, error) {
 		return ExportTask{}, ErrExportNotFound
 	}
 	task.Request.Cameras = slices.Clone(task.Request.Cameras)
+	task.Request.MomentIDs = slices.Clone(task.Request.MomentIDs)
 	return task, nil
 }
 
@@ -300,8 +329,8 @@ func (e *Exporter) Cancel(id string) (ExportTask, error) {
 	if release != nil {
 		release()
 	}
-	_ = os.Remove(e.outputPath(id))
-	_ = os.Remove(e.tempPath(id))
+	_ = os.Remove(e.outputPathForTask(task))
+	_ = os.Remove(e.tempPathForTask(task))
 	return task, nil
 }
 
@@ -314,7 +343,7 @@ func (e *Exporter) Open(id string) (*os.File, ExportTask, error) {
 	if task.State != ExportCompleted || !task.DownloadReady {
 		return nil, task, errors.New("导出文件尚未就绪")
 	}
-	file, err := os.Open(e.outputPath(id))
+	file, err := os.Open(e.outputPathForTask(task))
 	return file, task, err
 }
 
@@ -332,10 +361,7 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		e.mu.Unlock()
 		return
 	}
-	timeout := time.Duration(job.request.DurationSeconds*3*float64(time.Second)) + time.Minute
-	if timeout < 2*time.Minute {
-		timeout = 2 * time.Minute
-	}
+	timeout := exportTimeout(job.request, job.source)
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	e.cancels[job.id] = cancel
 	now := time.Now()
@@ -351,7 +377,23 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		e.mu.Unlock()
 	}()
 
-	args, err := exportArgs(job.request, job.source, e.tempPath(job.id))
+	if job.request.Mode == ExportModeSource {
+		err := writeSourceArchive(ctx, job.source, e.tempPathForTask(task), func(progress int) {
+			e.updateProgress(job.id, progress)
+		})
+		if err != nil {
+			e.finishJob(job.id, task, err)
+			return
+		}
+		if err = os.Rename(e.tempPathForTask(task), e.outputPathForTask(task)); err != nil {
+			e.finishJob(job.id, task, err)
+			return
+		}
+		e.finishJob(job.id, task, nil)
+		return
+	}
+
+	args, err := exportArgs(job.request, job.source, e.tempPathForTask(task))
 	if err == nil {
 		err = e.runner.RunProgress(ctx, e.config.FFmpegPath, args, func(position time.Duration) {
 			progress := min(99, max(0, int(position.Seconds()/job.request.DurationSeconds*100)))
@@ -359,17 +401,21 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		})
 	}
 	if err == nil {
-		err = os.Rename(e.tempPath(job.id), e.outputPath(job.id))
+		err = os.Rename(e.tempPathForTask(task), e.outputPathForTask(task))
 	}
+	e.finishJob(job.id, task, err)
+}
+
+func (e *Exporter) finishJob(id string, task ExportTask, err error) {
 	if err != nil {
-		_ = os.Remove(e.tempPath(job.id))
+		_ = os.Remove(e.tempPathForTask(task))
 		if !errors.Is(err, context.Canceled) {
-			e.logger.Warn("视频导出任务失败", "task_id", job.id, "error", err)
+			e.logger.Warn("视频导出任务失败", "task_id", id, "error", err)
 		}
 	}
 
 	e.mu.Lock()
-	task = e.tasks[job.id]
+	task = e.tasks[id]
 	finished := time.Now()
 	if task.State != ExportCanceled {
 		if err != nil {
@@ -381,7 +427,7 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 			task.DownloadReady = true
 		}
 		task.CompletedAt = &finished
-		e.tasks[job.id] = task
+		e.tasks[id] = task
 	}
 	e.mu.Unlock()
 }
@@ -435,18 +481,37 @@ func (e *Exporter) pruneFinished() {
 		}
 	}
 	slices.SortFunc(finished, func(left, right ExportTask) int { return right.CreatedAt.Compare(left.CreatedAt) })
-	if len(finished) <= maxExportHistory {
+	staleByID := make(map[string]ExportTask)
+	if len(finished) > maxExportHistory {
+		for _, task := range finished[maxExportHistory:] {
+			staleByID[task.ID] = task
+		}
+	}
+	sourceKept := 0
+	for _, task := range finished {
+		if task.Request.Mode != ExportModeSource {
+			continue
+		}
+		sourceKept++
+		if sourceKept > maxSourceExportHistory {
+			staleByID[task.ID] = task
+		}
+	}
+	if len(staleByID) == 0 {
 		e.mu.Unlock()
 		return
 	}
-	stale := finished[maxExportHistory:]
+	stale := make([]ExportTask, 0, len(staleByID))
+	for _, task := range staleByID {
+		stale = append(stale, task)
+	}
 	for _, task := range stale {
 		delete(e.tasks, task.ID)
 	}
 	e.mu.Unlock()
 	for _, task := range stale {
-		_ = os.Remove(e.outputPath(task.ID))
-		_ = os.Remove(e.tempPath(task.ID))
+		_ = os.Remove(e.outputPathForTask(task))
+		_ = os.Remove(e.tempPathForTask(task))
 	}
 }
 
@@ -455,7 +520,24 @@ func (e *Exporter) tempPath(id string) string {
 	return filepath.Join(e.config.OutputDir, "."+id+".tmp.mp4")
 }
 
+func (e *Exporter) outputPathForTask(task ExportTask) string {
+	if task.Request.Mode == ExportModeSource {
+		return filepath.Join(e.config.OutputDir, task.ID+".zip")
+	}
+	return e.outputPath(task.ID)
+}
+
+func (e *Exporter) tempPathForTask(task ExportTask) string {
+	if task.Request.Mode == ExportModeSource {
+		return filepath.Join(e.config.OutputDir, "."+task.ID+".tmp.zip")
+	}
+	return e.tempPath(task.ID)
+}
+
 func validateExport(request ExportRequest, source ExportSource, maximum time.Duration) error {
+	if request.Mode == ExportModeSource {
+		return validateSourceExport(request, source)
+	}
 	if strings.TrimSpace(request.SessionID) == "" || source.SessionStart.IsZero() || !source.SessionEnd.After(source.SessionStart) {
 		return &InputError{Message: "导出录像不存在"}
 	}
@@ -513,6 +595,17 @@ func exportDecoderInputCount(request ExportRequest, source ExportSource) int {
 }
 
 func normalizeExportRequest(request ExportRequest) (ExportRequest, error) {
+	mode := request.Mode
+	if mode == "" {
+		mode = ExportModeClip
+	}
+	request.Mode = mode
+	if mode == ExportModeSource {
+		return normalizeSourceExportRequest(request)
+	}
+	if mode != ExportModeClip {
+		return ExportRequest{}, &InputError{Message: "不支持的导出方式"}
+	}
 	var cameras []string
 	switch request.Layout {
 	case "composite6":
@@ -535,6 +628,68 @@ func normalizeExportRequest(request ExportRequest) (ExportRequest, error) {
 	return request, nil
 }
 
+func normalizeSourceExportRequest(request ExportRequest) (ExportRequest, error) {
+	seenMoments := make(map[string]struct{}, len(request.MomentIDs))
+	momentIDs := make([]string, 0, len(request.MomentIDs))
+	for _, momentID := range request.MomentIDs {
+		momentID = strings.TrimSpace(momentID)
+		if momentID == "" {
+			continue
+		}
+		if _, found := seenMoments[momentID]; found {
+			continue
+		}
+		seenMoments[momentID] = struct{}{}
+		momentIDs = append(momentIDs, momentID)
+	}
+	seenCameras := make(map[string]struct{}, len(request.Cameras))
+	cameras := make([]string, 0, len(request.Cameras))
+	for _, camera := range request.Cameras {
+		if !slices.Contains(knownCameras(), camera) {
+			return ExportRequest{}, &InputError{Message: "包含未知摄像头视角"}
+		}
+		if _, found := seenCameras[camera]; found {
+			continue
+		}
+		seenCameras[camera] = struct{}{}
+		cameras = append(cameras, camera)
+	}
+	request.MomentIDs = momentIDs
+	request.Cameras = cameras
+	request.Layout = ""
+	request.Quality = ""
+	request.StartSeconds = 0
+	request.DurationSeconds = 0
+	return request, nil
+}
+
+func validateSourceExport(request ExportRequest, source ExportSource) error {
+	if strings.TrimSpace(request.SessionID) == "" || len(request.MomentIDs) == 0 {
+		return &InputError{Message: "请至少选择一个原始录像分钟"}
+	}
+	if len(request.Cameras) == 0 {
+		return &InputError{Message: "请至少选择一个摄像头视角"}
+	}
+	if len(source.SourceFiles) == 0 {
+		return &InputError{Message: "所选分钟和视角没有可用的原始录像"}
+	}
+	if len(source.SourceFiles) > maxSourceExportFiles {
+		return &InputError{Message: "原始片段过多，请缩短选择范围后重试"}
+	}
+	var total uint64
+	for _, file := range source.SourceFiles {
+		if file.MomentID == "" || !slices.Contains(request.Cameras, file.Camera) ||
+			!isHostOrLinuxAbsolutePath(file.Path) || filepath.Base(file.Name) != file.Name || !strings.HasSuffix(strings.ToLower(file.Name), ".mp4") {
+			return &InputError{Message: "原始录像文件无效"}
+		}
+		if maxSourceExportBytes-total < file.Size {
+			return &InputError{Message: "原始片段过大，请缩短选择范围后重试"}
+		}
+		total += file.Size
+	}
+	return nil
+}
+
 // EstimateExportBytes 按目标码率加封装余量估算空间，避免导出侵占车端录像保留容量。
 func EstimateExportBytes(request ExportRequest) uint64 {
 	bitrateKbps := map[string]uint64{"smooth": 1500, "standard": 3000, "high": 8000, "original": 20000}[request.Quality]
@@ -542,6 +697,25 @@ func EstimateExportBytes(request ExportRequest) uint64 {
 		return 0
 	}
 	return uint64(float64(bitrateKbps*1000)/8*request.DurationSeconds*1.15 + 0.5)
+}
+
+// EstimateSourceExportBytes 返回原始片段打包时需要预留的目标文件空间。
+func EstimateSourceExportBytes(source ExportSource) uint64 {
+	var total uint64
+	for _, file := range source.SourceFiles {
+		if ^uint64(0)-total < file.Size {
+			return ^uint64(0)
+		}
+		total += file.Size
+	}
+	return total
+}
+
+func estimateExportBytes(request ExportRequest, source ExportSource) uint64 {
+	if request.Mode == ExportModeSource {
+		return EstimateSourceExportBytes(source)
+	}
+	return EstimateExportBytes(request)
 }
 
 func knownCameras() []string {
@@ -560,11 +734,161 @@ func isExportArtifact(name string) bool {
 	id := ""
 	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp.mp4") {
 		id = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".tmp.mp4")
+	} else if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp.zip") {
+		id = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".tmp.zip")
 	} else if strings.HasSuffix(name, ".mp4") {
 		id = strings.TrimSuffix(name, ".mp4")
+	} else if strings.HasSuffix(name, ".zip") {
+		id = strings.TrimSuffix(name, ".zip")
 	}
 	decoded, err := hex.DecodeString(id)
 	return err == nil && len(decoded) == 12
+}
+
+func exportTimeout(request ExportRequest, source ExportSource) time.Duration {
+	if request.Mode != ExportModeSource {
+		timeout := time.Duration(request.DurationSeconds*3*float64(time.Second)) + time.Minute
+		return max(timeout, 2*time.Minute)
+	}
+	const minimumSourceWriteRate = 5 * 1024 * 1024
+	timeout := 2*time.Minute + time.Duration(EstimateSourceExportBytes(source)/minimumSourceWriteRate)*time.Second
+	return min(timeout, 30*time.Minute)
+}
+
+type sourceArchiveManifest struct {
+	Format      string                      `json:"format"`
+	ExportedAt  time.Time                   `json:"exported_at"`
+	SourceFiles []sourceArchiveManifestFile `json:"source_files"`
+}
+
+type sourceArchiveManifestFile struct {
+	MomentID   string    `json:"moment_id"`
+	Camera     string    `json:"camera"`
+	Name       string    `json:"name"`
+	RecordedAt time.Time `json:"recorded_at"`
+	Size       uint64    `json:"size"`
+}
+
+func writeSourceArchive(ctx context.Context, source ExportSource, output string, updateProgress func(int)) error {
+	file, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	if err != nil {
+		return fmt.Errorf("创建原始录像压缩包: %w", err)
+	}
+	archive := zip.NewWriter(file)
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		_ = archive.Close()
+		_ = file.Close()
+	}()
+	manifest := sourceArchiveManifest{Format: "teslabox-source-export/v1", ExportedAt: time.Now(), SourceFiles: make([]sourceArchiveManifestFile, 0, len(source.SourceFiles))}
+	for _, sourceFile := range source.SourceFiles {
+		manifest.SourceFiles = append(manifest.SourceFiles, sourceArchiveManifestFile{
+			MomentID: sourceFile.MomentID, Camera: sourceFile.Camera, Name: sourceFile.Name,
+			RecordedAt: sourceFile.RecordedAt, Size: sourceFile.Size,
+		})
+	}
+	manifestBody, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("生成原始录像清单: %w", err)
+	}
+	manifestWriter, err := archive.CreateHeader(&zip.FileHeader{Name: "manifest.json", Method: zip.Store, Modified: manifest.ExportedAt})
+	if err != nil {
+		return fmt.Errorf("写入原始录像清单: %w", err)
+	}
+	if _, err := manifestWriter.Write(manifestBody); err != nil {
+		return fmt.Errorf("写入原始录像清单: %w", err)
+	}
+
+	total := EstimateSourceExportBytes(source)
+	var written uint64
+	usedNames := map[string]int{"manifest.json": 1}
+	buffer := make([]byte, 1024*1024)
+	for _, sourceFile := range source.SourceFiles {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		input, err := os.Open(sourceFile.Path)
+		if err != nil {
+			return fmt.Errorf("打开原始录像: %w", err)
+		}
+		name := uniqueArchiveName(sourceFile.Name, usedNames)
+		header := &zip.FileHeader{Name: name, Method: zip.Store, Modified: sourceFile.RecordedAt}
+		header.SetMode(0o640)
+		entry, createErr := archive.CreateHeader(header)
+		if createErr == nil {
+			_, createErr = copySourceFile(ctx, entry, input, buffer, func(bytes int) {
+				written += uint64(bytes)
+				if total > 0 {
+					updateProgress(min(99, int(written*100/total)))
+				}
+			})
+		}
+		closeErr := input.Close()
+		if createErr != nil {
+			return fmt.Errorf("写入原始录像: %w", createErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("关闭原始录像: %w", closeErr)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return fmt.Errorf("完成原始录像压缩包: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭原始录像压缩包: %w", err)
+	}
+	completed = true
+	return nil
+}
+
+func copySourceFile(ctx context.Context, destination io.Writer, source io.Reader, buffer []byte, onWrite func(int)) (int64, error) {
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		count, readErr := source.Read(buffer)
+		if count > 0 {
+			written, writeErr := destination.Write(buffer[:count])
+			total += int64(written)
+			if written > 0 {
+				onWrite(written)
+			}
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if written != count {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr == io.EOF {
+			return total, nil
+		}
+		if readErr != nil {
+			return total, readErr
+		}
+	}
+}
+
+func uniqueArchiveName(name string, used map[string]int) string {
+	count := used[name]
+	used[name] = count + 1
+	if count == 0 {
+		return name
+	}
+	extension := filepath.Ext(name)
+	base := strings.TrimSuffix(name, extension)
+	for {
+		candidate := fmt.Sprintf("%s-%d%s", base, count+1, extension)
+		if used[candidate] == 0 {
+			used[candidate] = 1
+			return candidate
+		}
+		count++
+	}
 }
 
 func exportArgs(request ExportRequest, source ExportSource, output string) ([]string, error) {

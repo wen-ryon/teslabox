@@ -69,6 +69,10 @@ let mediaThroughputSamples = [];
 let activeCompositeAspect = 0;
 let exportTask = null;
 let exportPollTimer = 0;
+let exportMode = "clip";
+let sourceExportSessionID = "";
+const sourceExportMomentIDs = new Set();
+const sourceExportCameras = new Set();
 let passwordChangeForced = false;
 let updatePollTimer = 0;
 let logsRefreshTimer = 0;
@@ -266,6 +270,13 @@ $("export-open").addEventListener("click", openExportModal);
 $("export-form").addEventListener("submit", createExportTask);
 $("export-cancel").addEventListener("click", cancelExportTask);
 $("export-layout").addEventListener("change", renderExportOptions);
+$("export-mode-clip").addEventListener("click", () => setExportMode("clip"));
+$("export-mode-source").addEventListener("click", () => setExportMode("source"));
+$("export-source-current").addEventListener("click", selectCurrentSourceMoment);
+$("export-source-all").addEventListener("click", selectAllSourceMoments);
+$("export-source-clear").addEventListener("click", clearSourceMomentSelection);
+$("export-source-cameras-all").addEventListener("click", selectAllSourceCameras);
+$("export-source-cameras-layout").addEventListener("click", selectSourceCamerasForCurrentLayout);
 document.querySelectorAll("[data-close-export]").forEach((element) => element.addEventListener("click", closeExportModal));
 refreshPlaybackQualityControl();
 $("player-quality").addEventListener("change", (event) => setPlaybackQuality(event.target.value));
@@ -3024,6 +3035,8 @@ function openExportModal() {
   modal.hidden = false;
   $("export-error").textContent = "";
   if (exportTask && exportTask.request?.session_id === activeSession.id) {
+    restoreExportSelection(exportTask.request);
+    setExportMode(exportTask.request?.mode === "source" ? "source" : "clip");
     renderExportTask(exportTask);
     if (["queued", "running"].includes(exportTask.state)) scheduleExportPoll(0);
     return;
@@ -3037,11 +3050,53 @@ function openExportModal() {
   $("export-layout").value = isCompositeDisplay(activeDisplay) ? activeDisplay : "single";
   $("export-camera").value = activeCamera;
   $("export-quality").value = effectivePlaybackQuality === "original" ? "original" : effectivePlaybackQuality;
+  resetSourceExportSelection();
+  setExportMode("clip");
   renderExportOptions();
   resetExportTaskUI();
 }
 
+function restoreExportSelection(request) {
+  if (!activeSession || request?.mode !== "source") return;
+  sourceExportSessionID = activeSession.id;
+  sourceExportMomentIDs.clear();
+  sourceExportCameras.clear();
+  (request.moment_ids || []).forEach((id) => sourceExportMomentIDs.add(id));
+  (request.cameras || []).forEach((camera) => sourceExportCameras.add(camera));
+}
+
+function resetSourceExportSelection() {
+  if (!activeSession) return;
+  sourceExportSessionID = activeSession.id;
+  sourceExportMomentIDs.clear();
+  sourceExportCameras.clear();
+  const current = activeSession.moments?.[activeMomentIndex] || selectMomentAtPosition(activeSession, currentSessionPosition())?.moment;
+  if (current?.id) sourceExportMomentIDs.add(current.id);
+  const preferred = isCompositeDisplay(activeDisplay) ? compositeLayouts[activeDisplay]?.cameras : [activeCamera];
+  (preferred || []).forEach((camera) => sourceExportCameras.add(camera));
+}
+
+function setExportMode(mode) {
+  exportMode = mode === "source" ? "source" : "clip";
+  const source = exportMode === "source";
+  $("export-mode-clip").classList.toggle("active", !source);
+  $("export-mode-source").classList.toggle("active", source);
+  $("export-mode-clip").setAttribute("aria-selected", String(!source));
+  $("export-mode-source").setAttribute("aria-selected", String(source));
+  $("export-clip-options").hidden = source;
+  $("export-source-options").hidden = !source;
+  $("export-title").textContent = source ? "导出原始片段" : "导出剪辑视频";
+  if (source) {
+    if (sourceExportSessionID !== activeSession?.id) resetSourceExportSelection();
+    renderSourceExportOptions();
+  } else {
+    renderExportOptions();
+  }
+  updateExportSubmitLabel();
+}
+
 function renderExportOptions() {
+  if (!activeSession) return;
   Object.entries(compositeLayouts).forEach(([layout, definition]) => {
     const option = $("export-layout").querySelector(`option[value="${layout}"]`);
     option.disabled = definition.cameras.some((camera) => !activeSession.cameras.includes(camera));
@@ -3067,9 +3122,133 @@ function renderExportOptions() {
     : "多路必须重新合成编码，最高输出 1080p。";
 }
 
+function renderSourceExportOptions() {
+  if (!activeSession) return;
+  const moments = activeSession.moments || [];
+  const momentRoot = $("export-source-moments");
+  momentRoot.replaceChildren();
+  moments.forEach((moment, index) => {
+    const button = document.createElement("button");
+    const selected = sourceExportMomentIDs.has(moment.id);
+    button.type = "button";
+    button.className = "export-source-moment";
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    const available = (moment.videos || []).length;
+    const start = formatDate(moment.recorded_at);
+    const duration = Math.max(1, Math.round(timelineMomentDuration(moment)));
+    const title = document.createElement("strong");
+    title.textContent = `第 ${index+1} 分钟 · ${start}`;
+    const detail = document.createElement("span");
+    detail.textContent = `${available} 路可用 · ${formatDuration(duration)}`;
+    button.append(title, detail);
+    button.addEventListener("click", () => {
+      if (sourceExportMomentIDs.has(moment.id)) sourceExportMomentIDs.delete(moment.id);
+      else sourceExportMomentIDs.add(moment.id);
+      renderSourceExportOptions();
+    });
+    momentRoot.append(button);
+  });
+
+  const cameraRoot = $("export-source-cameras");
+  cameraRoot.replaceChildren();
+  cameraOrder.forEach((camera) => {
+    const count = sourceExportFileSummary().byCamera.get(camera) || 0;
+    const button = document.createElement("button");
+    const selected = sourceExportCameras.has(camera);
+    button.type = "button";
+    button.className = "export-source-camera";
+    button.classList.toggle("selected", selected);
+    button.classList.toggle("unavailable", count === 0);
+    button.setAttribute("aria-pressed", String(selected));
+    button.textContent = `${cameraLabel(camera)} · ${count} 个`;
+    button.addEventListener("click", () => {
+      if (sourceExportCameras.has(camera)) sourceExportCameras.delete(camera);
+      else sourceExportCameras.add(camera);
+      renderSourceExportOptions();
+    });
+    cameraRoot.append(button);
+  });
+
+  const summary = sourceExportFileSummary();
+  const missing = sourceExportMomentIDs.size*sourceExportCameras.size-summary.count;
+  let text = `已选 ${sourceExportMomentIDs.size} 分钟 · ${sourceExportCameras.size} 路视角 · ${summary.count} 个源文件 · ${formatBytes(summary.bytes)}`;
+  if (missing > 0) text += ` · ${missing} 个视角在所选分钟中缺失，会自动跳过`;
+  $("export-source-summary").textContent = text;
+}
+
+function sourceExportFileSummary() {
+  const byCamera = new Map();
+  let count = 0;
+  let bytes = 0;
+  if (!activeSession) return {count, bytes, byCamera};
+  activeSession.moments?.forEach((moment) => {
+    if (!sourceExportMomentIDs.has(moment.id)) return;
+    (moment.videos || []).forEach((video) => {
+      if (!sourceExportCameras.has(video.camera)) return;
+      count++;
+      bytes += Math.max(0, Number(video.size || 0));
+      byCamera.set(video.camera, (byCamera.get(video.camera) || 0)+1);
+    });
+  });
+  return {count, bytes, byCamera};
+}
+
+function selectCurrentSourceMoment() {
+  if (!activeSession) return;
+  const moment = activeSession.moments?.[activeMomentIndex] || selectMomentAtPosition(activeSession, currentSessionPosition())?.moment;
+  sourceExportMomentIDs.clear();
+  if (moment?.id) sourceExportMomentIDs.add(moment.id);
+  renderSourceExportOptions();
+}
+
+function selectAllSourceMoments() {
+  activeSession?.moments?.forEach((moment) => sourceExportMomentIDs.add(moment.id));
+  renderSourceExportOptions();
+}
+
+function clearSourceMomentSelection() {
+  sourceExportMomentIDs.clear();
+  renderSourceExportOptions();
+}
+
+function selectAllSourceCameras() {
+  sourceExportCameras.clear();
+  cameraOrder.forEach((camera) => sourceExportCameras.add(camera));
+  renderSourceExportOptions();
+}
+
+function selectSourceCamerasForCurrentLayout() {
+  sourceExportCameras.clear();
+  const cameras = isCompositeDisplay(activeDisplay) ? compositeLayouts[activeDisplay]?.cameras : [activeCamera];
+  (cameras || []).forEach((camera) => sourceExportCameras.add(camera));
+  renderSourceExportOptions();
+}
+
 async function createExportTask(event) {
   event.preventDefault();
   if (!activeSession || ["queued", "running"].includes(exportTask?.state)) return;
+  if (exportMode === "source") {
+    const summary = sourceExportFileSummary();
+    $("export-error").textContent = "";
+    if (sourceExportMomentIDs.size === 0 || sourceExportCameras.size === 0 || summary.count === 0) {
+      $("export-error").textContent = "请至少选择一个包含录像的分钟和摄像头视角";
+      return;
+    }
+    $("export-submit").disabled = true;
+    try {
+      exportTask = await request("/api/v1/exports", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({mode:"source", session_id:activeSession.id, moment_ids:[...sourceExportMomentIDs], cameras:[...sourceExportCameras]}),
+      });
+      renderExportTask(exportTask);
+      scheduleExportPoll(500);
+    } catch (error) {
+      $("export-error").textContent = error.message;
+      $("export-submit").disabled = false;
+    }
+    return;
+  }
   const layout = $("export-layout").value;
   const cameras = layout === "single" ? [$("export-camera").value] : (compositeLayouts[layout]?.cameras || []);
   const start = Number($("export-start").value);
@@ -3092,7 +3271,7 @@ async function createExportTask(event) {
     showPlayerMessage("导出任务已接管硬件媒体资源，当前播放已停止");
     exportTask = await request("/api/v1/exports", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value}),
+      body: JSON.stringify({mode:"clip", session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value}),
     });
     renderExportTask(exportTask);
     scheduleExportPoll(1000);
@@ -3133,18 +3312,26 @@ async function cancelExportTask() {
 }
 
 function renderExportTask(task) {
-  const labels = {queued:"正在排队", running:"正在导出", completed:"导出完成", failed:"导出失败", canceled:"已取消"};
+  const source = task.request?.mode === "source";
+  const labels = {queued:"正在排队", running:source ? "正在打包" : "正在导出", completed:source ? "打包完成" : "导出完成", failed:source ? "打包失败" : "导出失败", canceled:"已取消"};
   const running = ["queued", "running"].includes(task.state);
   $("export-task-status").hidden = false;
   $("export-state").textContent = labels[task.state] || task.state;
   $("export-progress").value = task.progress_percent || 0;
   const estimate = task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "";
-  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${estimate}` : `可以修改参数后再次导出${estimate}`);
+  const files = source && task.file_count ? ` · ${task.file_count} 个源文件` : "";
+  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${files}${estimate}` : `可以修改参数后再次导出${files}${estimate}`);
   $("export-cancel").hidden = !running;
   $("export-download").hidden = task.state !== "completed" || !task.download_ready;
   $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";
+  $("export-download").textContent = source ? "下载压缩包" : "下载视频";
   $("export-submit").disabled = running;
-  $("export-submit").textContent = task.state === "completed" ? "再次导出" : "开始导出";
+  updateExportSubmitLabel(task);
+}
+
+function updateExportSubmitLabel(task = exportTask) {
+  const source = (task?.request?.mode || exportMode) === "source";
+  $("export-submit").textContent = task?.state === "completed" ? (source ? "再次打包" : "再次导出") : (source ? "打包原始片段" : "开始导出");
 }
 
 function resetExportTaskUI() {
@@ -3153,8 +3340,9 @@ function resetExportTaskUI() {
   $("export-cancel").hidden = true;
   $("export-download").hidden = true;
   $("export-download").href = "#";
+  $("export-download").textContent = "下载视频";
   $("export-submit").disabled = false;
-  $("export-submit").textContent = "开始导出";
+  updateExportSubmitLabel(null);
 }
 
 function closeExportModal() {

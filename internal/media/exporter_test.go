@@ -1,8 +1,10 @@
 package media
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -122,6 +124,82 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 	}
 	if releases.Load() != 1 || task.ProgressPercent != 100 || !task.DownloadReady {
 		t.Fatalf("releases = %d, task = %+v", releases.Load(), task)
+	}
+}
+
+func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	firstPath := filepath.Join(directory, "2026-07-20_10-00-00-front.mp4")
+	secondPath := filepath.Join(directory, "2026-07-20_10-00-00-back.mp4")
+	if err := os.WriteFile(firstPath, []byte("front-source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("back-source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exporter, err := NewExporter(&fakeExportRunner{}, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: filepath.Join(directory, "exports"), QueueSize: 1, MaxDuration: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go exporter.Run(ctx)
+	recordedAt := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	source := ExportSource{SourceFiles: []SourceExportFile{
+		{MomentID: "minute-1", Camera: "front", Name: filepath.Base(firstPath), Path: firstPath, RecordedAt: recordedAt, Size: uint64(len("front-source"))},
+		{MomentID: "minute-1", Camera: "back", Name: filepath.Base(secondPath), Path: secondPath, RecordedAt: recordedAt, Size: uint64(len("back-source"))},
+	}}
+	var releases atomic.Int32
+	task, err := exporter.Create(ExportRequest{
+		Mode: ExportModeSource, SessionID: "session", MomentIDs: []string{"minute-1"}, Cameras: []string{"front", "back"},
+	}, source, func() { releases.Add(1) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		task, err = exporter.Task(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.State == ExportCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task state = %s", task.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if task.FileCount != 2 || task.EstimatedBytes != uint64(len("front-source")+len("back-source")) || releases.Load() != 1 {
+		t.Fatalf("task = %#v, releases = %d", task, releases.Load())
+	}
+	archive, err := zip.OpenReader(filepath.Join(exporter.config.OutputDir, task.ID+".zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	contents := make(map[string]string, len(archive.File))
+	for _, item := range archive.File {
+		if item.Method != zip.Store {
+			t.Fatalf("archive entry %q method = %d, want store", item.Name, item.Method)
+		}
+		reader, err := item.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if err != nil || closeErr != nil {
+			t.Fatalf("read %s: %v %v", item.Name, err, closeErr)
+		}
+		contents[item.Name] = string(body)
+	}
+	if contents[filepath.Base(firstPath)] != "front-source" || contents[filepath.Base(secondPath)] != "back-source" ||
+		!strings.Contains(contents["manifest.json"], `"moment_id": "minute-1"`) {
+		t.Fatalf("archive contents = %#v", contents)
 	}
 }
 

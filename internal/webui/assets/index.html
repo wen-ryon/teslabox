@@ -441,18 +441,31 @@
   <section id="export-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="export-title" hidden>
     <div class="action-modal-backdrop" data-close-export></div>
     <form id="export-form" class="action-modal-card export-modal-card">
-      <p class="eyebrow">CUSTOM EXPORT</p><h2 id="export-title">导出完整录像</h2>
-      <p class="muted">跨分钟拼接所选视角，并按录像绝对时间对齐最多约 1–2 帧的时间差。</p>
-      <div class="form-grid export-range-grid">
-        <label>开始位置（秒）<input id="export-start" type="number" min="0" step="0.1" required></label>
-        <label>导出时长（秒）<input id="export-duration" type="number" min="1" max="120" step="0.1" required></label>
+      <p class="eyebrow">EXPORT RECORDING</p><h2 id="export-title">导出录像</h2>
+      <div class="export-mode-tabs" role="tablist" aria-label="导出方式">
+        <button id="export-mode-clip" class="active" type="button" role="tab" aria-selected="true">剪辑视频</button>
+        <button id="export-mode-source" type="button" role="tab" aria-selected="false">原始片段</button>
       </div>
-      <div class="form-grid export-view-grid">
-        <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>
-        <label id="export-camera-field">单路摄像头<select id="export-camera"></select></label>
+      <div id="export-clip-options">
+        <p class="muted">跨分钟拼接所选视角，并按录像绝对时间对齐最多约 1–2 帧的时间差。</p>
+        <div class="form-grid export-range-grid">
+          <label>开始位置（秒）<input id="export-start" type="number" min="0" step="0.1" required></label>
+          <label>导出时长（秒）<input id="export-duration" type="number" min="1" max="120" step="0.1" required></label>
+        </div>
+        <div class="form-grid export-view-grid">
+          <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>
+          <label id="export-camera-field">单路摄像头<select id="export-camera"></select></label>
+        </div>
+        <label>导出画质<select id="export-quality"><option value="smooth">流畅（480p · 20 FPS）</option><option value="standard" selected>标准（720p · 24 FPS）</option><option value="high">高清（1080p · 30 FPS）</option><option value="original">原画（源分辨率 · 36 FPS，仅单路）</option></select></label>
+        <p id="export-quality-help" class="muted"></p>
       </div>
-      <label>导出画质<select id="export-quality"><option value="smooth">流畅（480p · 20 FPS）</option><option value="standard" selected>标准（720p · 24 FPS）</option><option value="high">高清（1080p · 30 FPS）</option><option value="original">原画（源分辨率 · 36 FPS，仅单路）</option></select></label>
-      <p id="export-quality-help" class="muted"></p>
+      <div id="export-source-options" hidden>
+        <p class="muted">按完整分钟直接打包源 MP4，不裁剪、不转码，压缩包内附带清单文件。</p>
+        <div class="export-source-toolbar"><button id="export-source-current" class="secondary" type="button">当前分钟</button><button id="export-source-all" class="secondary" type="button">全选本段</button><button id="export-source-clear" class="secondary" type="button">清除</button><button id="export-source-cameras-all" class="secondary" type="button">全选六路</button><button id="export-source-cameras-layout" class="secondary" type="button">当前布局</button></div>
+        <div id="export-source-moments" class="export-source-moments" aria-label="选择原始录像分钟"></div>
+        <fieldset class="export-camera-fieldset"><legend>导出视角</legend><div id="export-source-cameras" class="export-source-cameras" aria-label="选择原始录像视角"></div></fieldset>
+        <p id="export-source-summary" class="muted export-source-summary"></p>
+      </div>
       <div id="export-task-status" class="export-task-status" hidden><strong id="export-state">正在排队</strong><progress id="export-progress" max="100" value="0"></progress><span id="export-detail" class="muted"></span></div>
       <p id="export-error" class="form-error" role="alert"></p>
       <div class="modal-actions"><button class="secondary" type="button" data-close-export>关闭</button><button id="export-cancel" class="secondary" type="button" hidden>取消任务</button><a id="export-download" class="primary" href="#" download hidden>下载视频</a><button id="export-submit" class="primary" type="submit">开始导出</button></div>

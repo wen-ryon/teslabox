@@ -587,16 +587,25 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			http.NotFound(w, r)
 			return
 		}
-		if !exportSpaceAvailable(state, request) {
-			release()
-			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
-			return
+		var source media.ExportSource
+		var estimated uint64
+		var err error
+		if request.Mode == media.ExportModeSource {
+			source, err = sourceFileExportSource(state.MediaSnapshot.MountPath, session, request)
+			estimated = media.EstimateSourceExportBytes(source)
+		} else {
+			source, err = exportSource(state.MediaSnapshot.MountPath, session)
+			estimated = media.EstimateExportBytes(request)
 		}
-		source, err := exportSource(state.MediaSnapshot.MountPath, session)
 		if err != nil {
 			release()
 			logger.Warn("准备导出录像失败", "session_id", request.SessionID, "error", err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "导出录像文件暂不可用"})
+			writeExportError(w, logger, "准备导出录像失败", err)
+			return
+		}
+		if !exportSpaceAvailable(state, estimated) {
+			release()
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
 			return
 		}
 		task, err := admin.Create(request, source, release)
@@ -636,14 +645,18 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			return
 		}
 		filename := "teslabox-" + task.ID + ".mp4"
+		contentType := "video/mp4"
+		if task.Request.Mode == media.ExportModeSource {
+			filename = "teslabox-source-" + task.ID + ".zip"
+			contentType = "application/zip"
+		}
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
-		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Type", contentType)
 		http.ServeContent(w, r, filename, info.ModTime(), file)
 	})
 }
 
-func exportSpaceAvailable(state service.Snapshot, request media.ExportRequest) bool {
-	estimated := media.EstimateExportBytes(request)
+func exportSpaceAvailable(state service.Snapshot, estimated uint64) bool {
 	space := state.SnapshotSpace
 	if estimated == 0 || space.TotalBytes == 0 {
 		return true
@@ -1820,6 +1833,55 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 				Camera: video.Camera, Path: name, RecordedAt: recordedAt, Duration: duration,
 			})
 		}
+	}
+	return source, nil
+}
+
+func sourceFileExportSource(snapshotRoot string, session videoSession, request media.ExportRequest) (media.ExportSource, error) {
+	selectedMoments := make(map[string]struct{}, len(request.MomentIDs))
+	for _, momentID := range request.MomentIDs {
+		if momentID != "" {
+			selectedMoments[momentID] = struct{}{}
+		}
+	}
+	if len(selectedMoments) == 0 {
+		return media.ExportSource{}, &media.InputError{Message: "请至少选择一个原始录像分钟"}
+	}
+	selectedCameras := make(map[string]struct{}, len(request.Cameras))
+	for _, camera := range request.Cameras {
+		selectedCameras[camera] = struct{}{}
+	}
+
+	source := media.ExportSource{SessionStart: session.StartAt, SessionEnd: session.EndAt}
+	matchedMoments := make(map[string]struct{}, len(selectedMoments))
+	for _, moment := range session.Moments {
+		if _, selected := selectedMoments[moment.ID]; !selected {
+			continue
+		}
+		matchedMoments[moment.ID] = struct{}{}
+		for _, video := range moment.Videos {
+			if _, selected := selectedCameras[video.Camera]; !selected {
+				continue
+			}
+			name, err := snapshotVideoPath(snapshotRoot, video.Path)
+			if err != nil {
+				return media.ExportSource{}, err
+			}
+			info, err := os.Stat(name)
+			if err != nil {
+				return media.ExportSource{}, err
+			}
+			if info.Size() < 0 {
+				return media.ExportSource{}, errors.New("原始录像文件大小无效")
+			}
+			source.SourceFiles = append(source.SourceFiles, media.SourceExportFile{
+				MomentID: moment.ID, Camera: video.Camera, Name: filepath.Base(video.Path), Path: name,
+				RecordedAt: video.RecordedAt, Size: uint64(info.Size()),
+			})
+		}
+	}
+	if len(matchedMoments) != len(selectedMoments) {
+		return media.ExportSource{}, &media.InputError{Message: "所选录像分钟已不在当前会话中，请刷新后重试"}
 	}
 	return source, nil
 }

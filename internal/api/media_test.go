@@ -310,6 +310,57 @@ func TestCreateExportTransfersSnapshotLeaseAndBuildsSessionSource(t *testing.T) 
 	}
 }
 
+func TestCreateSourceExportSelectsOnlyRequestedMinutesAndCameras(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	start := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	videos := make([]teslacam.Video, 0, 4)
+	for minute := range 2 {
+		for _, camera := range []string{"front", "back"} {
+			relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", camera+time.Duration(minute).String()+".mp4"))
+			name := filepath.Join(root, filepath.FromSlash(relative))
+			if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(name, []byte(camera+"-source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			videos = append(videos, teslacam.Video{
+				ID: camera + time.Duration(minute).String(), Path: relative, ClipType: "recent", Camera: camera,
+				RecordedAt: start.Add(time.Duration(minute) * time.Minute), Duration: 60,
+			})
+		}
+	}
+	session := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)[0]
+	released := 0
+	controller := fakeController{
+		state:    service.Snapshot{MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root}, Videos: videos},
+		released: func() { released++ },
+	}
+	admin := &fakeExportAdmin{task: media.ExportTask{ID: "task", State: media.ExportQueued}}
+	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExportAdmin(admin))
+	body := `{"mode":"source","session_id":"` + session.ID + `","moment_ids":["` + session.Moments[1].ID + `"],"cameras":["front","left_pillar"]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/exports", strings.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if admin.request.Mode != media.ExportModeSource || len(admin.source.SourceFiles) != 1 || admin.source.SourceFiles[0].Camera != "front" ||
+		admin.source.SourceFiles[0].MomentID != session.Moments[1].ID || admin.source.SourceFiles[0].Size != uint64(len("front-source")) {
+		t.Fatalf("request = %#v, source = %#v", admin.request, admin.source)
+	}
+	if released != 0 || admin.release == nil {
+		t.Fatalf("snapshot lease released before async source export: released = %d", released)
+	}
+	admin.release()
+	if released != 1 {
+		t.Fatalf("released = %d", released)
+	}
+}
+
 func TestExportDownloadUsesCompletedFile(t *testing.T) {
 	t.Parallel()
 	name := filepath.Join(t.TempDir(), "export.mp4")
@@ -330,5 +381,28 @@ func TestExportDownloadUsesCompletedFile(t *testing.T) {
 	}
 	if !strings.Contains(response.Header().Get("Content-Disposition"), "teslabox-task.mp4") {
 		t.Fatalf("content disposition = %q", response.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestSourceExportDownloadUsesZipMetadata(t *testing.T) {
+	t.Parallel()
+	name := filepath.Join(t.TempDir(), "export.zip")
+	if err := os.WriteFile(name, []byte("complete-source-export"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeExportAdmin{
+		task: media.ExportTask{ID: "task", State: media.ExportCompleted, DownloadReady: true, Request: media.ExportRequest{Mode: media.ExportModeSource}}, downloadPath: name,
+	}
+	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExportAdmin(admin))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/exports/task/download", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "complete-source-export" {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Header().Get("Content-Disposition"), "teslabox-source-task.zip") || response.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("headers = %#v", response.Header())
 	}
 }
