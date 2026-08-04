@@ -191,7 +191,7 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 		return m.Status(), err
 	}
 	available, err := newerVersion(manifest.Version, m.config.CurrentVersion)
-	if err == nil && manifest.MinVersion != "" && !isDevelopmentVersion(m.config.CurrentVersion) {
+	if err == nil && manifest.MinVersion != "" && !isNonStableVersion(m.config.CurrentVersion) {
 		var meetsMinimum bool
 		meetsMinimum, err = versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
 		if err == nil && !meetsMinimum {
@@ -349,13 +349,13 @@ func (m *Manager) manifestAction(manifest Manifest) (string, bool) {
 	if manifest.Version == m.config.CurrentVersion {
 		return "", false
 	}
-	if manifest.MinVersion != "" && !isDevelopmentVersion(m.config.CurrentVersion) {
+	if manifest.MinVersion != "" && !isNonStableVersion(m.config.CurrentVersion) {
 		meetsMinimum, err := versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
 		if err != nil || !meetsMinimum {
 			return "", false
 		}
 	}
-	if isDevelopmentVersion(m.config.CurrentVersion) {
+	if isNonStableVersion(m.config.CurrentVersion) {
 		return "install", true
 	}
 	isNewer, err := newerVersion(manifest.Version, m.config.CurrentVersion)

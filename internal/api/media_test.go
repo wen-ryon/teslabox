@@ -440,11 +440,13 @@ func TestExportSettingsAndHistoryRoutes(t *testing.T) {
 		history:  []media.ExportTask{{ID: "history", State: media.ExportCompleted, DownloadReady: true}},
 	}
 	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExportAdmin(admin))
-	settingsRequest := httptest.NewRequest(http.MethodPut, "/api/v1/export-settings", strings.NewReader(`{"delete_after_download":true,"retain_count":3}`))
-	settingsResponse := httptest.NewRecorder()
-	handler.ServeHTTP(settingsResponse, settingsRequest)
-	if settingsResponse.Code != http.StatusOK || !admin.settings.DeleteAfterDownload || admin.settings.RetainCount != 3 {
-		t.Fatalf("settings response = %d %s, settings = %#v", settingsResponse.Code, settingsResponse.Body.String(), admin.settings)
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		settingsRequest := httptest.NewRequest(method, "/api/v1/export-settings", strings.NewReader(`{"delete_after_download":true,"retain_count":3}`))
+		settingsResponse := httptest.NewRecorder()
+		handler.ServeHTTP(settingsResponse, settingsRequest)
+		if settingsResponse.Code != http.StatusOK || !admin.settings.DeleteAfterDownload || admin.settings.RetainCount != 3 {
+			t.Fatalf("%s settings response = %d %s, settings = %#v", method, settingsResponse.Code, settingsResponse.Body.String(), admin.settings)
+		}
 	}
 	historyRequest := httptest.NewRequest(http.MethodGet, "/api/v1/exports/history", nil)
 	historyResponse := httptest.NewRecorder()

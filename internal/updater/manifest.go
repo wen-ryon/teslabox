@@ -118,7 +118,7 @@ func newerVersion(candidate, current string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if isDevelopmentVersion(current) {
+	if isNonStableVersion(current) {
 		return true, nil
 	}
 	currentParts, err := parseStableVersion(current)
@@ -133,9 +133,11 @@ func newerVersion(candidate, current string) (bool, error) {
 	return false, nil
 }
 
-func isDevelopmentVersion(value string) bool {
-	value = strings.TrimSpace(value)
-	return value == "" || value == "dev" || strings.HasPrefix(value, "candidate-")
+// isNonStableVersion 判断本地版本是否不能作为稳定版本比较的基准。
+// 测试构建可能采用任意命名；仍只允许安装通过签名、设备和校验和验证的稳定发布物。
+func isNonStableVersion(value string) bool {
+	_, err := parseStableVersion(value)
+	return err != nil
 }
 
 func parseStableVersion(value string) ([3]uint64, error) {

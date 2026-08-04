@@ -578,7 +578,7 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 	mux.HandleFunc("GET /api/v1/export-settings", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.Settings())
 	})
-	mux.HandleFunc("PUT /api/v1/export-settings", func(w http.ResponseWriter, r *http.Request) {
+	updateExportSettings := func(w http.ResponseWriter, r *http.Request) {
 		var settings media.ExportSettings
 		if !decodeJSON(w, r, &settings) {
 			return
@@ -589,7 +589,10 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			return
 		}
 		writeJSON(w, http.StatusOK, updated)
-	})
+	}
+	// POST 可避免部分反向代理或旧网络设备拒绝 PUT；保留 PUT 以兼容已部署的页面。
+	mux.HandleFunc("POST /api/v1/export-settings", updateExportSettings)
+	mux.HandleFunc("PUT /api/v1/export-settings", updateExportSettings)
 	mux.HandleFunc("GET /api/v1/exports/history", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.History())
 	})

@@ -1289,7 +1289,7 @@ async function saveExportSettings() {
   button.disabled = true;
   try {
     state.exportSettings = await request("/api/v1/export-settings", {
-      method:"PUT", headers:{"Content-Type":"application/json"},
+      method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
         delete_after_download:$("export-delete-after-download").checked,
         retain_count:Number($("export-retain-count").value),

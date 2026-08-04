@@ -117,6 +117,48 @@ func TestVersionComparison(t *testing.T) {
 	}
 }
 
+func TestNonStableCurrentVersionCanInstallSignedStableRelease(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "empty", version: "", want: true},
+		{name: "development alias", version: "dev", want: true},
+		{name: "legacy candidate", version: "candidate-20260723-ui-layout", want: true},
+		{name: "prefixed test release", version: "v0.1.22-test.1", want: true},
+		{name: "test release", version: "0.1.22-test.1", want: true},
+		{name: "commit build", version: "build-441bb27", want: true},
+		{name: "stable release", version: "0.1.22", want: false},
+		{name: "stable release with whitespace", version: " 0.1.22 ", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isNonStableVersion(test.version); got != test.want {
+				t.Fatalf("isNonStableVersion(%q) = %v, want %v", test.version, got, test.want)
+			}
+			available, err := newerVersion("0.1.22", test.version)
+			if err != nil {
+				t.Fatalf("newerVersion(0.1.22, %q) error = %v", test.version, err)
+			}
+			if available != test.want {
+				t.Fatalf("newerVersion(0.1.22, %q) = %v, want %v", test.version, available, test.want)
+			}
+		})
+	}
+}
+
+func TestManagerManifestActionAllowsNonStableBuildToInstallStableRelease(t *testing.T) {
+	manager := &Manager{config: Config{CurrentVersion: "v0.1.22-test.1"}}
+	action, compatible := manager.manifestAction(Manifest{
+		Version:    "0.1.22",
+		MinVersion: "9.9.9",
+	})
+	if !compatible || action != "install" {
+		t.Fatalf("manifestAction() = %q, %v, want install, true", action, compatible)
+	}
+}
+
 func TestNewManagerIsDisabledWithoutTrustConfiguration(t *testing.T) {
 	manager, err := New(Config{CurrentVersion: "0.1.0", CurrentCommit: "abc"}, nil)
 	if err != nil {
@@ -168,7 +210,7 @@ func (f *fakeStarter) StartUpdate(context.Context) error {
 	return nil
 }
 
-func TestManagerCheckAllowsCandidateBuildToInstallStableRelease(t *testing.T) {
+func TestManagerCheckAllowsNonStableBuildToInstallStableRelease(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +235,7 @@ func TestManagerCheckAllowsCandidateBuildToInstallStableRelease(t *testing.T) {
 	manager, err := New(Config{
 		ManifestURL: server.URL + "/latest.json",
 		PublicKey:   base64.StdEncoding.EncodeToString(publicKey), Channel: "stable", Board: "radxa-rock-3a", Arch: "arm64",
-		CurrentVersion: "candidate-20260723-ui-layout", CurrentCommit: "test", DownloadDir: filepath.Join(root, "updates"),
+		CurrentVersion: "v0.1.22-test.1", CurrentCommit: "test", DownloadDir: filepath.Join(root, "updates"),
 		RequestPath: filepath.Join(root, "request.json"), ResultPath: filepath.Join(root, "result.json"), MaximumSize: 1024,
 		AutoReboot: func() bool { return true },
 	}, starter)
