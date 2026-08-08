@@ -76,6 +76,7 @@ cd "${BUILD_ROOT}/ffmpeg-rockchip"
 "${SOURCE_ROOT}/ffmpeg-rockchip/configure" \
     --prefix="${PREFIX}" \
     --enable-version3 \
+    --enable-libass \
     --enable-libdrm \
     --enable-rkmpp \
     --enable-rkrga \
@@ -85,6 +86,10 @@ cd "${BUILD_ROOT}/ffmpeg-rockchip"
     --extra-ldflags="-Wl,-rpath,${PREFIX}/lib"
 make -j "$(nproc)"
 make DESTDIR="${STAGE_ROOT}" install
+
+# ASS 仪表使用固定字体，不能依赖不同用户系统的字体扫描结果。
+mkdir -p "${STAGE_ROOT}${PREFIX}/share/fonts"
+cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc "${STAGE_ROOT}${PREFIX}/share/fonts/"
 
 # 记录源码和目标运行时，便于部署后判断二进制是否来自预期构建。
 cat > "${STAGE_ROOT}${PREFIX}/BUILD_INFO" <<EOF
@@ -103,7 +108,25 @@ find "${STAGE_ROOT}${PREFIX}/lib" -maxdepth 1 -type f -name '*.a' -delete
 LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -version
 LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -hwaccels
 LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -decoders | sed -n '/_rkmpp/p'
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -encoders | sed -n '/_rkmpp/p'
 LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -filters | sed -n '/_rkrga/p'
+for capability in h264_rkmpp hevc_rkmpp; do
+    for list in decoders encoders; do
+        if ! LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner "-${list}" 2>/dev/null |
+            awk -v required="${capability}" 'index($0, required) { found=1 } END { exit !found }'; then
+            echo "FFmpeg 构建缺少 ${list} 能力：${capability}" >&2
+            exit 1
+        fi
+    done
+done
+for capability in ass subtitles scale_rkrga overlay_rkrga vpp_rkrga; do
+    if ! LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -filters 2>/dev/null |
+        awk -v required="${capability}" 'index($0, required) { found=1 } END { exit !found }'; then
+        echo "FFmpeg 构建缺少滤镜：${capability}" >&2
+        exit 1
+    fi
+done
+LD_LIBRARY_PATH="${STAGE_ROOT}${PREFIX}/lib" "${STAGE_ROOT}${PREFIX}/bin/ffmpeg" -hide_banner -filters | sed -n '/ ass\| subtitles/p'
 
 tar -C "${STAGE_ROOT}" -czf "${OUTPUT_ROOT}/teslabox-media-debian11-arm64.tar.gz" opt
 cd "${OUTPUT_ROOT}"

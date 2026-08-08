@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$PackageUrl,
     [Parameter(Mandatory = $true)][string]$PrivateKey,
     [string]$NotesFile = "",
+    [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
     [string]$OutputDirectory = "dist\update"
 )
 
@@ -31,17 +32,30 @@ $binaryTemporary = "$binary.tmp"
 $helperTemporary = "$helper.tmp"
 $manifest = Join-Path $output "latest.json"
 $versionManifest = Join-Path $output "manifest-$Version.json"
+$mediaPath = (Resolve-Path (Join-Path $root $MediaArchive)).Path
+$mediaChecksumPath = "$mediaPath.sha256"
+if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
+    throw "The media archive checksum is missing: $mediaChecksumPath"
+}
+$mediaChecksum = ((Get-Content -Raw -Encoding ASCII -LiteralPath $mediaChecksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
+if ($mediaChecksum -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $mediaPath).Hash.ToLowerInvariant()) {
+    throw "The media archive checksum does not match: $mediaPath"
+}
+$bundleDirectory = Join-Path $root "internal\mediabundle\bundle"
 $ldflags = "-s -w -X github.com/wen-ryon/teslabox/internal/version.Version=$Version -X github.com/wen-ryon/teslabox/internal/version.Commit=$commit"
 
 $previousGOOS = $env:GOOS
 $previousGOARCH = $env:GOARCH
 $previousCGO = $env:CGO_ENABLED
 try {
+	New-Item -ItemType Directory -Force -Path $bundleDirectory | Out-Null
+	Copy-Item -Force -LiteralPath $mediaPath -Destination (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz")
+	Copy-Item -Force -LiteralPath $mediaChecksumPath -Destination (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz.sha256")
     $env:GOOS = "linux"
     $env:GOARCH = "arm64"
     $env:CGO_ENABLED = "0"
     Remove-Item -Force -ErrorAction SilentlyContinue $binaryTemporary, $helperTemporary
-    go build -trimpath -ldflags $ldflags -o $binaryTemporary .\cmd\teslabox
+    go build -trimpath -tags releasebundle -ldflags $ldflags -o $binaryTemporary .\cmd\teslabox
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to build the TeslaBox ARM64 binary."
     }
@@ -52,6 +66,7 @@ try {
     Move-Item -Force $binaryTemporary $binary
     Move-Item -Force $helperTemporary $helper
 } finally {
+	Remove-Item -LiteralPath $bundleDirectory -Recurse -Force -ErrorAction SilentlyContinue
     $env:GOOS = $previousGOOS
     $env:GOARCH = $previousGOARCH
     $env:CGO_ENABLED = $previousCGO

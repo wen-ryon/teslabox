@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -177,6 +179,71 @@ func TestGroupVideoSessionsMergesRecentClipsIntoOneTimeline(t *testing.T) {
 	}
 	if recent.ThumbnailURL != "/api/v1/thumbnails/recent-thumb" {
 		t.Fatalf("recent thumbnail URL = %q", recent.ThumbnailURL)
+	}
+}
+
+func TestGroupVideoSessionsPreservesFiveSecondFinalMoment(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 31, 21, 25, 22, 0, time.Local)
+	groups := make([]videoGroup, 0, 11)
+	for minute := range 11 {
+		duration := time.Minute
+		if minute == 10 {
+			duration = 5 * time.Second
+		}
+		start := base.Add(time.Duration(minute) * time.Minute)
+		groups = append(groups, videoGroup{
+			ID: "moment-" + strconv.Itoa(minute), ClipType: "saved", Event: "event-1",
+			RecordedAt: start, EndAt: start.Add(duration), Duration: duration.Seconds(),
+			Videos: []teslacam.Video{{Camera: "front", RecordedAt: start, Duration: duration.Seconds()}},
+		})
+	}
+
+	sessions := groupVideoSessions(groups, 5*time.Second)
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+	if session.Duration != 605 || session.Moments[10].TimelineStart != 600 || session.Moments[10].Duration != 5 {
+		t.Fatalf("session duration = %f, last start = %f, last duration = %f",
+			session.Duration, session.Moments[10].TimelineStart, session.Moments[10].Duration)
+	}
+}
+
+func TestGroupVideoSessionsCompressesSavedClipSeams(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 31, 21, 25, 22, 0, time.Local)
+	groups := make([]videoGroup, 0, 11)
+	for minute := range 11 {
+		duration := time.Minute
+		if minute == 10 {
+			duration = 2*time.Second + 886600*time.Microsecond
+		}
+		start := base.Add(time.Duration(minute) * time.Minute)
+		if minute > 0 {
+			start = start.Add(3 * time.Second)
+		}
+		groups = append(groups, videoGroup{
+			ID: "moment-" + strconv.Itoa(minute), ClipType: "saved", Event: "event-1",
+			RecordedAt: start, EndAt: start.Add(duration), Duration: duration.Seconds(),
+			Videos: []teslacam.Video{{Camera: "front", RecordedAt: start, Duration: duration.Seconds()}},
+		})
+	}
+
+	sessions := groupVideoSessions(groups, sessionContinuityGap)
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+	wantDuration := 602.8866
+	if math.Abs(session.Duration-wantDuration) > 0.0001 {
+		t.Fatalf("session duration = %f, want %f", session.Duration, wantDuration)
+	}
+	if session.Moments[10].TimelineStart != 600 {
+		t.Fatalf("last timeline start = %f, want 600", session.Moments[10].TimelineStart)
+	}
+	if got := session.EndAt.Sub(session.StartAt).Seconds(); math.Abs(got-605.8866) > 0.0001 {
+		t.Fatalf("wall clock duration = %f, want 605.8866", got)
 	}
 }
 

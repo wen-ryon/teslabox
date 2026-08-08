@@ -38,6 +38,28 @@ func TestReadMP4Duration(t *testing.T) {
 	}
 }
 
+func TestReadMP4DurationPrefersVideoTrackOverContainer(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	fixture := makeMP4Box("moov", append(
+		movieHeaderBox(1000, 63_000),
+		append(
+			mediaTrackBox("soun", 48_000, 3_024_000),
+			mediaTrackBox("vide", 90_000, 5_400_000)...,
+		)...,
+	))
+	if err := os.WriteFile(path, fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readMP4Duration(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-60) > 0.001 {
+		t.Fatalf("duration = %f, want video track duration 60", got)
+	}
+}
+
 func movieHeaderFixture(version byte, timescale uint32, duration uint64) []byte {
 	payloadSize := 20
 	if version == 1 {
@@ -54,6 +76,23 @@ func movieHeaderFixture(version byte, timescale uint32, duration uint64) []byte 
 	}
 	mvhd := makeMP4Box("mvhd", payload)
 	return makeMP4Box("moov", mvhd)
+}
+
+func movieHeaderBox(timescale uint32, duration uint64) []byte {
+	payload := make([]byte, 20)
+	binary.BigEndian.PutUint32(payload[12:16], timescale)
+	binary.BigEndian.PutUint32(payload[16:20], uint32(duration))
+	return makeMP4Box("mvhd", payload)
+}
+
+func mediaTrackBox(handler string, timescale uint32, duration uint64) []byte {
+	handlerPayload := make([]byte, 12)
+	copy(handlerPayload[8:12], handler)
+	mediaHeader := make([]byte, 20)
+	binary.BigEndian.PutUint32(mediaHeader[12:16], timescale)
+	binary.BigEndian.PutUint32(mediaHeader[16:20], uint32(duration))
+	media := append(makeMP4Box("hdlr", handlerPayload), makeMP4Box("mdhd", mediaHeader)...)
+	return makeMP4Box("trak", makeMP4Box("mdia", media))
 }
 
 func makeMP4Box(boxType string, payload []byte) []byte {

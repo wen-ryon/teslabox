@@ -134,7 +134,7 @@ func TestAPSettingsReportsUnavailableForWiFiOnlyInterface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.Available || settings.Enabled || settings.Interface != "ap0" {
+	if settings.Available || settings.Enabled || settings.Interface != "" || settings.MACAddress != "" || settings.Address != "" || settings.Sharing {
 		t.Fatalf("settings = %#v", settings)
 	}
 	status, err := manager.WiFiStatus(context.Background())
@@ -170,8 +170,13 @@ func TestManagerDiscoversNonstandardWiFiAndAPInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.Interface != "hotspot7" || settings.MACAddress != "AA:BB:CC:DD:EE:20" {
+	if settings.Enabled || settings.Interface != "" || settings.MACAddress != "" || settings.Address != "" || settings.Sharing {
 		t.Fatalf("settings = %#v", settings)
+	}
+	for _, call := range runner.calls {
+		if call == "nmcli --escape no -g GENERAL.HWADDR,IP4.ADDRESS device show hotspot7" {
+			t.Fatalf("inactive AP queried runtime details: %q", call)
+		}
 	}
 }
 

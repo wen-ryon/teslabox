@@ -49,19 +49,22 @@ func TestCompositorStreamBuildsSixCameraPipeline(t *testing.T) {
 		inputs[camera] = "/snapshot/" + camera + ".mp4"
 	}
 	var output strings.Builder
-	if err := compositor.Stream(t.Context(), CompositeRequest{Layout: "composite6", Quality: "standard", Inputs: inputs}, &output); err != nil {
+	if err := compositor.Stream(t.Context(), CompositeRequest{
+		Layout: "composite6", Quality: "standard", Inputs: inputs,
+		InputOffsets: map[string]float64{"front": 50},
+	}, &output); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.args, " ")
 	for _, expected := range []string{
-		"fps=24", "scale_rkrga=w=556:h=360", "xstack=inputs=6",
+		"-ss 50.000", "fps=24", "setpts=PTS-STARTPTS", "scale_rkrga=w=556:h=360", "xstack=inputs=6", "shortest=0",
 		"layout=0_0|556_0|1112_0|0_360|556_360|1112_360", "-b:v 3000k", "frag_keyframe+empty_moov+default_base_moof",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("args do not contain %q: %s", expected, joined)
 		}
 	}
-	if strings.Contains(joined, "pad=") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
+	if strings.Contains(joined, ",pad=") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
 		t.Fatalf("实时六路合成不应补黑边: %s", joined)
 	}
 	if runner.name != "/opt/teslabox/media/bin/ffmpeg" || output.String() != "fragmented-mp4" {
@@ -164,7 +167,7 @@ func TestCompositeArgsDownloadsFramesBeforeSoftwareScaling(t *testing.T) {
 	if !strings.Contains(joined, "scale_rkrga=w=492:h=320:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12") {
 		t.Fatalf("滤镜必须在硬件缩放后下载帧，且直接填满 Tesla 比例画布: %s", joined)
 	}
-	if strings.Contains(joined, "pad=") || strings.Contains(joined, "hwmap=mode=read") {
+	if strings.Contains(joined, ",pad=") || strings.Contains(joined, "hwmap=mode=read") {
 		t.Fatalf("滤镜不应在只读 DRM 映射上补黑边: %s", joined)
 	}
 }
@@ -237,7 +240,7 @@ func TestCompositeLayoutsUseTeslaAspectWithoutPadding(t *testing.T) {
 					t.Fatalf("args do not contain %q: %s", expected, joined)
 				}
 			}
-			if strings.Contains(joined, "pad=") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
+			if strings.Contains(joined, ",pad=") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
 				t.Fatalf("实时合成布局不应补黑边: %s", joined)
 			}
 		})

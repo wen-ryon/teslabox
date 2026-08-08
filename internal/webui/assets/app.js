@@ -8,7 +8,6 @@ const compositeLayouts = {
   composite3: {label:"三路合成", cameras:["front", "right_repeater", "left_repeater"]},
 };
 const musicPageSize = 24;
-const maximumExportDurationSeconds = 120;
 const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
@@ -61,6 +60,9 @@ let playbackWasPlaying = false;
 let playbackDiagnosticsTimer = 0;
 let timelinePositionRequestID = 0;
 let timelinePositionPending = false;
+let timelineScrubbing = false;
+let activeStreamTimelineStart = null;
+let activeTelemetryMediaOffset = 0;
 let playbackStalls = 0;
 let isPlaybackBuffering = false;
 let lastPlaybackProgressAt = 0;
@@ -74,8 +76,10 @@ let sourceExportSessionID = "";
 const sourceExportMomentIDs = new Set();
 const sourceExportCameras = new Set();
 const telemetryByVideo = new Map();
+const telemetryRequestsByVideo = new Map();
 let activeTelemetry = null;
 let telemetryAbortController = null;
+let telemetryPrefetchTimer = 0;
 let passwordChangeForced = false;
 let updatePollTimer = 0;
 let logsRefreshTimer = 0;
@@ -89,9 +93,13 @@ const networkLoadingTasks = new Map();
 const pageLoadingTasks = new Map();
 const requestLoadingControls = new Map();
 let networkLoadingTimer = 0;
+const compatibilitySelects = new Map();
+let compatibilitySelectSequence = 0;
+let compatibilitySelectDocumentObserver = null;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
+applyTeslaBrowserCompatibility(readPreference("teslabox-tesla-browser-compatibility", "false") === "true");
 applyViewState();
 showPage(state.page, false);
 
@@ -366,6 +374,7 @@ document.querySelectorAll("[data-log-source]").forEach((button) => button.addEve
   loadLogs();
 }));
 $("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
+$("tesla-browser-compatibility").addEventListener("change", (event) => applyTeslaBrowserCompatibility(event.target.checked));
 $("wifi-scan").addEventListener("click", scanWiFi);
 $("saved-network-toggle").addEventListener("click", () => toggleNetworkPanel("saved-network-panel", "saved-network-toggle"));
 $("available-network-toggle").addEventListener("click", () => toggleNetworkPanel("available-network-panel", "available-network-toggle"));
@@ -408,6 +417,14 @@ $("export-open").addEventListener("click", openExportModal);
 $("export-form").addEventListener("submit", createExportTask);
 $("export-cancel").addEventListener("click", cancelExportTask);
 $("export-layout").addEventListener("change", renderExportOptions);
+$("export-burn-timestamp").addEventListener("change", renderExportOverlayOptions);
+$("export-burn-sei").addEventListener("change", renderExportOverlayOptions);
+document.querySelectorAll('input[name="export-overlay-mode"]').forEach((input) => input.addEventListener("change", renderExportOverlayOptions));
+$("export-range-start").addEventListener("input", () => updateExportRangeFromSlider("start"));
+$("export-range-end").addEventListener("input", () => updateExportRangeFromSlider("end"));
+$("export-start-time").addEventListener("change", () => updateExportRangeFromTime("start"));
+$("export-end-time").addEventListener("change", () => updateExportRangeFromTime("end"));
+document.querySelectorAll("[data-export-adjust]").forEach((button) => button.addEventListener("click", () => adjustExportRange(button.dataset.exportAdjust)));
 $("export-mode-clip").addEventListener("click", () => setExportMode("clip"));
 $("export-mode-source").addEventListener("click", () => setExportMode("source"));
 $("export-source-current").addEventListener("click", selectCurrentSourceMoment);
@@ -424,6 +441,7 @@ document.querySelectorAll("[data-period]").forEach((button) => button.addEventLi
 document.querySelectorAll("[data-close-player]").forEach((element) => element.addEventListener("click", closePlayer));
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (closeOpenCompatibilitySelect()) return;
   if (!$("confirm-modal").hidden) resolveConfirmation(false);
   else if (!$("password-modal").hidden) closePasswordModal(false);
   else if (!$("export-modal").hidden) closeExportModal();
@@ -589,7 +607,7 @@ async function loadLogs({background = false} = {}) {
     $("logs-refresh").disabled = true;
     setLogsNotice("", false);
     try {
-      const lineCount = Number($("logs-lines").value) || 200;
+      const lineCount = Number($("logs-lines").value) || 50;
       const [report, storage] = await Promise.all([
         request(`/api/v1/logs?source=${encodeURIComponent(activeLogSource)}&lines=${lineCount}`, {loading:!background}),
         request("/api/v1/storage", {loading:!background}),
@@ -1086,6 +1104,15 @@ async function warmRestartGadget() {
 function renderLogs(report) {
   const labels = {usb:"USB 枚举", media:"视频与转码", application:"TeslaBox 服务", network:"网络与热点"};
   const lines = Array.isArray(report.lines) ? report.lines : [];
+  const summaries = Array.isArray(report.summaries) ? report.summaries : [];
+  const summary = $("logs-summary");
+  const summaryList = $("logs-summary-list");
+  summary.hidden = summaries.length === 0;
+  summaryList.replaceChildren(...summaries.map((message) => {
+    const item = document.createElement("li");
+    item.textContent = message;
+    return item;
+  }));
   $("logs-output").textContent = lines.length ? lines.join("\n") : "当前来源暂无日志。";
   const details = [`${labels[report.source] || report.source || "系统"} · ${lines.length} 行`, `生成于 ${formatDate(report.generated_at)}`];
   if (report.limited) details.push("仅显示最新日志");
@@ -1253,7 +1280,8 @@ function renderExportSettings() {
     title.textContent = source ? "多路原画压缩包" : exportTaskLabel(task.request);
     const detail = document.createElement("small");
     const completedAt = task.completed_at || task.created_at;
-    detail.textContent = `${formatDate(completedAt)}${task.estimated_bytes ? ` · 约 ${formatBytes(task.estimated_bytes)}` : ""}`;
+    const size = task.output_bytes ? ` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
+    detail.textContent = `${formatDate(completedAt)}${size}`;
     copy.append(title, detail);
     const download = document.createElement("a");
     download.className = "secondary compact";
@@ -1538,8 +1566,8 @@ function renderUpdateHistory(history) {
 async function selectUpdateVersion(release) {
   const rollback = release.action === "rollback";
   const confirmed = await askConfirmation(
-    rollback ? "选择主程序回退版本" : "选择指定主程序版本",
-    `${rollback ? "将回退" : "将安装"} TeslaBox 主程序至 ${release.version}。内核、无线驱动、FFmpeg 和 systemd 不会回退；确认后仍需下载并安装。`,
+    rollback ? "选择 TeslaBox 回退版本" : "选择指定 TeslaBox 版本",
+    `${rollback ? "将回退" : "将安装"} TeslaBox 至 ${release.version}。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版可以升级 FFmpeg，但回退不会主动降级已安装的媒体运行时。确认后仍需下载并安装。`,
     rollback ? "确认选择回退版本" : "确认选择版本", rollback,
   );
   if (!confirmed) return;
@@ -1566,8 +1594,8 @@ async function installUpdate() {
   const automatic = Boolean(state.maintenance?.update_auto_recovery);
   const rollback = state.update?.selected_action === "rollback";
   const confirmed = await askConfirmation(
-    rollback ? "回退 TeslaBox 主程序" : "安装系统更新",
-		automatic ? `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"}。TeslaBox 会自动断开 USB Gadget，安装健康检查通过后自动重启恢复；车机或电脑会短暂失去 USB 存储。内核、驱动、FFmpeg 和 systemd 不会回退。` : `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
+    rollback ? "回退 TeslaBox" : "安装系统更新",
+		automatic ? `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"}。TeslaBox 会自动断开 USB Gadget，安装健康检查通过后自动重启恢复；车机或电脑会短暂失去 USB 存储。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版会一并更新 FFmpeg。` : `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
 		automatic ? `确认自动维护${rollback ? "回退" : "安装"}` : `确认已拔线并${rollback ? "回退" : "安装"}`, true,
   );
   if (!confirmed) return;
@@ -2817,15 +2845,17 @@ function renderEventMarker() {
   layer.append(marker);
 }
 
-async function loadSessionPosition(position, autoplay) {
+async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1) {
   if (!activeSession) return false;
   const requestID = ++timelinePositionRequestID;
   const token = ++loadToken;
   timelinePositionPending = true;
   requestedPosition = Math.max(0, Math.min(Number(position), Number(activeSession.duration_seconds)));
+  activeStreamTimelineStart = null;
+  activeTelemetryMediaOffset = 0;
   try {
-    if (isCompositeDisplay(activeDisplay)) return await loadCompositePosition(requestedPosition, autoplay, token);
-    const selection = selectVideoAtPosition(activeSession, activeCamera, requestedPosition);
+    if (isCompositeDisplay(activeDisplay)) return await loadCompositePosition(requestedPosition, autoplay, token, preferredMomentIndex);
+    const selection = selectVideoAtPosition(activeSession, activeCamera, requestedPosition, preferredMomentIndex);
     $("session-timeline").value = String(requestedPosition);
     $("current-time").textContent = formatDuration(requestedPosition);
     if (!selection) {
@@ -2837,7 +2867,7 @@ async function loadSessionPosition(position, autoplay) {
     hidePlayerMessage();
     activeMomentIndex = selection.momentIndex;
     activeVideo = selection.video;
-    setPlaybackTelemetryVideo(activeVideo, token);
+    resetPlaybackTelemetryLoad();
     if (usesServerTranscode()) return await loadServerSingle(selection, autoplay, token);
     $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
     $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
@@ -2862,11 +2892,8 @@ async function loadSessionPosition(position, autoplay) {
     }
     if (token !== loadToken) return false;
     const localTime = Math.max(0, selection.localTime);
-    if (Number.isFinite(sessionVideo.duration)) {
-      sessionVideo.currentTime = Math.min(localTime, Math.max(0, sessionVideo.duration-.05));
-    } else {
-      sessionVideo.currentTime = localTime;
-    }
+    if (!await seekVideoElement(sessionVideo, localTime, token)) return false;
+    startPlaybackTelemetryLoad(activeVideo);
     if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
     return true;
   } finally {
@@ -2874,8 +2901,8 @@ async function loadSessionPosition(position, autoplay) {
   }
 }
 
-async function loadCompositePosition(position, autoplay, token) {
-  const selection = selectMomentAtPosition(activeSession, position);
+async function loadCompositePosition(position, autoplay, token, preferredMomentIndex = -1) {
+  const selection = selectMomentAtPosition(activeSession, position, preferredMomentIndex);
   if (!selection || selection.moment.videos.length === 0) {
     showPlayerMessage("这个时刻没有可播放的摄像头画面");
     releaseCompositeAuxiliaryTracks();
@@ -2887,7 +2914,7 @@ async function loadCompositePosition(position, autoplay, token) {
   const layout = compositeLayouts[activeDisplay] || compositeLayouts.composite6;
   const layoutVideos = layout.cameras
     .map((camera) => selection.moment.videos.find((video) => video.camera === camera))
-    .filter(Boolean);
+    .filter((video) => video && videoCoversAbsolutePosition(video, selection.absolute));
   if (layoutVideos.length === 0) {
     showPlayerMessage("这个时刻缺少当前布局需要的摄像头画面");
     releaseCompositeAuxiliaryTracks();
@@ -2897,7 +2924,7 @@ async function loadCompositePosition(position, autoplay, token) {
   const masterVideo = layoutVideos.find((video) => video.camera === "front") || layoutVideos[0];
   activeCamera = masterVideo.camera;
   activeVideo = masterVideo;
-  setPlaybackTelemetryVideo(activeVideo, token);
+  resetPlaybackTelemetryLoad();
   if (usesServerComposite()) {
     return await loadServerComposite(selection, layout, masterVideo, autoplay, token);
   }
@@ -2947,6 +2974,7 @@ async function loadCompositePosition(position, autoplay, token) {
   applyCompositeFrameGeometry(nextTracks.get(masterVideo.camera)?.element);
   clearUnusedCompositeTracks(nextTracks);
   compositeTracks = nextTracks;
+  startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   renderCameraSwitcher();
@@ -2956,8 +2984,9 @@ async function loadCompositePosition(position, autoplay, token) {
 
 async function loadServerComposite(selection, layout, masterVideo, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
-  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}`;
-  const sourceKey = `${selection.moment.id}:${activeDisplay}:${effectivePlaybackQuality}`;
+  const streamStart = Math.max(0, selection.localTime);
+  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`;
+  const sourceKey = `${selection.moment.id}:${activeDisplay}:${effectivePlaybackQuality}:${streamStart.toFixed(3)}`;
   if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
     sessionVideo.pause();
     sessionVideo.dataset.loadingToken = String(token);
@@ -2976,11 +3005,11 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
     }
   }
   if (token !== loadToken) return false;
-  const localTime = Math.max(0, (selection.absolute-new Date(selection.moment.recorded_at).getTime())/1000);
-  sessionVideo.currentTime = Number.isFinite(sessionVideo.duration)
-    ? Math.min(localTime, Math.max(0, sessionVideo.duration-.05))
-    : localTime;
+  if (!await seekVideoElement(sessionVideo, 0, token)) return false;
+  activeStreamTimelineStart = timelineMomentStart(selection.moment)+selection.localTime;
+  activeTelemetryMediaOffset = Math.max(0, (selection.absolute-new Date(activeVideo.recorded_at).getTime())/1000);
   compositeTracks = new Map([[masterVideo.camera, {element:sessionVideo, video:masterVideo, lastHardSync:0}]]);
+  startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
   applyDisplayState();
@@ -2992,8 +3021,9 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
 
 async function loadServerSingle(selection, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
-  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=single&camera=${encodeURIComponent(activeCamera)}&quality=${encodeURIComponent(effectivePlaybackQuality)}`;
-  const sourceKey = `${selection.moment.id}:single:${activeCamera}:${effectivePlaybackQuality}`;
+  const streamStart = Math.max(0, selection.localTime);
+  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=single&camera=${encodeURIComponent(activeCamera)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`;
+  const sourceKey = `${selection.moment.id}:single:${activeCamera}:${effectivePlaybackQuality}:${streamStart.toFixed(3)}`;
   delete sessionVideo.dataset.videoId;
   if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
     sessionVideo.pause();
@@ -3013,12 +3043,12 @@ async function loadServerSingle(selection, autoplay, token) {
   }
   if (token !== loadToken) return false;
   activeVideo = selection.video;
-  setPlaybackTelemetryVideo(activeVideo, token);
-  const localTime = Math.max(0, selection.localTime);
-  sessionVideo.currentTime = Number.isFinite(sessionVideo.duration)
-    ? Math.min(localTime, Math.max(0, sessionVideo.duration-.05))
-    : localTime;
+  resetPlaybackTelemetryLoad();
+  if (!await seekVideoElement(sessionVideo, 0, token)) return false;
+  activeStreamTimelineStart = timelineMomentStart(selection.moment)+selection.localTime;
+  activeTelemetryMediaOffset = Math.max(0, selection.localTime);
   compositeTracks = new Map([[activeCamera, {element:sessionVideo, video:activeVideo, lastHardSync:0}]]);
+  startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
   applyDisplayState();
@@ -3026,19 +3056,23 @@ async function loadServerSingle(selection, autoplay, token) {
   return true;
 }
 
-function selectMomentAtPosition(session, position) {
+function selectMomentAtPosition(session, position, preferredMomentIndex = -1) {
   if (!session || session.moments.length === 0) return null;
   const boundedPosition = Math.max(0, Math.min(Number(position) || 0, Number(session.duration_seconds) || 0));
-  let momentIndex = 0;
-  for (let index=0; index<session.moments.length; index++) {
-    const moment = session.moments[index];
-    const start = timelineMomentStart(moment);
-    const end = start+timelineMomentDuration(moment);
-    if (boundedPosition >= start && (boundedPosition < end || index === session.moments.length-1)) {
-      momentIndex = index;
-      break;
+  let momentIndex = Number.isInteger(preferredMomentIndex) && preferredMomentIndex >= 0 && preferredMomentIndex < session.moments.length
+    ? preferredMomentIndex
+    : 0;
+  if (momentIndex !== preferredMomentIndex) {
+    for (let index=0; index<session.moments.length; index++) {
+      const moment = session.moments[index];
+      const start = timelineMomentStart(moment);
+      const end = start+timelineMomentDuration(moment);
+      if (boundedPosition >= start && (boundedPosition < end || index === session.moments.length-1)) {
+        momentIndex = index;
+        break;
+      }
+      if (boundedPosition >= start) momentIndex = index;
     }
-    if (boundedPosition >= start) momentIndex = index;
   }
   const moment = session.moments[momentIndex];
   const localTime = Math.max(0, Math.min(timelineMomentDuration(moment), boundedPosition-timelineMomentStart(moment)));
@@ -3131,10 +3165,7 @@ async function prepareVideoElement(element, video, absolute, token) {
   }
   if (token !== loadToken) return false;
   const localTime = Math.max(0, (absolute-new Date(video.recorded_at).getTime())/1000);
-  element.currentTime = Number.isFinite(element.duration)
-    ? Math.min(localTime, Math.max(0, element.duration-.05))
-    : localTime;
-  return !element.error;
+  return await seekVideoElement(element, localTime, token);
 }
 
 function clearUnusedCompositeTracks(nextTracks) {
@@ -3150,16 +3181,27 @@ function clearUnusedCompositeTracks(nextTracks) {
   });
 }
 
-function selectVideoAtPosition(session, camera, position) {
-  const momentSelection = selectMomentAtPosition(session, position);
+function selectVideoAtPosition(session, camera, position, preferredMomentIndex = -1) {
+  const momentSelection = selectMomentAtPosition(session, position, preferredMomentIndex);
   if (!momentSelection) return null;
   const {absolute, momentIndex, moment} = momentSelection;
   const video = moment.videos.find((item) => item.camera === camera);
-  if (!video) return null;
+  if (!video || !videoCoversAbsolutePosition(video, absolute)) return null;
   return {
     ...momentSelection, video, momentIndex,
     localTime: (absolute-new Date(video.recorded_at).getTime())/1000,
   };
+}
+
+function videoCoversAbsolutePosition(video, absolute) {
+  const recordedAt = new Date(video?.recorded_at).getTime();
+  const duration = Number(video?.duration_seconds);
+  if (!Number.isFinite(recordedAt) || !Number.isFinite(absolute)) return false;
+  // 旧索引可能没有时长，继续交给浏览器探测，避免升级后误判已有录像不可播放。
+  if (!Number.isFinite(duration) || duration <= 0) return true;
+  const localTime = (absolute-recordedAt)/1000;
+  // 同一分钟的六路文件起始时间可能有少量偏差，起点前允许沿用该路首帧。
+  return localTime >= -3 && localTime < Math.max(.05, duration-.05);
 }
 
 async function switchCamera(camera) {
@@ -3206,22 +3248,27 @@ function togglePlayback() {
 }
 
 function previewTimelinePosition() {
+  timelineScrubbing = true;
   $("current-time").textContent = formatDuration(Number($("session-timeline").value));
 }
 
 function seekTimelinePosition() {
+  const position = Number($("session-timeline").value);
+  timelineScrubbing = false;
   const autoplay = !sessionVideo.paused;
   if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) pauseCompositeTracks();
   else sessionVideo.pause();
-  loadSessionPosition(Number($("session-timeline").value), autoplay);
+  loadSessionPosition(position, autoplay);
 }
 
 function updateUnifiedTimeline() {
-  if (!activeSession || !activeVideo || sessionVideo.seeking || timelinePositionPending) return;
+  if (!activeSession || !activeVideo || timelineScrubbing || sessionVideo.seeking || timelinePositionPending) return;
   const moment = activeSession.moments[activeMomentIndex];
   if (!moment) return;
-  const position = Math.max(0, timelineMomentStart(moment) +
-    (new Date(activeVideo.recorded_at)-new Date(moment.recorded_at))/1000 + sessionVideo.currentTime);
+  const position = activeStreamTimelineStart === null
+    ? Math.max(0, timelineMomentStart(moment) +
+      (new Date(activeVideo.recorded_at)-new Date(moment.recorded_at))/1000 + sessionVideo.currentTime)
+    : activeStreamTimelineStart+sessionVideo.currentTime;
   requestedPosition = Math.min(position, activeSession.duration_seconds);
   $("session-timeline").value = String(requestedPosition);
   $("current-time").textContent = formatDuration(requestedPosition);
@@ -3229,10 +3276,63 @@ function updateUnifiedTimeline() {
   if (isCompositeDisplay(activeDisplay) && !usesServerComposite()) synchronizeCompositeTracks();
 }
 
-function setPlaybackTelemetryVideo(video, token) {
+function resetPlaybackTelemetryLoad() {
   telemetryAbortController?.abort();
   telemetryAbortController = null;
+  clearTimeout(telemetryPrefetchTimer);
+  telemetryPrefetchTimer = 0;
   activeTelemetry = null;
+  renderPlaybackTelemetry();
+}
+
+function cachePlaybackTelemetry(videoID, timeline) {
+  if (telemetryByVideo.size >= 24 && !telemetryByVideo.has(videoID)) {
+    telemetryByVideo.delete(telemetryByVideo.keys().next().value);
+  }
+  telemetryByVideo.set(videoID, timeline);
+  return timeline;
+}
+
+function requestPlaybackTelemetry(video, signal) {
+  if (!video?.id) return Promise.reject(new Error("缺少 SEI 视频标识"));
+  const cached = telemetryByVideo.get(video.id);
+  if (cached) return Promise.resolve(cached);
+  const pending = telemetryRequestsByVideo.get(video.id);
+  if (pending) return pending;
+  const promise = request(`/api/v1/videos/${encodeURIComponent(video.id)}/sei`, {signal, loading:false})
+    .then((timeline) => cachePlaybackTelemetry(video.id, timeline))
+    .finally(() => {
+      if (telemetryRequestsByVideo.get(video.id) === promise) telemetryRequestsByVideo.delete(video.id);
+    });
+  telemetryRequestsByVideo.set(video.id, promise);
+  return promise;
+}
+
+function scheduleAdjacentTelemetryPrefetch() {
+  clearTimeout(telemetryPrefetchTimer);
+  const session = activeSession;
+  const momentIndex = activeMomentIndex;
+  const camera = activeVideo?.camera || activeCamera;
+  if (!session || momentIndex < 0) return;
+  telemetryPrefetchTimer = window.setTimeout(async () => {
+    telemetryPrefetchTimer = 0;
+    if (activeSession !== session) return;
+    for (const index of [momentIndex+1, momentIndex-1]) {
+      const moment = session.moments?.[index];
+      const video = moment?.videos?.find((item) => item.camera === camera) ||
+        moment?.videos?.find((item) => item.camera === "front") || moment?.videos?.[0];
+      if (!video?.id || telemetryByVideo.has(video.id)) continue;
+      try {
+        await requestPlaybackTelemetry(video);
+      } catch (_) {
+        // 预取失败不能影响当前视频；真正切换到该分钟时仍会按正常路径重试。
+      }
+      if (activeSession !== session) return;
+    }
+  }, 700);
+}
+
+function startPlaybackTelemetryLoad(video) {
   if (!video?.id) {
     renderPlaybackTelemetry();
     return;
@@ -3241,20 +3341,23 @@ function setPlaybackTelemetryVideo(video, token) {
   if (cached) {
     activeTelemetry = cached;
     renderPlaybackTelemetry();
+    scheduleAdjacentTelemetryPrefetch();
     return;
   }
   const controller = new AbortController();
+  const videoID = video.id;
   telemetryAbortController = controller;
   renderPlaybackTelemetry();
-  request(`/api/v1/videos/${encodeURIComponent(video.id)}/sei`, {signal:controller.signal, loading:false}).then((timeline) => {
-    if (controller.signal.aborted || token !== loadToken || activeVideo?.id !== video.id) return;
-    if (telemetryByVideo.size >= 24) telemetryByVideo.clear();
-    telemetryByVideo.set(video.id, timeline);
+  requestPlaybackTelemetry(video, controller.signal).then((timeline) => {
+    if (controller.signal.aborted || telemetryAbortController !== controller || activeVideo?.id !== videoID) return;
     activeTelemetry = timeline;
+    telemetryAbortController = null;
     renderPlaybackTelemetry();
+    scheduleAdjacentTelemetryPrefetch();
   }).catch((error) => {
-    if (controller.signal.aborted || token !== loadToken || activeVideo?.id !== video.id) return;
+    if (controller.signal.aborted || telemetryAbortController !== controller || activeVideo?.id !== videoID) return;
     activeTelemetry = {available:false, message:`Tesla SEI 信息暂不可用：${error.message}`, samples:[]};
+    telemetryAbortController = null;
     renderPlaybackTelemetry();
   });
 }
@@ -3266,23 +3369,78 @@ function renderPlaybackTelemetry() {
     return;
   }
   container.hidden = false;
-  $("playback-timestamp").textContent = formatRecordingTimestamp(activeVideo.recorded_at, Math.max(0, sessionVideo.currentTime || 0));
+  const sourceSeconds = Math.max(0, (sessionVideo.currentTime || 0)+activeTelemetryMediaOffset);
+  $("playback-timestamp").textContent = formatRecordingTimestamp(activeVideo.recorded_at, sourceSeconds);
   if (!activeTelemetry) {
-    $("playback-sei").textContent = "正在读取 Tesla SEI 信息…";
+    renderPlaybackTelemetrySample(null, "loading", "正在读取 Tesla SEI 信息…");
     return;
   }
   if (!activeTelemetry.available) {
-    $("playback-sei").textContent = activeTelemetry.message || "该录像没有 Tesla SEI 信息";
+    renderPlaybackTelemetrySample(null, "unavailable", activeTelemetry.message || "该录像没有 Tesla SEI 信息");
     return;
   }
   const samples = Array.isArray(activeTelemetry.samples) ? activeTelemetry.samples : [];
-  const currentMS = Math.max(0, Math.round((sessionVideo.currentTime || 0)*1000));
+  const currentMS = Math.max(0, Math.round(sourceSeconds*1000));
   let selected = samples[0];
   for (const sample of samples) {
     if (Number(sample.offset_ms || 0) > currentMS) break;
     selected = sample;
   }
-  $("playback-sei").textContent = selected?.text || "该录像没有可显示的 Tesla SEI 字段";
+  renderPlaybackTelemetrySample(selected?.metadata, selected?.metadata ? "ready" : "unavailable", "该录像没有可显示的 Tesla SEI 字段");
+}
+
+function renderPlaybackTelemetrySample(metadata, state, message) {
+  const container = $("playback-telemetry");
+  container.dataset.state = state;
+  $("playback-sei").textContent = message;
+  const gear = String(metadata?.gear || "").trim().toUpperCase();
+  const speedMPS = Number(metadata?.speed_mps);
+  const accelerator = normalizeAcceleratorPercent(metadata?.accelerator_position);
+  const steering = Number(metadata?.steering_angle);
+  const hasSteering = Number.isFinite(steering);
+  const brakeApplied = metadata?.brake_applied === true;
+  const leftBlinker = metadata?.left_blinker === true;
+  const rightBlinker = metadata?.right_blinker === true;
+  const autopilot = playbackAutopilotState(metadata?.autopilot);
+  $("playback-gear").textContent = gear || "—";
+  $("playback-gear-cell").dataset.gear = gear;
+  $("playback-speed").textContent = Number.isFinite(speedMPS) ? String(Math.round(Math.abs(speedMPS)*3.6)) : "—";
+  $("playback-accelerator").textContent = accelerator === null ? "—" : String(accelerator);
+  $("playback-autopilot").dataset.mode = autopilot.mode;
+  $("playback-autopilot").title = autopilot.title;
+  $("playback-autopilot-label").textContent = autopilot.label;
+  $("playback-accelerator").closest(".telemetry-accelerator").dataset.active = String(accelerator !== null && accelerator > 0);
+  $("playback-accelerator").closest(".telemetry-accelerator").style.setProperty("--accelerator-level", `${accelerator || 0}%`);
+  $("playback-steering").closest(".telemetry-steering").dataset.assisted = String(autopilot.steeringAssisted);
+  const steeringSign = steering > 0 ? "+" : steering < 0 ? "−" : "\u00a0";
+  $("playback-steering").textContent = hasSteering ? `${steeringSign}${Math.abs(steering).toFixed(1)}°` : "—";
+  $("playback-steering-wheel").style.transform = `rotate(${hasSteering ? Math.max(-540, Math.min(540, steering)) : 0}deg)`;
+  $("playback-brake").dataset.active = String(brakeApplied);
+  $("playback-brake").title = brakeApplied ? "刹车已踩下" : "刹车松开";
+  $("playback-left-blinker").dataset.active = String(leftBlinker);
+  $("playback-left-blinker").title = leftBlinker ? "左转向灯已开启" : "左转向灯关闭";
+  $("playback-right-blinker").dataset.active = String(rightBlinker);
+  $("playback-right-blinker").title = rightBlinker ? "右转向灯已开启" : "右转向灯关闭";
+}
+
+function normalizeAcceleratorPercent(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return null;
+  const percent = Math.abs(raw) <= 1.01 ? raw*100 : raw;
+  return Math.round(Math.max(0, Math.min(100, percent)));
+}
+
+function playbackAutopilotState(value) {
+  const source = String(value || "").trim();
+  const normalized = source.toUpperCase();
+  if (normalized.includes("FSD")) return {mode:"fsd", label:"FSD", title:`辅助驾驶：${source}`, steeringAssisted:true};
+  if (normalized === "EAP") return {mode:"steering", label:"EAP", title:"辅助驾驶：EAP", steeringAssisted:true};
+  if (normalized === "AP" || normalized.includes("AUTOSTEER") || source.includes("自动辅助转向")) {
+    return {mode:"steering", label:"AP", title:`辅助驾驶：${source || "自动辅助转向"}`, steeringAssisted:true};
+  }
+  if (normalized.includes("TACC")) return {mode:"tacc", label:"TACC", title:`辅助驾驶：${source}`, steeringAssisted:false};
+  if (!source || source === "无") return {mode:"off", label:"手动", title:"辅助驾驶：关闭", steeringAssisted:false};
+  return {mode:"unknown", label:source, title:`辅助驾驶：${source}`, steeringAssisted:false};
 }
 
 function formatRecordingTimestamp(recordedAt, seconds) {
@@ -3306,7 +3464,8 @@ function formatRecordingTimestamp(recordedAt, seconds) {
 }
 
 function advanceToNextSegment() {
-  if (!activeSession) return;
+  // 换源和拖动会产生旧媒体的迟到 ended；此时推进会把用户刚选中的短尾片段覆盖掉。
+  if (!activeSession || timelinePositionPending || sessionVideo.seeking) return;
   const next = activeMomentIndex+1;
   if (next >= activeSession.moments.length) {
     $("session-timeline").value = String(activeSession.duration_seconds);
@@ -3315,7 +3474,8 @@ function advanceToNextSegment() {
     return;
   }
   const nextPosition = timelineMomentStart(activeSession.moments[next]);
-  loadSessionPosition(nextPosition, true);
+  // 自然续播已知道目标片段，不能再用可能重叠的索引时长反查，否则会重新选中刚结束的旧片段。
+  loadSessionPosition(nextPosition, true, next);
 }
 
 function updatePlayButton() {
@@ -3328,8 +3488,10 @@ function currentSessionPosition() {
   if (!activeSession || !activeVideo) return requestedPosition;
   const moment = activeSession.moments[activeMomentIndex];
   if (!moment) return requestedPosition;
-  return Math.max(0, Math.min(activeSession.duration_seconds,
-    timelineMomentStart(moment) + (new Date(activeVideo.recorded_at)-new Date(moment.recorded_at))/1000 + sessionVideo.currentTime));
+  const position = activeStreamTimelineStart === null
+    ? timelineMomentStart(moment) + (new Date(activeVideo.recorded_at)-new Date(moment.recorded_at))/1000 + sessionVideo.currentTime
+    : activeStreamTimelineStart+sessionVideo.currentTime;
+  return Math.max(0, Math.min(activeSession.duration_seconds, position));
 }
 
 async function setDisplayMode(display) {
@@ -3380,15 +3542,13 @@ function openExportModal() {
   }
   exportTask = null;
   const position = Math.min(currentSessionPosition(), Math.max(0, activeSession.duration_seconds-1));
-  $("export-start").max = String(Math.max(0, activeSession.duration_seconds-1));
-  $("export-start").value = position.toFixed(1);
-  $("export-duration").max = String(Math.min(maximumExportDurationSeconds, activeSession.duration_seconds-position));
-  $("export-duration").value = Math.min(60, Math.max(1, activeSession.duration_seconds-position)).toFixed(1);
+  initializeExportRange(position, Math.min(activeSession.duration_seconds, position+60));
   $("export-layout").value = isCompositeDisplay(activeDisplay) ? activeDisplay : "single";
   $("export-camera").value = activeCamera;
   $("export-quality").value = effectivePlaybackQuality === "original" && !isCompositeDisplay(activeDisplay) ? "original" : "high";
   $("export-burn-timestamp").checked = true;
   $("export-burn-sei").checked = false;
+  document.querySelector('input[name="export-overlay-mode"][value="dashcam"]').checked = true;
   resetSourceExportSelection();
   setExportMode("clip");
   renderExportOptions();
@@ -3396,12 +3556,109 @@ function openExportModal() {
 }
 
 function restoreExportSelection(request) {
-  if (!activeSession || request?.mode !== "source") return;
+  if (!activeSession) return;
+  if (request?.mode !== "source") {
+    const start = Math.max(0, Number(request?.start_seconds || 0));
+    initializeExportRange(start, start+Math.max(1, Number(request?.duration_seconds || 1)));
+	if (request?.layout) $("export-layout").value = request.layout;
+	if (request?.camera || request?.cameras?.[0]) $("export-camera").value = request.camera || request.cameras[0];
+	if (request?.quality) $("export-quality").value = request.quality;
+	$("export-burn-timestamp").checked = Boolean(request?.burn_timestamp);
+	$("export-burn-sei").checked = Boolean(request?.burn_sei);
+	const mode = request?.overlay_mode || ($("export-burn-sei").checked ? "top_bar" : "dashcam");
+	const modeInput = document.querySelector(`input[name="export-overlay-mode"][value="${mode}"]`);
+	if (modeInput) modeInput.checked = true;
+	renderExportOptions();
+    return;
+  }
   sourceExportSessionID = activeSession.id;
   sourceExportMomentIDs.clear();
   sourceExportCameras.clear();
   (request.moment_ids || []).forEach((id) => sourceExportMomentIDs.add(id));
   (request.cameras || []).forEach((camera) => sourceExportCameras.add(camera));
+}
+
+function initializeExportRange(start, end) {
+  if (!activeSession) return;
+  const maximum = Math.max(1, Number(activeSession.duration_seconds || 0));
+  for (const input of [$("export-range-start"), $("export-range-end")]) {
+    input.min = "0";
+    input.max = String(maximum);
+    input.step = "0.1";
+  }
+  setExportRange(start, end);
+  const markers = $("export-range-markers");
+  markers.replaceChildren();
+  (activeSession.moments || []).slice(1).forEach((moment) => {
+    const position = Number(moment.timeline_start_seconds || 0);
+    if (!(position > 0 && position < maximum)) return;
+    const marker = document.createElement("span");
+    marker.className = "export-range-marker";
+    marker.style.left = `${position/maximum*100}%`;
+    markers.append(marker);
+  });
+}
+
+function setExportRange(start, end) {
+  if (!activeSession) return;
+  const maximum = Math.max(1, Number(activeSession.duration_seconds || 0));
+  start = Math.max(0, Math.min(Number(start) || 0, maximum-1));
+  end = Math.max(start+1, Math.min(Number(end) || start+1, maximum));
+  $("export-range-start").value = start.toFixed(1);
+  $("export-range-end").value = end.toFixed(1);
+  renderExportRange(start, end, maximum);
+}
+
+function updateExportRangeFromSlider(changed) {
+  let start = Number($("export-range-start").value);
+  let end = Number($("export-range-end").value);
+  if (end-start < 1) {
+    if (changed === "start") start = end-1;
+    else end = start+1;
+  }
+  setExportRange(start, end);
+}
+
+function updateExportRangeFromTime(changed) {
+  if (!activeSession) return;
+  const input = changed === "start" ? $("export-start-time") : $("export-end-time");
+  const instant = new Date(input.value).getTime();
+  const sessionStart = new Date(activeSession.start_at).getTime();
+  if (!Number.isFinite(instant) || !Number.isFinite(sessionStart)) {
+    renderExportRange(Number($("export-range-start").value), Number($("export-range-end").value), Number(activeSession.duration_seconds));
+    return;
+  }
+  const seconds = (instant-sessionStart)/1000;
+  const start = changed === "start" ? seconds : Number($("export-range-start").value);
+  const end = changed === "end" ? seconds : Number($("export-range-end").value);
+  setExportRange(start, end);
+}
+
+function adjustExportRange(value) {
+  const [edge, deltaText] = String(value || "").split(":");
+  const delta = Number(deltaText);
+  if (!Number.isFinite(delta)) return;
+  const start = Number($("export-range-start").value)+(edge === "start" ? delta : 0);
+  const end = Number($("export-range-end").value)+(edge === "end" ? delta : 0);
+  setExportRange(start, end);
+}
+
+function renderExportRange(start, end, maximum) {
+  const startPercent = Math.max(0, Math.min(100, start/maximum*100));
+  const endPercent = Math.max(startPercent, Math.min(100, end/maximum*100));
+  $("export-range-track").style.setProperty("--range-start", `${startPercent}%`);
+  $("export-range-track").style.setProperty("--range-end", `${endPercent}%`);
+  $("export-range-duration").textContent = `已选择 ${formatDuration(end-start)} · ${start.toFixed(1)}s — ${end.toFixed(1)}s`;
+  const base = new Date(activeSession.start_at).getTime();
+  if (Number.isFinite(base)) {
+    $("export-start-time").value = localDateTimeInput(new Date(base+start*1000));
+    $("export-end-time").value = localDateTimeInput(new Date(base+end*1000));
+  }
+}
+
+function localDateTimeInput(value) {
+  const local = new Date(value.getTime()-value.getTimezoneOffset()*60*1000);
+  return local.toISOString().slice(0,19);
 }
 
 function resetSourceExportSelection() {
@@ -3458,8 +3715,30 @@ function renderExportOptions() {
   originalOption.disabled = $("export-layout").value !== "single";
   if (originalOption.disabled && $("export-quality").value === "original") $("export-quality").value = "high";
   $("export-quality-help").textContent = $("export-layout").value === "single"
-    ? "高保真合成使用恒定质量硬编；单路原画保留源分辨率，但跨分钟或精确裁剪仍需重新编码。"
+    ? "单路高保真和原画均使用 H.265（HEVC）硬编，避免 RK3568 H.264 编码残块；原画保留源分辨率。"
     : "高保真多路合成会导出 H.265（HEVC）MP4，以避开 RKMPP H.264 多路残块；请使用支持 HEVC 的本地播放器。需要最广兼容或与网页原画完全一致时，请切换到“多路原画”下载原始文件和离线浏览页。";
+	renderExportOverlayOptions();
+}
+
+function renderExportOverlayOptions() {
+  const burnTimestamp = $("export-burn-timestamp").checked;
+  const burnSEI = $("export-burn-sei").checked;
+  const field = $("export-overlay-mode-field");
+  field.hidden = !burnTimestamp && !burnSEI;
+  const dashcam = document.querySelector('[data-export-overlay-mode="dashcam"]');
+  dashcam.hidden = !burnTimestamp || burnSEI;
+  let selected = document.querySelector('input[name="export-overlay-mode"]:checked');
+  if (!selected || selected.closest("label").hidden) {
+    const fallback = burnTimestamp && !burnSEI ? "dashcam" : "top_bar";
+    selected = document.querySelector(`input[name="export-overlay-mode"][value="${fallback}"]`);
+    selected.checked = true;
+  }
+  const help = {
+    dashcam:"时间直接绘制在左上角，不增加黑边；适合单路和多路的常规行车记录仪成片。",
+    top_bar:"在画面上方扩展独立信息栏，完全不遮挡录像内容。",
+    floating:"信息覆盖在画面顶部，成片尺寸不变，适合更紧凑的展示。",
+  };
+  $("export-overlay-mode-help").textContent = help[selected?.value] || "";
 }
 
 function renderSourceExportOptions() {
@@ -3631,15 +3910,16 @@ async function createExportTask(event) {
   }
   const layout = $("export-layout").value;
   const cameras = layout === "single" ? [$("export-camera").value] : (compositeLayouts[layout]?.cameras || []);
-  const start = Number($("export-start").value);
-  const duration = Number($("export-duration").value);
+  const start = Number($("export-range-start").value);
+  const end = Number($("export-range-end").value);
+  const duration = end-start;
   $("export-error").textContent = "";
   if (cameras.length === 0) {
     $("export-error").textContent = "请至少选择一个摄像头视角";
     return;
   }
-  if (!Number.isFinite(start) || !Number.isFinite(duration) || start < 0 || duration < 1 || duration > maximumExportDurationSeconds || start+duration > activeSession.duration_seconds+.01) {
-    $("export-error").textContent = "导出范围必须位于当前完整录像内，且最长 2 分钟";
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || duration < 1 || end > activeSession.duration_seconds+.01) {
+    $("export-error").textContent = "导出范围必须位于当前完整录像内，且结束时间必须晚于开始时间至少 1 秒";
     return;
   }
   $("export-submit").disabled = true;
@@ -3654,6 +3934,7 @@ async function createExportTask(event) {
       body: JSON.stringify({
         mode:"clip", session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
         burn_timestamp:$("export-burn-timestamp").checked, burn_sei:$("export-burn-sei").checked,
+        overlay_mode:document.querySelector('input[name="export-overlay-mode"]:checked')?.value || "",
       }),
     });
     renderExportTask(exportTask);
@@ -3701,9 +3982,9 @@ function renderExportTask(task) {
   $("export-task-status").hidden = false;
   $("export-state").textContent = labels[task.state] || task.state;
   $("export-progress").value = task.progress_percent || 0;
-  const estimate = task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "";
+  const size = task.output_bytes ? ` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
   const files = source && task.file_count ? ` · ${task.file_count} 个源文件` : "";
-  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${files}${estimate}` : `可以修改参数后再次导出${files}${estimate}`);
+  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${files}${size}` : `可以修改参数后再次导出${files}${size}`);
   $("export-cancel").hidden = !running;
   $("export-download").hidden = task.state !== "completed" || !task.download_ready;
   $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";
@@ -3908,6 +4189,36 @@ function waitForMetadata(video, timeout = 4000) {
   });
 }
 
+function seekVideoElement(video, requestedTime, token, timeout = 4000) {
+  const target = Number.isFinite(video.duration)
+    ? Math.min(Math.max(0, requestedTime), Math.max(0, video.duration-.05))
+    : Math.max(0, requestedTime);
+  if (!video.seeking && Math.abs(video.currentTime-target) < .05) return Promise.resolve(!video.error);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = 0;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeEventListener("seeked", done);
+      video.removeEventListener("error", done);
+      video.removeEventListener("emptied", done);
+      const positioned = !video.seeking && Math.abs(video.currentTime-target) < .25;
+      resolve(token === loadToken && !video.error && positioned);
+    };
+    video.addEventListener("seeked", done);
+    video.addEventListener("error", done);
+    video.addEventListener("emptied", done);
+    timer = window.setTimeout(done, timeout);
+    try {
+      video.currentTime = target;
+    } catch (_) {
+      done();
+    }
+  });
+}
+
 function showPlayerMessage(message) {
   $("player-message").textContent = message;
   $("player-message").hidden = false;
@@ -3919,9 +4230,12 @@ function closePlayerMedia() {
   loadToken++;
   telemetryAbortController?.abort();
   telemetryAbortController = null;
+  clearTimeout(telemetryPrefetchTimer);
+  telemetryPrefetchTimer = 0;
   activeTelemetry = null;
   timelinePositionRequestID++;
   timelinePositionPending = false;
+  timelineScrubbing = false;
   pauseCompositeTracks();
   releaseCompositeAuxiliaryTracks();
   releaseVideoElement(sessionVideo);
@@ -3931,6 +4245,8 @@ function closePlayerMedia() {
   activeVideo = null;
   activeMomentIndex = -1;
   requestedPosition = 0;
+  activeStreamTimelineStart = null;
+  activeTelemetryMediaOffset = 0;
   playbackWasPlaying = false;
   resetPlaybackFallbackState();
   $("camera-switcher").replaceChildren();
@@ -4323,6 +4639,127 @@ function applyUIFont(value) {
   $("settings-font-size").value = selected;
   writePreference("teslabox-settings-font", selected);
 }
+
+function applyTeslaBrowserCompatibility(enabled) {
+  const active = Boolean(enabled);
+  $("tesla-browser-compatibility").checked = active;
+  document.documentElement.dataset.teslaBrowserCompatibility = active ? "true" : "false";
+  writePreference("teslabox-tesla-browser-compatibility", active ? "true" : "false");
+  if (!active) {
+    compatibilitySelectDocumentObserver?.disconnect();
+    compatibilitySelectDocumentObserver = null;
+    compatibilitySelects.forEach((entry, select) => {
+      entry.observer.disconnect();
+      select.removeEventListener("change", entry.sync);
+      select.classList.remove("compat-select-native");
+      entry.wrapper.remove();
+    });
+    compatibilitySelects.clear();
+    return;
+  }
+  document.querySelectorAll("select").forEach(upgradeCompatibilitySelect);
+  if (compatibilitySelectDocumentObserver) return;
+  compatibilitySelectDocumentObserver = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => {
+      if (!(node instanceof Element)) return;
+      if (node.matches("select")) upgradeCompatibilitySelect(node);
+      node.querySelectorAll?.("select").forEach(upgradeCompatibilitySelect);
+    }));
+  });
+  compatibilitySelectDocumentObserver.observe(document.body, {childList:true, subtree:true});
+}
+
+function upgradeCompatibilitySelect(select) {
+  if (!(select instanceof HTMLSelectElement) || compatibilitySelects.has(select)) return;
+  const wrapper = document.createElement("div");
+  wrapper.className = "compat-select";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "compat-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const options = document.createElement("div");
+  options.id = `${select.id || "select"}-compat-options-${++compatibilitySelectSequence}`;
+  options.className = "compat-select-options";
+  options.setAttribute("role", "listbox");
+  options.hidden = true;
+  trigger.setAttribute("aria-controls", options.id);
+  wrapper.append(trigger, options);
+  select.insertAdjacentElement("afterend", wrapper);
+  select.classList.add("compat-select-native");
+
+  const sync = () => renderCompatibilitySelect(select);
+  const observer = new MutationObserver(sync);
+  observer.observe(select, {attributes:true, childList:true, characterData:true, subtree:true});
+  compatibilitySelects.set(select, {wrapper, trigger, options, observer, sync});
+  select.addEventListener("change", sync);
+  trigger.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const opening = options.hidden;
+    closeOpenCompatibilitySelect(select);
+    renderCompatibilitySelect(select);
+    options.hidden = !opening;
+    wrapper.classList.toggle("open", opening);
+    trigger.setAttribute("aria-expanded", opening ? "true" : "false");
+  });
+  options.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest("button[data-option-index]");
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const index = Number(button.dataset.optionIndex);
+    if (!Number.isInteger(index) || !select.options[index]) return;
+    const changed = select.selectedIndex !== index;
+    select.selectedIndex = index;
+    renderCompatibilitySelect(select);
+    closeOpenCompatibilitySelect();
+    if (changed) {
+      select.dispatchEvent(new Event("input", {bubbles:true}));
+      select.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+  });
+  renderCompatibilitySelect(select);
+}
+
+function renderCompatibilitySelect(select) {
+  const entry = compatibilitySelects.get(select);
+  if (!entry) return;
+  const selected = select.options[select.selectedIndex];
+  entry.trigger.textContent = selected?.textContent?.trim() || "请选择";
+  entry.trigger.disabled = select.disabled;
+  entry.trigger.setAttribute("aria-label", select.getAttribute("aria-label") || selected?.textContent?.trim() || "选择选项");
+  entry.wrapper.hidden = select.hidden;
+  entry.options.textContent = "";
+  const fragment = document.createDocumentFragment();
+  Array.from(select.options).forEach((option, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "compat-select-option";
+    button.dataset.optionIndex = String(index);
+    button.textContent = option.textContent;
+    button.disabled = option.disabled;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", option.selected ? "true" : "false");
+    fragment.appendChild(button);
+  });
+  entry.options.appendChild(fragment);
+}
+
+function closeOpenCompatibilitySelect(except) {
+  let closed = false;
+  compatibilitySelects.forEach((entry, select) => {
+    if (select === except || entry.options.hidden) return;
+    entry.options.hidden = true;
+    entry.wrapper.classList.remove("open");
+    entry.trigger.setAttribute("aria-expanded", "false");
+    closed = true;
+  });
+  return closed;
+}
+
+document.addEventListener("click", () => closeOpenCompatibilitySelect());
 
 function preferredCamera(session) {
   return session.cameras.includes("front") ? "front" : session.cameras[0];

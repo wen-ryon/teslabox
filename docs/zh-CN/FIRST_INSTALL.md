@@ -111,6 +111,8 @@ systemctl is-enabled radxa-usbnet.service
 curl -fsS http://127.0.0.1/healthz
 /opt/teslabox/media/bin/ffmpeg -hide_banner -hwaccels
 /opt/teslabox/media/bin/ffmpeg -hide_banner -decoders | sed -n '/_rkmpp/p'
+/opt/teslabox/media/bin/ffmpeg -hide_banner -encoders | sed -n '/_rkmpp/p'
+/opt/teslabox/media/bin/ffmpeg -hide_banner -filters | sed -n '/ass\|subtitles\|_rkrga/p'
 ```
 
 预期结果：
@@ -119,13 +121,13 @@ curl -fsS http://127.0.0.1/healthz
 - `teslabox-update.service` 为 `static`；它只在页面确认安装时临时运行。
 - 两个 Radxa 原厂 Gadget 服务为 `masked`，不能在 TeslaBox 之后异步接管同一个 UDC。
 - 健康接口返回 `{"status":"ok"}`。
-- FFmpeg 能列出 Rockchip 硬件能力和 `_rkmpp` 解码器。
+- FFmpeg 能列出 H.264/HEVC RKMPP 编解码器、RGA 和 ASS/subtitles 滤镜。
 
 ## 后续升级
 
 进入“设置中心 → 系统更新”执行检查、下载和安装。设备会校验 Ed25519 签名、板型、架构、文件大小和 SHA-256；在线更新默认会自动安全断开 USB Gadget，并在安装健康检查通过后重启系统恢复。安装健康检查失败时自动恢复旧主程序。
 
-当前在线升级只替换 `/usr/local/bin/teslabox`。新主程序会在绑定 UDC 前检查并屏蔽固定的 Radxa Gadget 冲突服务；内核、MT7922 backports、FFmpeg/MPP/RGA、systemd unit 和首装脚本仍属于人工基础设施升级，不会被主程序更新通道静默修改。
+正式在线包仍是单个经过签名校验的 ARM64 ELF。需要媒体能力升级的版本会在 ELF 内携带固定媒体包，新程序启动时在暂存目录验证 H.264/HEVC RKMPP、RGA、ASS/subtitles 和字体后原子更新 `/opt/teslabox/media`。内核、MT7922 驱动、systemd unit 和首装脚本不会通过网页更新；MT7922 Wi-Fi 与蓝牙驱动只在首装脚本中经过两次明确确认后安装。
 
 ## 常见问题
 

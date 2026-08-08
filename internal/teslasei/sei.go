@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"time"
@@ -20,6 +21,7 @@ var (
 const (
 	maxSEINALBytes = 128 * 1024
 	maxMetadata    = 20_000
+	readBlockBytes = 256 * 1024
 )
 
 var teslaMagic = []byte{'B', 'B', 'B', 'i'}
@@ -65,18 +67,19 @@ func Read(ctx context.Context, path string) ([]Metadata, error) {
 	if info.Size() < 8 {
 		return nil, ErrNoMetadata
 	}
+	reader := newBlockReaderAt(file, info.Size())
 	metadata := make([]Metadata, 0)
 	for offset := int64(0); offset+8 <= info.Size(); {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		atomSize, atomType, headerSize, err := readAtomHeader(file, offset, info.Size())
+		atomSize, atomType, headerSize, err := readAtomHeader(reader, offset, info.Size())
 		if err != nil {
 			return nil, err
 		}
 		atomEnd := offset + atomSize
 		if atomType == "mdat" {
-			items, err := readMdat(ctx, file, offset+headerSize, atomEnd)
+			items, err := readMdat(ctx, reader, offset+headerSize, atomEnd)
 			if err != nil {
 				return nil, err
 			}
@@ -160,7 +163,7 @@ func Display(metadata Metadata) string {
 	return joinLines(parts)
 }
 
-func readAtomHeader(file *os.File, offset, fileSize int64) (int64, string, int64, error) {
+func readAtomHeader(file io.ReaderAt, offset, fileSize int64) (int64, string, int64, error) {
 	var header [16]byte
 	if _, err := file.ReadAt(header[:8], offset); err != nil {
 		return 0, "", 0, fmt.Errorf("读取 MP4 原子头: %w", err)
@@ -186,7 +189,7 @@ func readAtomHeader(file *os.File, offset, fileSize int64) (int64, string, int64
 	return atomSize, string(header[4:8]), headerSize, nil
 }
 
-func readMdat(ctx context.Context, file *os.File, start, end int64) ([]Metadata, error) {
+func readMdat(ctx context.Context, file io.ReaderAt, start, end int64) ([]Metadata, error) {
 	metadata := make([]Metadata, 0)
 	var sizeBuffer [4]byte
 	for offset := start; offset+4 <= end; {
@@ -227,6 +230,49 @@ func readMdat(ctx context.Context, file *os.File, start, end int64) ([]Metadata,
 		offset += nalSize
 	}
 	return metadata, nil
+}
+
+// blockReaderAt 合并顺序推进的细碎读取，避免快照文件系统为每个 NAL 头执行一次底层 I/O。
+type blockReaderAt struct {
+	source     io.ReaderAt
+	size       int64
+	buffer     []byte
+	blockStart int64
+	blockEnd   int64
+}
+
+func newBlockReaderAt(source io.ReaderAt, size int64) *blockReaderAt {
+	return &blockReaderAt{source: source, size: size, buffer: make([]byte, readBlockBytes), blockStart: -1}
+}
+
+func (reader *blockReaderAt) ReadAt(destination []byte, offset int64) (int, error) {
+	requested := len(destination)
+	written := 0
+	for len(destination) > 0 && offset < reader.size {
+		if offset < reader.blockStart || offset >= reader.blockEnd {
+			reader.blockStart = offset / readBlockBytes * readBlockBytes
+			blockLength := min(int64(len(reader.buffer)), reader.size-reader.blockStart)
+			count, err := reader.source.ReadAt(reader.buffer[:blockLength], reader.blockStart)
+			reader.blockEnd = reader.blockStart + int64(count)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return written, err
+			}
+			if count == 0 {
+				break
+			}
+		}
+		available := int(reader.blockEnd - offset)
+		count := min(len(destination), available)
+		start := int(offset - reader.blockStart)
+		copy(destination[:count], reader.buffer[start:start+count])
+		destination = destination[count:]
+		offset += int64(count)
+		written += count
+	}
+	if written != requested {
+		return written, io.EOF
+	}
+	return written, nil
 }
 
 func protoPayload(nal []byte) ([]byte, bool) {

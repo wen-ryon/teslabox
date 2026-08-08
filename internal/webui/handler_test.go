@@ -55,10 +55,10 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"memory-value", "system-disk-value", "nav-toggle", "settings-page", "wifi-scan",
 		"ap-form", "storage-device-list", "shutdown-button", "appearance-toggle", "appearance-menu",
 		"settings-font-size", "wifi-mac-address", "wifi-ip-address", "ap-mac-address",
-		"logout-button", "player-quality", "playback-throughput", "playback-buffer",
+		"logout-button", "player-quality", "playback-throughput", "playback-buffer", "tesla-browser-compatibility",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "storage-reclaim", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "recording-select-all", "recording-delete-selected", "删除录像", "车机虚拟盘可用", "录像索引", "app.css?v=20260730-2", "app.js?v=20260730-4",
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "export-overlay-mode-field", "行车记录仪模式", "画面上方信息栏", "悬浮信息栏", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "logs-summary", "中文诊断摘要", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "storage-reclaim", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "recording-select-all", "recording-delete-selected", "删除录像", "车机虚拟盘可用", "录像索引", "特斯拉车机兼容模式", "app.css?v=20260808-7", "app.js?v=20260808-5",
 		"toast-region", "network-loading", "page-loading", "数据仍在加载，请勿重复操作。",
 		"自动（当前：高清）", "流畅（480p · 20 FPS）", "标清（720p · 24 FPS）", "高清（720p · 30 FPS）", "高保真合成（多路 H.265 · 1080 高度 · 30 FPS）", "多路原画", "player.html",
 	} {
@@ -80,7 +80,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "downloadDiagnosticReport", "/api/v1/diagnostics/report", "reportPlaybackDiagnostic", "/api/v1/diagnostics/client-event", "playback_stall", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "deleteRecordingSession", "handleRecordingDeleteAction", "recordingDeleteMode", "selectableRecordingSessions", "删除此段最近录像", "/api/v1/video-sessions/delete", "session_ids", "confirm_otg_disconnected", "reclaimStorageSpace", "/api/v1/storage/reclaim", "exFAT 可用", "外层 XFS 可用", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery", "renderSavedNetworks(wifi.saved_networks || [], available)", "button.disabled = !state.wifi?.available", "requires_password", "旧配置没有可供后台服务读取的密码", "未检测到可用的无线网卡", "withPageLoading", "startNetworkLoading", "requestResponse", "正在读取日志与 USB Gadget 状态…", "正在读取网络、存储与系统设置…", "正在同步设备状态与录像索引…"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "report.summaries", "logs-summary-list", "downloadDiagnosticReport", "/api/v1/diagnostics/report", "reportPlaybackDiagnostic", "/api/v1/diagnostics/client-event", "playback_stall", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "deleteRecordingSession", "handleRecordingDeleteAction", "recordingDeleteMode", "selectableRecordingSessions", "删除此段最近录像", "/api/v1/video-sessions/delete", "session_ids", "confirm_otg_disconnected", "reclaimStorageSpace", "/api/v1/storage/reclaim", "exFAT 可用", "外层 XFS 可用", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery", "renderSavedNetworks(wifi.saved_networks || [], available)", "button.disabled = !state.wifi?.available", "requires_password", "旧配置没有可供后台服务读取的密码", "未检测到可用的无线网卡", "withPageLoading", "startNetworkLoading", "requestResponse", "正在读取日志与 USB Gadget 状态…", "正在读取网络、存储与系统设置…", "正在同步设备状态与录像索引…"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}
@@ -90,6 +90,49 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "http://teslabox.local/api/v1/logs?source=usb", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+}
+
+func TestHandlerServesTeslaBrowserCompatibilitySelectors(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+
+	for _, asset := range []struct {
+		path    string
+		markers []string
+	}{
+		{
+			path: "/",
+			markers: []string{
+				"特斯拉车机兼容模式", `id="tesla-browser-compatibility"`, "只保存在当前浏览器",
+			},
+		},
+		{
+			path: "/app.js",
+			markers: []string{
+				"applyTeslaBrowserCompatibility", "upgradeCompatibilitySelect", "renderCompatibilitySelect",
+				`document.querySelectorAll("select")`, `select.dispatchEvent(new Event("change"`,
+				"compatibilitySelectDocumentObserver", "closeOpenCompatibilitySelect",
+			},
+		},
+		{
+			path: "/app.css",
+			markers: []string{
+				`.compat-select-trigger`, `.compat-select-options`, `.compat-select-option[aria-selected="true"]`,
+				`data-tesla-browser-compatibility="true"`,
+			},
+		},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local"+asset.path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", asset.path, recorder.Code, recorder.Body.String())
+		}
+		for _, marker := range asset.markers {
+			if !strings.Contains(recorder.Body.String(), marker) {
+				t.Errorf("%s 缺少车机兼容选择器标记 %q", asset.path, marker)
+			}
+		}
 	}
 }
 
@@ -130,9 +173,13 @@ func TestHandlerServesCustomExportWorkflow(t *testing.T) {
 	for _, marker := range []string{
 		"createExportTask", `request("/api/v1/exports"`, "scheduleExportPoll", "cancelExportTask",
 		"start_seconds", "duration_seconds", "releaseVideoElement(sessionVideo)",
+		"videoCoversAbsolutePosition(video, selection.absolute)", "duration-.05", "localTime >= -3",
+		"start_seconds=${encodeURIComponent(streamStart.toFixed(3))}", "activeStreamTimelineStart+sessionVideo.currentTime",
 		`layout === "single"`, "originalOption.disabled", "layout, cameras",
 		"downloadSourceFiles", "selectedSourceVideos", "/api/v1/videos/${encodeURIComponent(video.id)}/download",
-		"已立即向浏览器发起", "允许多个文件下载", "RKMPP H.264 多路残块", "H.265（HEVC）MP4",
+		"initializeExportRange", "updateExportRangeFromSlider", "localDateTimeInput", "export-range-start", "export-range-end",
+		"已立即向浏览器发起", "允许多个文件下载", "RK3568 H.264 编码残块", "H.265（HEVC）MP4",
+		"renderExportOverlayOptions", "overlay_mode", "output_bytes", "实际 ${formatBytes(task.output_bytes)}",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("自定义导出脚本缺少标记 %q", marker)
@@ -217,6 +264,164 @@ func TestHandlerServesPlaybackFailureFallback(t *testing.T) {
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("播放器缺少失败自动降级标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerDefersSEIUntilMediaSeekCompletes(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	body := recorder.Body.String()
+	compositeStart := strings.Index(body, "async function loadCompositePosition")
+	compositeEnd := strings.Index(body, "async function loadServerComposite")
+	if compositeStart < 0 || compositeEnd <= compositeStart {
+		t.Fatal("播放器缺少原画多路加载函数")
+	}
+	composite := body[compositeStart:compositeEnd]
+	seeked := strings.Index(composite, "const prepared = await Promise.all(preparations)")
+	telemetry := strings.Index(composite, "startPlaybackTelemetryLoad(activeVideo)")
+	if seeked < 0 || telemetry <= seeked {
+		t.Fatal("SEI 必须在六路媒体完成定位后再加载")
+	}
+
+	for _, marker := range []string{
+		"function seekVideoElement", `video.addEventListener("seeked", done)`,
+		"timelineScrubbing || sessionVideo.seeking || timelinePositionPending", "timelineScrubbing = true",
+		"timelineScrubbing = false", "resetPlaybackTelemetryLoad()",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("播放器缺少安全拖动标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerRendersSEIAbovePlaybackWithoutCoveringVideo(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+
+	assets := []struct {
+		name    string
+		path    string
+		markers []string
+	}{
+		{
+			name: "页面结构",
+			path: "/",
+			markers: []string{
+				`id="playback-telemetry"`, `class="telemetry-main-row"`, `id="playback-gear"`, `class="telemetry-speed-reading"`, `id="playback-speed"`,
+				`id="playback-left-blinker"`, `id="playback-right-blinker"`, `id="playback-brake"`,
+				`class="telemetry-accelerator-gauge"`, `id="playback-accelerator"`, `class="telemetry-steering-icon"`, `id="playback-steering-wheel"`, `viewBox="48 54 234 234"`, `id="playback-autopilot"`,
+			},
+		},
+		{
+			name: "样式",
+			path: "/app.css",
+			markers: []string{
+				`.playback-telemetry { --telemetry-red`, `.telemetry-main-row { display: grid`, `grid-template-columns: minmax(0,1fr) auto minmax(0,1fr)`, `.telemetry-brake[data-active="true"]`,
+				`.telemetry-dashboard { display: flex`, `border-radius: 27px`, `background: #202020`,
+				`.telemetry-dashboard small`, `font-size: 12px; font-weight: 700`, `.telemetry-gear > small, .telemetry-item > small { font-size: 13px; font-weight: 700`, `.telemetry-speed-reading strong { font-size: 30px; font-weight: 800`, `.telemetry-speed-reading small { align-self: auto; margin-top: 4px; font-size: 12px`, `.telemetry-item { box-sizing: border-box; width: 82px; min-width: 82px`, `.telemetry-steering-icon { width: 29px`, `.telemetry-brake-icon`, `.telemetry-accelerator-level`, `.telemetry-accelerator[data-active="true"] .telemetry-accelerator-gauge`, `.telemetry-steering { width: 92px; min-width: 92px; color: #fff`, `.telemetry-steering small strong { display: inline-block; width: 43px`,
+				`.telemetry-steering[data-assisted="true"]`, `.telemetry-blinker svg { width: 30px; height: 30px`, `.telemetry-blinker[data-active="true"]`, `animation: telemetry-blinker-pulse 1s`, `.telemetry-assistance[data-mode="fsd"]`, `@media (max-width: 620px)`,
+			},
+		},
+		{
+			name: "遥测渲染",
+			path: "/app.js",
+			markers: []string{
+				`function renderPlaybackTelemetrySample`, `normalizeAcceleratorPercent`,
+				`Math.round(Math.abs(speedMPS)*3.6)`, `steeringSign`, `Math.abs(steering).toFixed(1)`, `playback-steering-wheel`,
+				`metadata?.brake_applied === true`, `metadata?.left_blinker === true`, `metadata?.right_blinker === true`,
+				`function playbackAutopilotState`, `mode:"fsd"`, `mode:"steering"`, `mode:"tacc"`,
+			},
+		},
+		{
+			name: "图标许可",
+			path: "/third-party-notices.txt",
+			markers: []string{
+				"Lucide Icons", "ISC License", "Phosphor Icons", "MIT License",
+			},
+		},
+	}
+
+	for _, asset := range assets {
+		asset := asset
+		t.Run(asset.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local"+asset.path, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			for _, marker := range asset.markers {
+				if !strings.Contains(recorder.Body.String(), marker) {
+					t.Errorf("%s 缺少 SEI 仪表条标记 %q", asset.name, marker)
+				}
+			}
+		})
+	}
+
+	index := httptest.NewRecorder()
+	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "http://teslabox.local/", nil))
+	body := index.Body.String()
+	telemetry := strings.Index(body, `id="playback-telemetry"`)
+	assistance := strings.Index(body, `id="playback-autopilot"`)
+	mainRow := strings.Index(body, `class="telemetry-main-row"`)
+	video := strings.Index(body, `class="main-video-frame"`)
+	if telemetry < 0 || video < 0 || telemetry >= video {
+		t.Fatal("SEI 仪表条必须位于视频容器上方，不能覆盖视频画面")
+	}
+	if mainRow < telemetry || assistance <= mainRow || assistance >= video {
+		t.Fatal("辅助驾驶状态必须位于主仪表的时速单元内")
+	}
+}
+
+func TestHandlerLetsLogOutputUseFullCardWidth(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+
+	request := httptest.NewRequest(http.MethodGet, "/app.css", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("读取页面样式状态码 = %d，期望 %d", response.Code, http.StatusOK)
+	}
+	for _, marker := range []string{
+		`.logs-card { width: 100%; min-width: 0;`,
+		`.logs-output { display: block; width: 100%; min-width: 0; max-width: 100%;`,
+		`white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;`,
+	} {
+		if !strings.Contains(response.Body.String(), marker) {
+			t.Errorf("日志正文自适应宽度样式缺少标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerKeepsSEIInSyncAcrossAutomaticSegmentTransition(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	for _, marker := range []string{
+		"function loadSessionPosition(position, autoplay, preferredMomentIndex = -1)",
+		"selectMomentAtPosition(activeSession, position, preferredMomentIndex)",
+		"loadSessionPosition(nextPosition, true, next)",
+		"telemetryAbortController !== controller", "activeVideo?.id !== videoID",
+		"telemetryRequestsByVideo", "function requestPlaybackTelemetry", "function scheduleAdjacentTelemetryPrefetch",
+		"for (const index of [momentIndex+1, momentIndex-1])", "scheduleAdjacentTelemetryPrefetch()",
+	} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("播放器缺少跨分钟 SEI 同步标记 %q", marker)
 		}
 	}
 }

@@ -58,6 +58,22 @@ func TestDiagnosticsRouteUsesAllowlistedSourceAndBoundedLimit(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsRouteUsesCompactDefaultLimit(t *testing.T) {
+	t.Parallel()
+	manager := &fakeDiagnostics{}
+	handler := NewHandler(
+		fakeController{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithDiagnostics(manager),
+	)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/logs?source=media", nil))
+	if response.Code != http.StatusOK || manager.limit != 50 {
+		t.Fatalf("status = %d, limit = %d, body = %s", response.Code, manager.limit, response.Body.String())
+	}
+}
+
 func TestDiagnosticsRouteRejectsUnknownSource(t *testing.T) {
 	t.Parallel()
 	handler := NewHandler(

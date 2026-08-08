@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,19 @@ type shutdownExportRunner struct {
 	started  chan struct{}
 	canceled chan struct{}
 	release  chan struct{}
+}
+
+type recordingExportRunner struct {
+	mu    sync.Mutex
+	calls [][]string
+}
+
+func (r *recordingExportRunner) RunProgress(_ context.Context, _ string, args []string, progress func(time.Duration)) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, slices.Clone(args))
+	r.mu.Unlock()
+	progress(time.Minute)
+	return os.WriteFile(args[len(args)-1], []byte("video"), 0o640)
 }
 
 func (r *shutdownExportRunner) RunProgress(ctx context.Context, _ string, _ []string, _ func(time.Duration)) error {
@@ -122,7 +136,7 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 	if err != nil || string(content) != "exported-video" {
 		t.Fatalf("content = %q, error = %v", content, err)
 	}
-	if releases.Load() != 1 || task.ProgressPercent != 100 || !task.DownloadReady {
+	if releases.Load() != 1 || task.ProgressPercent != 100 || !task.DownloadReady || task.OutputBytes != uint64(len("exported-video")) {
 		t.Fatalf("releases = %d, task = %+v", releases.Load(), task)
 	}
 	if got, want := ExportDownloadFilename(task), "export-前视-20260720-120000.mp4"; got != want {
@@ -168,7 +182,7 @@ func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := reloaded.History()
-	if len(history) != 1 || history[0].ID != task.ID || reloaded.Settings().RetainCount != 3 {
+	if len(history) != 1 || history[0].ID != task.ID || history[0].OutputBytes != uint64(len("exported-video")) || reloaded.Settings().RetainCount != 3 {
 		t.Fatalf("history = %#v, settings = %#v", history, reloaded.Settings())
 	}
 	if err := reloaded.Consume(task.ID); err != nil {
@@ -185,9 +199,13 @@ func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
 func TestExportOverlaySubtitlesAreEscapedAndMapped(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".task.tmp.ass")
-	hasSubtitles, err := writeOverlaySubtitles(path, []ExportOverlayCue{{
-		Start: 0, End: time.Second, Timestamp: "2026-07-30 12:00:00", SEIText: "档位 D\n时速 20.0 km/h {test}",
-	}}, true, true)
+	request := validExportRequest()
+	request.BurnTimestamp = true
+	request.BurnSEI = true
+	hasSubtitles, err := writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+		Start: 0, End: time.Second, Timestamp: "2026-07-30 12:00:00",
+		Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 20, AcceleratorPosition: 45, SteeringAngle: -1.7, BrakeApplied: true, Autopilot: "AP"},
+	}})
 	if err != nil || !hasSubtitles {
 		t.Fatalf("writeOverlaySubtitles() = %t, %v", hasSubtitles, err)
 	}
@@ -195,7 +213,7 @@ func TestExportOverlaySubtitlesAreEscapedAndMapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "0:00:00.00,0:00:01.00,Timestamp") || !strings.Contains(string(content), "时速 20.0 km/h \\{test\\}") || !strings.Contains(string(content), "档位 D\\N") {
+	if !strings.Contains(string(content), "0:00:00.00,0:00:01.00,TimeValue") || !strings.Contains(string(content), "km/h") || !strings.Contains(string(content), "电门 45%") || !strings.Contains(string(content), "\\p1") {
 		t.Fatalf("subtitle content = %s", content)
 	}
 	args, err := exportArgs(validExportRequest(), validExportSource(), "/exports/task.mp4", path)
@@ -203,8 +221,184 @@ func TestExportOverlaySubtitlesAreEscapedAndMapped(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "subtitles=filename='") || !strings.Contains(joined, "-map [overlay]") {
+	if !strings.Contains(joined, "ass=filename='") || !strings.Contains(joined, "-map [overlay]") {
 		t.Fatalf("overlay args = %s", joined)
+	}
+}
+
+func TestCompositeExportUsesSeparateInformationBarWithoutVisibleAlignmentPadding(t *testing.T) {
+	t.Parallel()
+	request, err := normalizeExportRequest(ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "composite6", Quality: "high", BurnTimestamp: true, BurnSEI: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "overlay.ass")
+	_, err = writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+		Start: 0, End: 10 * time.Second, Timestamp: "2026-08-08 12:00:00", Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 85, SteeringAngle: -1.7},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "PlayResX: 2528\nPlayResY: 1184") {
+		t.Fatalf("ASS canvas does not match aligned six-camera output: %s", content)
+	}
+	if !strings.Contains(string(content), "\\frz-1.70") || strings.Contains(string(content), "◀") || strings.Contains(string(content), "▶") {
+		t.Fatalf("dashboard vectors do not match online steering and blinker styles: %s", content)
+	}
+	if !strings.Contains(string(content), "Style: TimeLabel,Noto Sans CJK SC,23,") ||
+		!strings.Contains(string(content), "Style: TimeValue,Noto Sans CJK SC,33,") ||
+		!strings.Contains(string(content), "\\fs24") {
+		t.Fatalf("dashboard typography does not use the enlarged export sizes: %s", content)
+	}
+	args, err := exportArgs(request, sourceForCameras(request.Cameras), "/exports/six.mp4", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "pad=w=iw:h=ih+96:x=0:y=96:color=black") || strings.Contains(joined, "ceil(iw/16)") || !strings.Contains(joined, "fontsdir='/opt/teslabox/media/share/fonts'") {
+		t.Fatalf("information bar args = %s", joined)
+	}
+}
+
+func TestExportOverlayModesControlCanvasAndPadding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		request     ExportRequest
+		wantCanvas  string
+		wantContent string
+		wantPad     string
+		rejectPad   bool
+	}{
+		{
+			name: "行车记录仪时间", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original", BurnTimestamp: true, OverlayMode: ExportOverlayDashcam},
+			wantCanvas: "PlayResX: 1280\nPlayResY: 960", wantContent: "Style: DashcamTime", rejectPad: true,
+		},
+		{
+			name: "单路顶部时间栏", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original", BurnTimestamp: true, OverlayMode: ExportOverlayTopBar},
+			wantCanvas: "PlayResX: 1280\nPlayResY: 1024", wantContent: "录像时间", wantPad: "pad=w=iw:h=ih+64:x=0:y=64:color=black",
+		},
+		{
+			name: "悬浮仪表", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high", BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+			wantCanvas: "PlayResX: 1666\nPlayResY: 1080", wantContent: "\\1a&HA0", rejectPad: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "overlay.ass")
+			_, err := writeOverlaySubtitles(path, test.request, []ExportOverlayCue{{Start: 0, End: 10 * time.Second, Timestamp: "2026-08-08 12:00:00", Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 20}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(content), test.wantCanvas) || !strings.Contains(string(content), test.wantContent) {
+				t.Fatalf("overlay content = %s", content)
+			}
+			args, err := exportArgs(test.request, validExportSource(), "/exports/overlay.mp4", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(args, " ")
+			if test.wantPad != "" && !strings.Contains(joined, test.wantPad) {
+				t.Fatalf("overlay args do not contain %q: %s", test.wantPad, joined)
+			}
+			if test.rejectPad && strings.Contains(joined, "pad=w=iw:h=ih+") {
+				t.Fatalf("overlay mode must not extend canvas: %s", joined)
+			}
+		})
+	}
+}
+
+func TestFloatingExportKeepsTimestampOutsideCompactRoundedDashboard(t *testing.T) {
+	t.Parallel()
+	request := ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+		BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating,
+	}
+	path := filepath.Join(t.TempDir(), "floating.ass")
+	_, err := writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+		Start: 0, End: 10 * time.Second, Timestamp: "2026-08-08 12:00:00",
+		Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 85, SteeringAngle: -1.7, Autopilot: "AP"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(contentBytes)
+	for _, marker := range []string{
+		"Style: DashcamTime,Noto Sans CJK SC,46,", "Dialogue: 2,0:00:00.00,0:00:10.00,DashcamTime", "\\1a&HA0", "{\\an7\\pos(553,6)",
+		"{\\an7\\pos(741,21)", "{\\an7\\pos(885,21)", "{\\an8\\pos(833,72)\\fs20\\1c&H00FFFFFF&\\b1}AP",
+		"{\\an8\\pos(595,67)\\fs24\\1c&H00FFFFFF&\\b1}档位", "{\\an8\\pos(991,67)\\fs24\\1c&H00FFFFFF&\\b1}刹车",
+		"Dialogue: 3,0:00:00.00,0:00:10.00,Canvas", "\\1a&H20&\\3c&H00FFB96E&",
+	} {
+		if !strings.Contains(content, marker) {
+			t.Errorf("悬浮信息栏缺少布局标记 %q：%s", marker, content)
+		}
+	}
+	if strings.Contains(content, ",TimeLabel,,") || strings.Contains(content, ",TimeValue,,") || strings.Contains(content, "录像时间") {
+		t.Fatalf("悬浮模式不应把时间放入仪表框：%s", content)
+	}
+	if strings.Contains(content, "\\1c&H00000000&\\org(") || strings.Count(content, "\\org(675,41)\\frz-1.70") != 1 {
+		t.Fatalf("方向盘必须使用单个随角度旋转的透明镂空路径：%s", content)
+	}
+}
+
+func TestNormalizeExportRequestRejectsDashcamTelemetry(t *testing.T) {
+	t.Parallel()
+	_, err := normalizeExportRequest(ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+		BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayDashcam,
+	})
+	if err == nil || !strings.Contains(err.Error(), "行车记录仪模式") {
+		t.Fatalf("normalizeExportRequest() error = %v", err)
+	}
+}
+
+func TestPrepareExportOverlayUsesSourceWallClock(t *testing.T) {
+	t.Parallel()
+	timelineStart := time.Date(2026, 7, 30, 8, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	source := ExportSource{
+		SessionStart: timelineStart, SessionEnd: timelineStart.Add(2 * time.Minute),
+		Videos: []ExportVideo{{
+			Camera: "front", Path: filepath.Join(t.TempDir(), "front.mp4"), RecordedAt: timelineStart,
+			WallClockAt: timelineStart.Add(15 * time.Minute), Duration: 60,
+		}},
+	}
+	err := prepareExportOverlayCues(t.Context(), ExportRequest{
+		StartSeconds: 5, DurationSeconds: 2, Cameras: []string{"front"}, BurnTimestamp: true,
+	}, &source, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.OverlayCues) != 2 || source.OverlayCues[0].Timestamp != "2026-07-30 08:15:05" {
+		t.Fatalf("overlay cues = %#v", source.OverlayCues)
+	}
+}
+
+func TestPrepareExportOverlayUsesTenHertzSEISampling(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	source := ExportSource{SessionStart: start, SessionEnd: start.Add(time.Second)}
+	err := prepareExportOverlayCues(t.Context(), ExportRequest{
+		DurationSeconds: 1, Cameras: []string{"front"}, BurnSEI: true,
+	}, &source, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.OverlayCues) != 10 || source.OverlayCues[0].End != 100*time.Millisecond || source.OverlayCues[9].End != time.Second {
+		t.Fatalf("overlay cues = %#v", source.OverlayCues)
 	}
 }
 
@@ -415,7 +609,7 @@ func TestExportOriginalPreservesSingleCameraDimensions(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	for _, expected := range []string{"fps=36", "hwdownload,format=nv12", "-rc_mode CQP", "-qp_init 18"} {
+	for _, expected := range []string{"fps=36", "hwdownload,format=nv12", "-c:v hevc_rkmpp", "-tag:v hvc1", "-rc_mode CQP", "-qp_init 18"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("original args do not contain %q: %s", expected, joined)
 		}
@@ -448,7 +642,7 @@ func TestValidateExportRejectsOriginalComposite(t *testing.T) {
 	}
 }
 
-func TestValidateExportRejectsTooManyHardwareDecoderInputs(t *testing.T) {
+func TestPlanClipExportBoundsHardwareDecoderInputsPerSegment(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	source := ExportSource{
@@ -468,11 +662,119 @@ func TestValidateExportRejectsTooManyHardwareDecoderInputs(t *testing.T) {
 		SessionID: "session", DurationSeconds: 130, Layout: "single",
 		Cameras: []string{"front"}, Quality: "standard",
 	}
-	if err := validateExport(request, source, 30*time.Minute); err == nil || !strings.Contains(err.Error(), "过多录像片段") {
+	if err := validateExport(request, source, 0); err != nil {
 		t.Fatalf("validateExport() error = %v", err)
 	}
-	if _, err := exportArgs(request, source, "/exports/too-many.mp4"); err == nil || !strings.Contains(err.Error(), "过多录像片段") {
-		t.Fatalf("exportArgs() error = %v", err)
+	segments, err := planClipExport(request, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 13 {
+		t.Fatalf("segment count = %d, want 13", len(segments))
+	}
+	for _, segment := range segments {
+		if count := exportDecoderInputCount(segment.request, segment.source); count > 1 {
+			t.Fatalf("segment %d decoder inputs = %d", segment.index, count)
+		}
+	}
+}
+
+func TestPlanClipExportBoundsStaggeredSixCameraMinuteBoundary(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	cameras := []string{"front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"}
+	source := ExportSource{SessionStart: start, SessionEnd: start.Add(72 * time.Second)}
+	for index, camera := range cameras {
+		boundary := 60*time.Second + time.Duration(index-2)*80*time.Millisecond
+		source.Videos = append(source.Videos,
+			ExportVideo{Camera: camera, Path: "/snapshot/" + camera + "-0.mp4", RecordedAt: start, Duration: boundary.Seconds()},
+			ExportVideo{Camera: camera, Path: "/snapshot/" + camera + "-1.mp4", RecordedAt: start.Add(boundary), Duration: 12},
+		)
+	}
+	request := ExportRequest{SessionID: "session", DurationSeconds: 72, Layout: "composite6", Cameras: cameras, Quality: "high"}
+	segments, err := planClipExport(request, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, segment := range segments {
+		if count := exportDecoderInputCount(segment.request, segment.source); count > len(cameras) {
+			t.Fatalf("segment %d decoder inputs = %d, want at most %d", segment.index, count, len(cameras))
+		}
+		seen := make(map[string]bool, len(cameras))
+		for _, video := range segment.source.Videos {
+			if seen[video.Camera] {
+				t.Fatalf("segment %d contains duplicate camera %q", segment.index, video.Camera)
+			}
+			seen[video.Camera] = true
+		}
+	}
+}
+
+func TestExporterRunsLongClipSequentiallyAndRemuxesSegments(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	source := ExportSource{SessionStart: start, SessionEnd: start.Add(130 * time.Second)}
+	for index := 0; index < 13; index++ {
+		source.Videos = append(source.Videos, ExportVideo{
+			Camera: "front", Path: fmt.Sprintf("/snapshot/front-%02d.mp4", index),
+			RecordedAt: start.Add(time.Duration(index) * 10 * time.Second), Duration: 10,
+		})
+	}
+	runner := &recordingExportRunner{}
+	exporter, err := NewExporter(runner, ExportConfig{FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go exporter.Run(ctx)
+	task, err := exporter.Create(ExportRequest{
+		SessionID: "session", DurationSeconds: 130, Layout: "single", Cameras: []string{"front"}, Quality: "standard",
+	}, source, func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for task.State != ExportCompleted {
+		if time.Now().After(deadline) {
+			t.Fatalf("task state = %s", task.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+		task, err = exporter.Task(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.mu.Lock()
+	calls := slices.Clone(runner.calls)
+	runner.mu.Unlock()
+	if len(calls) != 14 {
+		t.Fatalf("runner calls = %d, want 13 segments and 1 remux", len(calls))
+	}
+	if joined := strings.Join(calls[len(calls)-1], " "); !strings.Contains(joined, "-f concat") || !strings.Contains(joined, "-c copy") {
+		t.Fatalf("final remux args = %s", joined)
+	}
+}
+
+func TestExportArgsFillsMissingCompositeCameraWithBlack(t *testing.T) {
+	t.Parallel()
+	source := validExportSource()
+	request, err := normalizeExportRequest(ExportRequest{
+		SessionID: "session", DurationSeconds: 60, Layout: "composite3", Quality: "standard",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := exportArgs(request, source, "/exports/missing.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if count := strings.Count(joined, "color=c=black"); count != 2 {
+		t.Fatalf("black placeholder count = %d, args = %s", count, joined)
+	}
+	if !strings.Contains(joined, "shortest=0") {
+		t.Fatalf("composite must not stop at the shortest camera: %s", joined)
 	}
 }
 
@@ -482,10 +784,10 @@ func TestExportHighLayoutsUseHEVCEncoderWithHardwarePipeline(t *testing.T) {
 		layout string
 		want   []string
 	}{
-		{layout: "composite6", want: []string{"scale_rkrga=w=834:h=540", "layout=0_0|834_0|1668_0|0_540|834_540|1668_540"}},
-		{layout: "composite4a", want: []string{"scale_rkrga=w=834:h=540", "layout=0_0|834_0|0_540|834_540"}},
-		{layout: "composite4b", want: []string{"scale_rkrga=w=1248:h=810", "layout=0_0|0_810|416_810|832_810"}},
-		{layout: "composite3", want: []string{"scale_rkrga=w=1112:h=720", "layout=0_0|0_720|556_720"}},
+		{layout: "composite6", want: []string{"scale_rkrga=w=842:h=544", "scale_rkrga=w=844:h=544", "layout=0_0|842_0|1686_0|0_544|842_544|1686_544"}},
+		{layout: "composite4a", want: []string{"scale_rkrga=w=840:h=544", "layout=0_0|840_0|0_544|840_544"}},
+		{layout: "composite4b", want: []string{"scale_rkrga=w=1264:h=816", "scale_rkrga=w=422:h=272", "layout=0_0|0_816|422_816|842_816"}},
+		{layout: "composite3", want: []string{"scale_rkrga=w=1120:h=726", "scale_rkrga=w=560:h=362", "layout=0_0|0_726|560_726"}},
 	}
 	for _, test := range tests {
 		t.Run(test.layout, func(t *testing.T) {
@@ -510,11 +812,42 @@ func TestExportHighLayoutsUseHEVCEncoderWithHardwarePipeline(t *testing.T) {
 			if !strings.Contains(joined, "-hwaccel rkmpp") || !strings.Contains(joined, "-hwaccel_output_format drm_prime") || !strings.Contains(joined, "hwdownload,format=nv12") {
 				t.Fatalf("高保真多路导出必须保持 MPP 硬件解码和 RGA 缩放: %s", joined)
 			}
-			if !strings.Contains(joined, "pad=w=ceil(iw/16)*16:h=ceil(ih/16)*16:x=0:y=0:color=black") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
-				t.Fatalf("高保真 HEVC 导出必须保持内容画布并按 MPP 边界补齐: %s", joined)
+			if strings.Contains(joined, "ceil(iw/16)") || !strings.Contains(joined, "force_original_aspect_ratio=disable") {
+				t.Fatalf("高保真 HEVC 导出必须直接生成对齐画布，不能把补边编码为可见像素: %s", joined)
 			}
 			if !strings.Contains(joined, "-c:v hevc_rkmpp") || !strings.Contains(joined, "-tag:v hvc1") {
 				t.Fatalf("高保真多路导出必须改用 HEVC: %s", joined)
+			}
+		})
+	}
+}
+
+func TestHighExportTilesProduceAlignedVisibleCanvas(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		layout     string
+		wantWidth  int
+		wantHeight int
+	}{
+		{layout: "composite6", wantWidth: 2528, wantHeight: 1088},
+		{layout: "composite4a", wantWidth: 1680, wantHeight: 1088},
+		{layout: "composite4b", wantWidth: 1264, wantHeight: 1088},
+		{layout: "composite3", wantWidth: 1120, wantHeight: 1088},
+	}
+	for _, test := range tests {
+		t.Run(test.layout, func(t *testing.T) {
+			t.Parallel()
+			tiles, err := highExportTiles(test.layout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			width, height := 0, 0
+			for _, tile := range tiles {
+				width = max(width, tile.x+tile.width)
+				height = max(height, tile.y+tile.height)
+			}
+			if width != test.wantWidth || height != test.wantHeight || width%16 != 0 || height%16 != 0 {
+				t.Fatalf("visible canvas = %dx%d, want %dx%d with 16-pixel alignment", width, height, test.wantWidth, test.wantHeight)
 			}
 		})
 	}
@@ -541,12 +874,12 @@ func TestExportHighUsesConstrainedQualityAndReservesSpace(t *testing.T) {
 	if strings.Contains(joined, "-b:v") || strings.Contains(joined, "-maxrate") {
 		t.Fatalf("高保真 HEVC 导出不应被 CBR 限制: %s", joined)
 	}
-	if got, want := EstimateExportBytes(request), uint64(552_000_000); got != want {
+	if got, want := EstimateExportBytes(request), uint64(259_200_000); got != want {
 		t.Fatalf("EstimateExportBytes() = %d, want %d", got, want)
 	}
 }
 
-func TestExportHighSingleKeepsRKMPPPath(t *testing.T) {
+func TestExportHighSingleUsesHEVCRKMPPPath(t *testing.T) {
 	t.Parallel()
 	request, err := normalizeExportRequest(ExportRequest{
 		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
@@ -559,13 +892,10 @@ func TestExportHighSingleKeepsRKMPPPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	for _, expected := range []string{"-hwaccel rkmpp", "-c:v h264_rkmpp", "scale_rkrga", "-rc_mode CQP", "-qp_init 18"} {
+	for _, expected := range []string{"-hwaccel rkmpp", "-c:v h264_rkmpp", "scale_rkrga", "-c:v hevc_rkmpp", "-tag:v hvc1", "-rc_mode CQP", "-qp_init 18"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("单路高保真参数缺少 %q: %s", expected, joined)
 		}
-	}
-	if strings.Contains(joined, "hevc_rkmpp") {
-		t.Fatalf("单路高保真不应被多路 HEVC 修复路径影响: %s", joined)
 	}
 }
 

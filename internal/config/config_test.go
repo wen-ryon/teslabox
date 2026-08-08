@@ -41,7 +41,7 @@ func TestLoad(t *testing.T) {
 	if cfg.FFmpegPath != "/opt/teslabox/media/bin/ffmpeg" || cfg.FFprobePath != "/opt/teslabox/media/bin/ffprobe" || cfg.MediaProbeTimeout != 10*time.Second {
 		t.Errorf("media config = %q, %q, %s", cfg.FFmpegPath, cfg.FFprobePath, cfg.MediaProbeTimeout)
 	}
-	if cfg.ExportPath != "exports" || cfg.ExportStatePath != "/var/lib/teslabox-system/export-state.json" || cfg.ExportMaxDuration != 2*time.Minute || cfg.ExportQueueSize != 4 {
+	if cfg.ExportPath != "exports" || cfg.ExportStatePath != "/var/lib/teslabox-system/export-state.json" || cfg.ExportMaxDuration != 0 || cfg.ExportQueueSize != 4 {
 		t.Errorf("export config = %q, %q, %s, %d", cfg.ExportPath, cfg.ExportStatePath, cfg.ExportMaxDuration, cfg.ExportQueueSize)
 	}
 	if cfg.WebAuthStatePath != "/var/lib/teslabox-system/web-auth.json" {

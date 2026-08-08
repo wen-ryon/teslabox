@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,7 +45,8 @@ const (
 	maxSourceExportBytes     uint64      = 4 * 1024 * 1024 * 1024
 	maxSourceExportHistory               = 2
 	// 高保真模式实际码率会随场景复杂度浮动；预留值必须覆盖高细节片段，不能沿用旧版 8 Mbps 的 CBR 估算。
-	highExportReservedKbps uint64 = 64_000
+	highExportReservedKbps     uint64 = 64_000
+	originalExportReservedKbps uint64 = 32_000
 )
 
 // ExportMode 标识导出任务是重新编码剪辑还是归档原画浏览包。
@@ -55,18 +57,28 @@ const (
 	ExportModeSource ExportMode = "source"
 )
 
+// ExportOverlayMode 决定画面信息占用独立画布还是覆盖在录像内部。
+type ExportOverlayMode string
+
+const (
+	ExportOverlayDashcam  ExportOverlayMode = "dashcam"
+	ExportOverlayTopBar   ExportOverlayMode = "top_bar"
+	ExportOverlayFloating ExportOverlayMode = "floating"
+)
+
 // ExportRequest 只接受结构化选项，避免把 FFmpeg 参数暴露给客户端。
 type ExportRequest struct {
-	Mode            ExportMode `json:"mode,omitempty"`
-	SessionID       string     `json:"session_id"`
-	MomentIDs       []string   `json:"moment_ids,omitempty"`
-	StartSeconds    float64    `json:"start_seconds"`
-	DurationSeconds float64    `json:"duration_seconds"`
-	Layout          string     `json:"layout"`
-	Cameras         []string   `json:"cameras"`
-	Quality         string     `json:"quality"`
-	BurnTimestamp   bool       `json:"burn_timestamp"`
-	BurnSEI         bool       `json:"burn_sei"`
+	Mode            ExportMode        `json:"mode,omitempty"`
+	SessionID       string            `json:"session_id"`
+	MomentIDs       []string          `json:"moment_ids,omitempty"`
+	StartSeconds    float64           `json:"start_seconds"`
+	DurationSeconds float64           `json:"duration_seconds"`
+	Layout          string            `json:"layout"`
+	Cameras         []string          `json:"cameras"`
+	Quality         string            `json:"quality"`
+	BurnTimestamp   bool              `json:"burn_timestamp"`
+	BurnSEI         bool              `json:"burn_sei"`
+	OverlayMode     ExportOverlayMode `json:"overlay_mode,omitempty"`
 }
 
 // ExportSettings 是用户可调整的导出文件保留策略。
@@ -86,12 +98,25 @@ type ExportVideo struct {
 	Duration    float64
 }
 
-// ExportOverlayCue 是导出时间轴上的文字叠加内容；由 API 在受保护快照内准备。
+// ExportOverlayCue 是导出时间轴上的画面信息；后台在受保护快照内准备，避免创建任务接口被 SEI 解析阻塞。
 type ExportOverlayCue struct {
 	Start     time.Duration
 	End       time.Duration
 	Timestamp string
-	SEIText   string
+	Telemetry *ExportTelemetry
+}
+
+// ExportTelemetry 是与具体 SEI 解析实现解耦的导出仪表状态。
+type ExportTelemetry struct {
+	Gear                string
+	SpeedKPH            float64
+	AcceleratorPosition float64
+	SteeringAngle       float64
+	LeftBlinker         bool
+	RightBlinker        bool
+	BlinkerVisible      bool
+	BrakeApplied        bool
+	Autopilot           string
 }
 
 // SourceExportFile 是已通过快照边界校验、可直接归档到原画浏览包的录像文件。
@@ -126,6 +151,7 @@ type ExportTask struct {
 	Error           string        `json:"error,omitempty"`
 	DownloadReady   bool          `json:"download_ready"`
 	EstimatedBytes  uint64        `json:"estimated_bytes"`
+	OutputBytes     uint64        `json:"output_bytes,omitempty"`
 	FileCount       int           `json:"file_count,omitempty"`
 }
 
@@ -189,8 +215,8 @@ func NewExporter(runner exportRunner, config ExportConfig) (*Exporter, error) {
 	if !isLinuxAbsolutePath(config.FFmpegPath) || !isHostOrLinuxAbsolutePath(config.OutputDir) {
 		return nil, errors.New("FFmpeg 和导出目录必须使用绝对路径")
 	}
-	if config.QueueSize <= 0 || config.MaxDuration <= 0 {
-		return nil, errors.New("导出队列和最大时长必须大于零")
+	if config.QueueSize <= 0 || config.MaxDuration < 0 {
+		return nil, errors.New("导出队列必须大于零，最大时长不能为负数")
 	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
@@ -679,30 +705,7 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		return
 	}
 
-	subtitlePath := ""
-	var err error
-	if job.request.BurnTimestamp || job.request.BurnSEI {
-		var hasSubtitles bool
-		subtitlePath = e.subtitlePath(task.ID)
-		hasSubtitles, err = writeOverlaySubtitles(subtitlePath, job.source.OverlayCues, job.request.BurnTimestamp, job.request.BurnSEI)
-		if err != nil {
-			e.finishJob(job.id, task, err)
-			return
-		}
-		if !hasSubtitles {
-			subtitlePath = ""
-		}
-		defer func() {
-			_ = os.Remove(e.subtitlePath(task.ID))
-		}()
-	}
-	args, err := exportArgs(job.request, job.source, e.tempPathForTask(task), subtitlePath)
-	if err == nil {
-		err = e.runner.RunProgress(ctx, e.config.FFmpegPath, args, func(position time.Duration) {
-			progress := min(99, max(0, int(position.Seconds()/job.request.DurationSeconds*100)))
-			e.updateProgress(job.id, progress)
-		})
-	}
+	err := e.runClipJob(ctx, task, job)
 	if err == nil {
 		err = os.Rename(e.tempPathForTask(task), e.outputPathForTask(task))
 	}
@@ -725,6 +728,11 @@ func (e *Exporter) finishJob(id string, task ExportTask, err error) {
 			task.State = ExportFailed
 			task.Error = "导出失败"
 		} else {
+			if info, statErr := os.Stat(e.outputPathForTask(task)); statErr == nil {
+				task.OutputBytes = uint64(info.Size())
+			} else {
+				e.logger.Warn("读取导出文件实际大小失败", "task_id", id, "error", statErr)
+			}
 			task.State = ExportCompleted
 			task.ProgressPercent = 100
 			task.DownloadReady = true
@@ -903,8 +911,11 @@ func validateExport(request ExportRequest, source ExportSource, maximum time.Dur
 	if strings.TrimSpace(request.SessionID) == "" || source.SessionStart.IsZero() || !source.SessionEnd.After(source.SessionStart) {
 		return &InputError{Message: "导出录像不存在"}
 	}
-	if request.StartSeconds < 0 || request.DurationSeconds <= 0 || request.DurationSeconds > maximum.Seconds() {
-		return &InputError{Message: fmt.Sprintf("导出时长必须大于 0 且不超过 %.0f 分钟", maximum.Minutes())}
+	if request.StartSeconds < 0 || request.DurationSeconds <= 0 {
+		return &InputError{Message: "导出时长必须大于 0"}
+	}
+	if maximum > 0 && request.DurationSeconds > maximum.Seconds() {
+		return &InputError{Message: fmt.Sprintf("导出时长不能超过 %.0f 分钟", maximum.Minutes())}
 	}
 	if request.StartSeconds+request.DurationSeconds > source.SessionEnd.Sub(source.SessionStart).Seconds()+0.01 {
 		return &InputError{Message: "导出范围超过完整录像时长"}
@@ -915,21 +926,22 @@ func validateExport(request ExportRequest, source ExportSource, maximum time.Dur
 	if request.Quality == "original" && request.Layout != "single" {
 		return &InputError{Message: "原画 MP4 仅支持单路视角；多路请使用多路原画导出"}
 	}
+	availableCameras := 0
 	for _, camera := range request.Cameras {
 		if !slices.Contains(knownCameras(), camera) {
 			return &InputError{Message: "包含未知摄像头视角"}
 		}
 		exportStart := source.SessionStart.Add(time.Duration(request.StartSeconds * float64(time.Second)))
 		exportEnd := exportStart.Add(time.Duration(request.DurationSeconds * float64(time.Second)))
-		if !slices.ContainsFunc(source.Videos, func(video ExportVideo) bool {
+		if slices.ContainsFunc(source.Videos, func(video ExportVideo) bool {
 			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
 			return video.Camera == camera && video.RecordedAt.Before(exportEnd) && videoEnd.After(exportStart)
 		}) {
-			return &InputError{Message: "选择的视角在导出范围内没有录像"}
+			availableCameras++
 		}
 	}
-	if exportDecoderInputCount(request, source) > maxExportDecoderInputs {
-		return &InputError{Message: "导出范围包含过多录像片段，请缩短时间范围后重试"}
+	if availableCameras == 0 {
+		return &InputError{Message: "选择的视角在导出范围内没有录像"}
 	}
 	return nil
 }
@@ -987,6 +999,23 @@ func normalizeExportRequest(request ExportRequest) (ExportRequest, error) {
 		return ExportRequest{}, &InputError{Message: "不支持的导出视角布局"}
 	}
 	request.Cameras = cameras
+	switch {
+	case !request.BurnTimestamp && !request.BurnSEI:
+		request.OverlayMode = ""
+	case request.OverlayMode == "" && request.BurnTimestamp && !request.BurnSEI:
+		request.OverlayMode = ExportOverlayDashcam
+	case request.OverlayMode == "":
+		request.OverlayMode = ExportOverlayTopBar
+	}
+	switch request.OverlayMode {
+	case "", ExportOverlayTopBar, ExportOverlayFloating:
+	case ExportOverlayDashcam:
+		if !request.BurnTimestamp || request.BurnSEI {
+			return ExportRequest{}, &InputError{Message: "行车记录仪模式只支持单独叠加录像时间"}
+		}
+	default:
+		return ExportRequest{}, &InputError{Message: "不支持的画面信息显示位置"}
+	}
 	return request, nil
 }
 
@@ -1022,6 +1051,7 @@ func normalizeSourceExportRequest(request ExportRequest) (ExportRequest, error) 
 	request.Quality = ""
 	request.StartSeconds = 0
 	request.DurationSeconds = 0
+	request.OverlayMode = ""
 	return request, nil
 }
 
@@ -1052,13 +1082,65 @@ func validateSourceExport(request ExportRequest, source ExportSource) error {
 	return nil
 }
 
-// EstimateExportBytes 按目标码率加封装余量估算空间，避免导出侵占车端录像保留容量。
+// EstimateExportBytes 按常见场景码率估算用户最终得到的文件大小。
 func EstimateExportBytes(request ExportRequest) uint64 {
-	bitrateKbps := map[string]uint64{"smooth": 1500, "standard": 3000, "high": highExportReservedKbps, "original": 20000}[request.Quality]
+	bitrateKbps := expectedExportBitrateKbps(request)
 	if bitrateKbps == 0 || request.DurationSeconds <= 0 {
 		return 0
 	}
-	return uint64(float64(bitrateKbps*1000)/8*request.DurationSeconds*1.15 + 0.5)
+	return estimateEncodedBytes(bitrateKbps, request.DurationSeconds, 1.08)
+}
+
+// EstimateExportWorkingBytes 包含最终文件和仍在使用的最大单段临时文件。
+func EstimateExportWorkingBytes(request ExportRequest) uint64 {
+	reservedBitrate := reservedExportBitrateKbps(request)
+	finalBytes := estimateEncodedBytes(reservedBitrate, request.DurationSeconds, 1.15)
+	segmentDuration := min(request.DurationSeconds, maxClipSegmentDuration.Seconds())
+	segmentBytes := estimateEncodedBytes(reservedBitrate, segmentDuration, 1.15)
+	if ^uint64(0)-finalBytes < segmentBytes {
+		return ^uint64(0)
+	}
+	return finalBytes + segmentBytes
+}
+
+func expectedExportBitrateKbps(request ExportRequest) uint64 {
+	switch request.Quality {
+	case "smooth":
+		return 1500
+	case "standard":
+		return 3000
+	case "original":
+		return 18_000
+	case "high":
+		switch request.Layout {
+		case "composite6":
+			return 32_000
+		case "composite4a", "composite4b":
+			return 24_000
+		default:
+			return 16_000
+		}
+	default:
+		return 0
+	}
+}
+
+func reservedExportBitrateKbps(request ExportRequest) uint64 {
+	switch request.Quality {
+	case "high":
+		return highExportReservedKbps
+	case "original":
+		return originalExportReservedKbps
+	default:
+		return expectedExportBitrateKbps(request)
+	}
+}
+
+func estimateEncodedBytes(bitrateKbps uint64, durationSeconds, multiplier float64) uint64 {
+	if bitrateKbps == 0 || durationSeconds <= 0 {
+		return 0
+	}
+	return uint64(float64(bitrateKbps*1000)/8*durationSeconds*multiplier + 0.5)
 }
 
 // EstimateSourceExportBytes 返回原始片段打包时需要预留的目标文件空间。
@@ -1100,6 +1182,10 @@ func isExportTemporaryArtifact(name string) bool {
 		id = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".tmp.zip")
 	} else if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp.ass") {
 		id = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".tmp.ass")
+	} else if strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp.part-") {
+		id = strings.TrimPrefix(strings.SplitN(name, ".tmp.part-", 2)[0], ".")
+	} else if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp.concat.txt") {
+		id = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".tmp.concat.txt")
 	}
 	return isExportID(id)
 }
@@ -1111,8 +1197,9 @@ func isExportID(id string) bool {
 
 func exportTimeout(request ExportRequest, source ExportSource) time.Duration {
 	if request.Mode != ExportModeSource {
-		timeout := time.Duration(request.DurationSeconds*3*float64(time.Second)) + time.Minute
-		return max(timeout, 2*time.Minute)
+		// 六路高保真在 ROCK 3A 上可能慢于实时速度，超时只防止失控进程，不能误杀正常长导出。
+		timeout := time.Duration(request.DurationSeconds*6*float64(time.Second)) + 5*time.Minute
+		return max(timeout, 10*time.Minute)
 	}
 	const minimumSourceWriteRate = 5 * 1024 * 1024
 	timeout := 2*time.Minute + time.Duration(EstimateSourceExportBytes(source)/minimumSourceWriteRate)*time.Second
@@ -1430,7 +1517,7 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 		"smooth":   {width: 854, height: 480, fps: 20, bitrate: 1500},
 		"standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
 		"high":     {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)},
-		"original": {fps: 36},
+		"original": {width: 1280, height: 960, fps: 36},
 	}[request.Quality]
 	if !ok || !isHostOrLinuxAbsolutePath(output) {
 		return nil, &InputError{Message: "导出参数无效"}
@@ -1441,7 +1528,7 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 	if err != nil {
 		return nil, err
 	}
-	hevcComposite := request.Quality == "high" && len(tiles) > 1
+	useHEVC := request.Quality == "high" || request.Quality == "original"
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-y"}
 	filters := make([]string, 0, len(source.Videos)*2)
 	cameraLabels := make([]string, 0, len(tiles))
@@ -1473,7 +1560,7 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 			}
 			if request.Quality == "original" {
 				filter += fmt.Sprintf(",hwdownload,format=nv12[%s]", label)
-			} else if hevcComposite {
+			} else if useHEVC {
 				// 实测残块来自最终 h264_rkmpp 编码；保留硬解和 RGA 缩放以降低导出时间、CPU 占用和功耗，仅切换最终 HEVC 硬编。
 				filter += fmt.Sprintf(",scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12[%s]", tile.width, tile.height, label)
 			} else {
@@ -1484,10 +1571,13 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 			inputIndex++
 			cursor = end
 		}
-		if len(segments) == 0 {
-			return nil, &InputError{Message: "选择的视角在导出范围内没有可用片段"}
-		}
 		cameraLabel := fmt.Sprintf("camera%d", cameraIndex)
+		if len(segments) == 0 {
+			// 某一路整段缺失时必须保留绝对时间位置，不能让其他视角前移补位。
+			filters = append(filters, fmt.Sprintf("color=c=black:s=%dx%d:r=%d:d=%.6f,format=nv12[%s]", tile.width, tile.height, profile.fps, request.DurationSeconds, cameraLabel))
+			cameraLabels = append(cameraLabels, "["+cameraLabel+"]")
+			continue
+		}
 		chain := strings.Join(segments, "")
 		if len(segments) > 1 {
 			chain += fmt.Sprintf("concat=n=%d:v=1:a=0", len(segments))
@@ -1511,22 +1601,23 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 		for _, tile := range tiles {
 			positions = append(positions, strconv.Itoa(tile.x)+"_"+strconv.Itoa(tile.y))
 		}
-		stackLabel := outputLabel
-		if request.Quality == "high" {
-			stackLabel = "stack"
-		}
-		filters = append(filters, strings.Join(cameraLabels, "")+fmt.Sprintf("xstack=inputs=%d:layout=%s:fill=black:shortest=1[%s]", len(tiles), strings.Join(positions, "|"), stackLabel))
-		if request.Quality == "high" {
-			// RKMPP 编码路径以宏块边界处理超宽 NV12 帧；保留内容区域，仅补黑边以提供 16 对齐画布。
-			filters = append(filters, "[stack]pad=w=ceil(iw/16)*16:h=ceil(ih/16)*16:x=0:y=0:color=black["+outputLabel+"]")
-		}
+		filters = append(filters, strings.Join(cameraLabels, "")+fmt.Sprintf("xstack=inputs=%d:layout=%s:fill=black:shortest=0[%s]", len(tiles), strings.Join(positions, "|"), outputLabel))
 	}
 	if len(subtitlePaths) > 0 && subtitlePaths[0] != "" {
-		filters = append(filters, fmt.Sprintf("[%s]subtitles=filename='%s':charenc=UTF-8[overlay]", outputLabel, escapeFilterPath(subtitlePaths[0])))
+		if effectiveExportOverlayMode(request) == ExportOverlayTopBar {
+			_, videoHeight := exportTileCanvasSize(tiles)
+			barHeight := exportInformationBarHeight(videoHeight)
+			if !request.BurnSEI {
+				barHeight = exportTimestampBarHeight(videoHeight)
+			}
+			filters = append(filters, fmt.Sprintf("[%s]pad=w=iw:h=ih+%d:x=0:y=%d:color=black[canvas]", outputLabel, barHeight, barHeight))
+			outputLabel = "canvas"
+		}
+		filters = append(filters, fmt.Sprintf("[%s]ass=filename='%s':fontsdir='/opt/teslabox/media/share/fonts'[overlay]", outputLabel, escapeFilterPath(subtitlePaths[0])))
 		outputLabel = "overlay"
 	}
 	encoder := "h264_rkmpp"
-	if hevcComposite {
+	if useHEVC {
 		encoder = "hevc_rkmpp"
 	}
 	args = append(args, "-filter_complex", strings.Join(filters, ";"), "-map", "["+outputLabel+"]", "-an", "-c:v", encoder)
@@ -1539,8 +1630,8 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 		bitrate := strconv.Itoa(profile.bitrate) + "k"
 		args = append(args, "-rc_mode", "CBR", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", strconv.Itoa(profile.bitrate*2)+"k")
 	}
-	if hevcComposite {
-		// hvc1 标记可让支持 HEVC 的常见本地播放器按 MP4 兼容路径识别视频流。
+	if useHEVC {
+		// RK3568 的 H.264 硬编在高细节画面中会留下残块；HEVC 路径同时兼顾兼容性、功耗和画质。
 		args = append(args, "-tag:v", "hvc1")
 	}
 	args = append(args, "-g", strconv.Itoa(profile.fps*2), "-fps_mode", "cfr", "-t", fmt.Sprintf("%.6f", request.DurationSeconds),
@@ -1548,35 +1639,391 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 	return args, nil
 }
 
-func writeOverlaySubtitles(path string, cues []ExportOverlayCue, burnTimestamp, burnSEI bool) (bool, error) {
-	if !burnTimestamp && !burnSEI {
+func exportInformationBarHeight(videoHeight int) int {
+	preferred := 64
+	switch {
+	case videoHeight >= 1080:
+		preferred = 96
+	case videoHeight >= 720:
+		preferred = 80
+	}
+	return alignedExportBarHeight(videoHeight, preferred)
+}
+
+func exportTimestampBarHeight(videoHeight int) int {
+	preferred := 48
+	if videoHeight >= 960 {
+		preferred = 64
+	}
+	return alignedExportBarHeight(videoHeight, preferred)
+}
+
+func alignedExportBarHeight(videoHeight, preferred int) int {
+	// 最终画布高度保持 16 对齐，避免硬编器把隐式步幅补齐区暴露成底部黑边。
+	return preferred + (16-(videoHeight+preferred)%16)%16
+}
+
+func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOverlayCue) (bool, error) {
+	if !request.BurnTimestamp && !request.BurnSEI {
 		return false, nil
 	}
-	lines := make([]string, 0, len(cues)*2)
+	mode := effectiveExportOverlayMode(request)
+	canvasWidth, canvasHeight, barHeight, separateBar, err := exportOverlayCanvas(request)
+	if err != nil {
+		return false, err
+	}
+	duration := time.Duration(request.DurationSeconds * float64(time.Second))
+	if duration <= 0 {
+		return false, nil
+	}
+	fontScale := 1.0
+	if !separateBar {
+		fontScale = max(0.55, min(1.2, min(float64(canvasHeight)/1080, float64(canvasWidth)/1280)))
+	} else {
+		videoHeight := canvasHeight - barHeight
+		switch {
+		case videoHeight >= 1080:
+			fontScale = 1
+		case videoHeight >= 720:
+			fontScale = 0.82
+		default:
+			fontScale = 0.66
+		}
+	}
+	dashboardSize := int(math.Round(29 * fontScale))
+	timeSize := int(math.Round(24 * fontScale))
+	labelSize := int(math.Round(14 * fontScale))
+	if separateBar {
+		timeSize = scaleASS(33, fontScale)
+		labelSize = scaleASS(23, fontScale)
+	}
+	lines := make([]string, 0, len(cues)*2+3)
+	panelTop, panelLeft, panelWidth := 0, 0, canvasWidth
+	if mode == ExportOverlayFloating {
+		barHeight = max(scaleASS(88, fontScale), 64)
+		panelTop = max(scaleASS(6, fontScale), 4)
+		preferredWidth := 560
+		if !request.BurnSEI {
+			preferredWidth = 460
+		}
+		panelWidth = min(canvasWidth-scaleASS(32, fontScale), scaleASS(preferredWidth, fontScale))
+		panelLeft = (canvasWidth - panelWidth) / 2
+	}
+	if mode == ExportOverlayTopBar || mode == ExportOverlayFloating {
+		alpha := "00"
+		shape := fmt.Sprintf("m 0 0 l %d 0 l %d %d l 0 %d", panelWidth, panelWidth, barHeight, barHeight)
+		if mode == ExportOverlayFloating {
+			alpha = "A0"
+			shape = assRoundedRectanglePath(panelWidth, barHeight, scaleASS(18, fontScale))
+		}
+		lines = append(lines, fmt.Sprintf("Dialogue: 0,%s,%s,Canvas,,0,0,0,,{\\an7\\pos(%d,%d)\\1c&H000000&\\1a&H%s&\\p1}%s{\\p0}",
+			assTimestamp(0), assTimestamp(duration), panelLeft, panelTop, alpha, shape))
+	}
+	timeX, timeLabelY, timeValueY := panelLeft+scaleASS(20, fontScale), panelTop+scaleASS(9, fontScale), panelTop+scaleASS(39, fontScale)
+	if request.BurnTimestamp && mode == ExportOverlayTopBar {
+		lines = append(lines, fmt.Sprintf("Dialogue: 1,%s,%s,TimeLabel,,0,0,0,,{\\pos(%d,%d)}录像时间", assTimestamp(0), assTimestamp(duration), timeX, timeLabelY))
+	}
+	dashboardX := canvasWidth / 2
+	if mode == ExportOverlayTopBar && request.BurnTimestamp && request.BurnSEI {
+		dashboardX = min(panelLeft+panelWidth-scaleASS(340, fontScale), max(dashboardX, panelLeft+scaleASS(710, fontScale)))
+	}
 	for _, cue := range cues {
 		if cue.End <= cue.Start {
 			continue
 		}
 		start, end := assTimestamp(cue.Start), assTimestamp(cue.End)
-		if burnTimestamp && cue.Timestamp != "" {
-			lines = append(lines, fmt.Sprintf("Dialogue: 0,%s,%s,Timestamp,,0,0,0,,%s", start, end, escapeASS(cue.Timestamp)))
+		if request.BurnTimestamp && cue.Timestamp != "" {
+			if mode == ExportOverlayDashcam || mode == ExportOverlayFloating {
+				lines = append(lines, fmt.Sprintf("Dialogue: 2,%s,%s,DashcamTime,,0,0,0,,%s", start, end, escapeASS(cue.Timestamp)))
+			} else {
+				lines = append(lines, fmt.Sprintf("Dialogue: 2,%s,%s,TimeValue,,0,0,0,,{\\pos(%d,%d)}%s", start, end, timeX, timeValueY, escapeASS(cue.Timestamp)))
+			}
 		}
-		if burnSEI && cue.SEIText != "" {
-			lines = append(lines, fmt.Sprintf("Dialogue: 0,%s,%s,Telemetry,,0,0,0,,%s", start, end, escapeASS(cue.SEIText)))
+		if request.BurnSEI {
+			lines = appendExportTelemetryDashboard(lines, start, end, dashboardX, panelTop, barHeight, fontScale, cue.Telemetry)
 		}
 	}
-	if len(lines) == 0 {
+	if len(lines) == 0 || (mode != ExportOverlayDashcam && len(lines) <= 1) {
 		return false, nil
 	}
-	content := "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nScaledBorderAndShadow: yes\n\n" +
+	content := fmt.Sprintf("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nScaledBorderAndShadow: yes\nWrapStyle: 2\n\n", canvasWidth, canvasHeight) +
 		"[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n" +
-		"Style: Timestamp,Arial,28,&H00FFFFFF,&H000000FF,&H96000000,&H96000000,1,0,0,0,100,100,0,0,1,2,1,7,28,28,24,1\n" +
-		"Style: Telemetry,Arial,22,&H00FFFFFF,&H000000FF,&H96000000,&H96000000,0,0,0,0,100,100,0,0,1,2,1,9,28,28,24,1\n\n" +
+		"Style: Canvas,Noto Sans CJK SC,10,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n" +
+		fmt.Sprintf("Style: DashcamTime,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,7,%d,0,%d,1\n", scaleASS(46, fontScale), scaleASS(14, fontScale), scaleASS(10, fontScale)) +
+		fmt.Sprintf("Style: TimeLabel,Noto Sans CJK SC,%d,&H007A7171,&H007A7171,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n", labelSize) +
+		fmt.Sprintf("Style: TimeValue,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n", timeSize) +
+		fmt.Sprintf("Style: Dashboard,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,1,0,1,0,0,5,0,0,0,1\n\n", dashboardSize) +
 		"[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n" + strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
 		return false, fmt.Errorf("写入导出字幕: %w", err)
 	}
 	return true, nil
+}
+
+func exportOverlayCanvas(request ExportRequest) (width, height, barHeight int, separateBar bool, err error) {
+	profile, ok := map[string]compositeProfile{
+		"smooth": {width: 854, height: 480, fps: 20, bitrate: 1500}, "standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
+		"high": {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)}, "original": {width: 1280, height: 960, fps: 36},
+	}[request.Quality]
+	if !ok {
+		return 0, 0, 0, false, &InputError{Message: "导出画质无效"}
+	}
+	tiles, err := exportTiles(request, profile)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	width, height = exportTileCanvasSize(tiles)
+	separateBar = effectiveExportOverlayMode(request) == ExportOverlayTopBar
+	if separateBar {
+		if request.BurnSEI {
+			barHeight = exportInformationBarHeight(height)
+		} else {
+			barHeight = exportTimestampBarHeight(height)
+		}
+		height += barHeight
+	}
+	return width, height, barHeight, separateBar, nil
+}
+
+func exportTileCanvasSize(tiles []compositeTile) (width, height int) {
+	for _, tile := range tiles {
+		width = max(width, tile.x+tile.width)
+		height = max(height, tile.y+tile.height)
+	}
+	return width, height
+}
+
+func effectiveExportOverlayMode(request ExportRequest) ExportOverlayMode {
+	if request.OverlayMode != "" {
+		return request.OverlayMode
+	}
+	if request.BurnTimestamp && !request.BurnSEI {
+		return ExportOverlayDashcam
+	}
+	return ExportOverlayTopBar
+}
+
+func scaleASS(value int, scale float64) int {
+	return int(math.Round(float64(value) * scale))
+}
+
+func assRoundedRectanglePath(width, height, radius int) string {
+	radius = min(max(radius, 1), min(width, height)/2)
+	return fmt.Sprintf("m %[1]d 0 l %[2]d 0 b %[3]d 0 %[3]d %[1]d %[3]d %[1]d l %[3]d %[4]d b %[3]d %[5]d %[2]d %[5]d %[2]d %[5]d l %[1]d %[5]d b 0 %[5]d 0 %[4]d 0 %[4]d l 0 %[1]d b 0 0 %[1]d 0 %[1]d 0",
+		radius, width-radius, width, height-radius, height)
+}
+
+func exportTelemetryASS(telemetry *ExportTelemetry) string {
+	const (
+		white = "{\\c&H00FFFFFF&}"
+		gray  = "{\\c&H007A7171&}"
+		blue  = "{\\c&H00E16A3E&}"
+		green = "{\\c&H0071BF2F&}"
+		red   = "{\\c&H002721E8&}"
+	)
+	if telemetry == nil {
+		return gray + "—  方向盘 —  ◀  — km/h  ▶  刹车  电门 —%"
+	}
+	gear := strings.TrimSpace(telemetry.Gear)
+	if gear == "" {
+		gear = "—"
+	}
+	autopilot, assisted := exportAutopilotLabel(telemetry.Autopilot)
+	steeringColor := white
+	if assisted {
+		steeringColor = blue
+	}
+	leftColor, rightColor := gray, gray
+	if telemetry.BlinkerVisible && telemetry.LeftBlinker {
+		leftColor = green
+	}
+	if telemetry.BlinkerVisible && telemetry.RightBlinker {
+		rightColor = green
+	}
+	brakeColor := gray
+	if telemetry.BrakeApplied {
+		brakeColor = red
+	}
+	acceleratorColor := gray
+	if telemetry.AcceleratorPosition > 0 {
+		acceleratorColor = green
+	}
+	steeringSign := " "
+	if telemetry.SteeringAngle > 0 {
+		steeringSign = "+"
+	} else if telemetry.SteeringAngle < 0 {
+		steeringSign = "−"
+	}
+	return fmt.Sprintf("%s%s%s\\h\\h%s◉ 方向盘 %s%.1f°\\h\\h%s◀\\h\\h%s%d km/h %s%s\\h\\h%s▶\\h\\h%s● 刹车\\h\\h%s▮ 电门 %d%%",
+		blue, escapeASS(gear), white, steeringColor, steeringSign, math.Abs(telemetry.SteeringAngle), leftColor,
+		white, int(math.Round(telemetry.SpeedKPH)), blue, autopilot, rightColor, brakeColor, acceleratorColor, int(math.Round(telemetry.AcceleratorPosition)))
+}
+
+func appendExportTelemetryDashboard(lines []string, start, end string, centerX, top, barHeight int, scale float64, telemetry *ExportTelemetry) []string {
+	const (
+		white = "&H00FFFFFF&"
+		gray  = "&H007A7171&"
+		muted = "&H00AAA1A1&"
+		blue  = "&H00E16A3E&"
+		green = "&H0071BF2F&"
+		red   = "&H002721E8&"
+		amber = "&H000BA5F5&"
+	)
+	gear, autopilot := "—", "手动"
+	speed, steering, accelerator := 0, 0.0, 0
+	steeringColor, brakeColor, acceleratorColor := white, gray, gray
+	leftColor, rightColor := gray, gray
+	if telemetry != nil {
+		if value := strings.TrimSpace(telemetry.Gear); value != "" {
+			gear = value
+		}
+		autopilot, _ = exportAutopilotLabel(telemetry.Autopilot)
+		speed = int(math.Round(telemetry.SpeedKPH))
+		steering = telemetry.SteeringAngle
+		accelerator = int(math.Round(telemetry.AcceleratorPosition))
+		_, assisted := exportAutopilotLabel(telemetry.Autopilot)
+		if assisted {
+			steeringColor = blue
+		}
+		if telemetry.BlinkerVisible && telemetry.LeftBlinker {
+			leftColor = green
+		}
+		if telemetry.BlinkerVisible && telemetry.RightBlinker {
+			rightColor = green
+		}
+		if telemetry.BrakeApplied {
+			brakeColor = red
+		}
+		if telemetry.AcceleratorPosition > 0 {
+			acceleratorColor = white
+		}
+	}
+	gearColor := white
+	switch strings.ToUpper(gear) {
+	case "D":
+		gearColor = blue
+	case "R":
+		gearColor = amber
+	case "—":
+		gearColor = gray
+	}
+	steeringSign := " "
+	if steering > 0 {
+		steeringSign = "+"
+	} else if steering < 0 {
+		steeringSign = "−"
+	}
+	assistanceColor := gray
+	if autopilot != "手动" {
+		assistanceColor = white
+	}
+
+	gearX := centerX - scaleASS(238, scale)
+	steeringX := centerX - scaleASS(158, scale)
+	leftX := centerX - scaleASS(72, scale)
+	speedX := centerX
+	rightX := centerX + scaleASS(72, scale)
+	brakeX := centerX + scaleASS(158, scale)
+	acceleratorX := centerX + scaleASS(238, scale)
+	// 图标中心与“时速 + km/h”组合的视觉中心对齐，避免四个状态项悬在顶部。
+	iconTop := top + scaleASS(15, scale)
+	labelY := top + barHeight - scaleASS(27, scale)
+	assistanceY := top + barHeight - scaleASS(22, scale)
+
+	lines = append(lines,
+		assDashboardText(start, end, gearX, top+scaleASS(10, scale), scaleASS(50, scale), gearColor, gear),
+		assDashboardText(start, end, gearX, labelY, scaleASS(24, scale), white, "档位"),
+		assDashboardText(start, end, steeringX, labelY, scaleASS(24, scale), white, fmt.Sprintf("方向盘 %s%.1f°", steeringSign, math.Abs(steering))),
+		assDashboardText(start, end, speedX, top, scaleASS(60, scale), white, strconv.Itoa(speed)),
+		assDashboardText(start, end, speedX, top+scaleASS(48, scale), scaleASS(22, scale), muted, "km/h"),
+		assDashboardText(start, end, brakeX, labelY, scaleASS(24, scale), white, "刹车"),
+		assDashboardText(start, end, acceleratorX, labelY, scaleASS(24, scale), white, fmt.Sprintf("电门 %d%%", accelerator)),
+	)
+	if autopilot != "手动" {
+		badgeWidth := scaleASS(54, scale)
+		if len(autopilot) >= 3 {
+			badgeWidth = scaleASS(68, scale)
+		}
+		lines = append(lines, assDashboardBadge(start, end, speedX, assistanceY-scaleASS(2, scale), badgeWidth, scaleASS(24, scale), blue))
+	}
+	lines = append(lines, assDashboardText(start, end, speedX, assistanceY, scaleASS(20, scale), assistanceColor, autopilot))
+	lines = appendSteeringWheelASS(lines, start, end, steeringX, iconTop, scale, steeringColor, steering)
+	lines = appendBlinkerASS(lines, start, end, leftX, iconTop, scale, leftColor, true)
+	lines = appendBlinkerASS(lines, start, end, rightX, iconTop, scale, rightColor, false)
+	lines = appendPedalASS(lines, start, end, brakeX, iconTop, scale, brakeColor, true, 0)
+	lines = appendPedalASS(lines, start, end, acceleratorX, iconTop, scale, acceleratorColor, false, accelerator)
+	return lines
+}
+
+func assDashboardText(start, end string, x, y, size int, color, value string) string {
+	return fmt.Sprintf("Dialogue: 4,%s,%s,Dashboard,,0,0,0,,{\\an8\\pos(%d,%d)\\fs%d\\1c%s\\b1}%s", start, end, x, y, size, color, escapeASS(value))
+}
+
+func assDashboardBadge(start, end string, centerX, top, width, height int, color string) string {
+	left := centerX - width/2
+	path := assRoundedRectanglePath(width, height, height/2)
+	return fmt.Sprintf("Dialogue: 3,%s,%s,Canvas,,0,0,0,,{\\an7\\pos(%d,%d)\\1c%s\\1a&H20&\\3c&H00FFB96E&\\3a&H30&\\bord1\\shad0\\p1}%s{\\p0}",
+		start, end, left, top, color, path)
+}
+
+func assDashboardVector(start, end string, layer, x, y int, scale float64, color, path, extra string) string {
+	percent := int(math.Round(scale * 100))
+	return fmt.Sprintf("Dialogue: %d,%s,%s,Canvas,,0,0,0,,{\\an7\\pos(%d,%d)\\fscx%d\\fscy%d\\1c%s%s\\p1}%s{\\p0}",
+		layer, start, end, x-scaleASS(20, scale), y, percent, percent, color, extra, path)
+}
+
+func appendSteeringWheelASS(lines []string, start, end string, centerX, top int, scale float64, color string, angle float64) []string {
+	path := "m 20.4 1.99 b 21.1 1.97 21.8 1.97 22.5 1.99 b 29.08 2.44 34.71 6.34 37.31 12.41 b 40 18.04 38.77 25.63 34.66 30.24 b 34.58 30.28 34.52 30.33 34.45 30.38 b 33.9 30.94 33.34 31.51 32.79 32.08 b 30.97 34.03 26.55 35.91 23.86 36.14 b 10.41 38.03 0 24.87 5.53 12.34 b 8.11 6.26 13.87 2.44 20.4 1.99 c m 8.59 14.96 b 8.63 17.41 12.3 15.67 13.62 15.51 b 20.04 14.02 25.1 14.28 31.42 16.05 b 32.8 16.47 34.63 16.27 33.96 14.33 b 30.98 6.48 21.43 3.91 14.32 7.85 b 11.81 9.22 9.3 12.19 8.59 14.96 c m 10.82 27.8 b 10.81 27.88 10.85 27.93 10.93 27.93 b 11.72 29.37 17.53 33.72 18.13 30.45 b 18.04 26.33 15.7 22.47 11.35 21.9 b 9.45 21.71 7.96 22.63 8.83 24.7 b 9.32 25.73 10.02 26.98 10.82 27.8 c m 26.65 24.44 b 26.57 24.45 26.53 24.5 26.53 24.58 b 25.41 25.95 23.32 30.17 25.05 31.56 b 26.28 32.35 29.32 30.16 30.32 29.37 b 30.56 29.37 30.76 29.27 30.9 29.07 b 31.11 28.76 31.83 28.33 31.76 27.93 b 32.81 26.7 35.69 22.61 32.72 21.96 b 30.77 21.55 27.75 22.81 26.65 24.44 c"
+	angle = min(540, max(-540, angle))
+	rotation := fmt.Sprintf("\\org(%d,%d)\\frz%.2f", centerX, top+scaleASS(20, scale), angle)
+	// 直接复用在线播放方向盘的透明复合路径，保证造型和旋转中心一致。
+	return append(lines, assDashboardVector(start, end, 5, centerX, top, scale, color, path, rotation))
+}
+
+func appendBlinkerASS(lines []string, start, end string, centerX, top int, scale float64, color string, left bool) []string {
+	path := "m 4 20 b 4 18 5 17 7 15 l 17 6 b 20 3 24 5 24 9 l 24 14 l 34 14 b 38 14 40 17 40 20 b 40 23 38 26 34 26 l 24 26 l 24 31 b 24 35 20 37 17 34 l 7 25 b 5 23 4 22 4 20"
+	if !left {
+		path = "m 36 20 b 36 18 35 17 33 15 l 23 6 b 20 3 16 5 16 9 l 16 14 l 6 14 b 2 14 0 17 0 20 b 0 23 2 26 6 26 l 16 26 l 16 31 b 16 35 20 37 23 34 l 33 25 b 35 23 36 22 36 20"
+	}
+	return append(lines, assDashboardVector(start, end, 5, centerX, top, scale, color, path, ""))
+}
+
+func appendPedalASS(lines []string, start, end string, centerX, top int, scale float64, color string, brake bool, level int) []string {
+	path := "m 20 1 b 9 1 1 9 1 20 b 1 31 9 39 20 39 b 31 39 39 31 39 20 b 39 9 31 1 20 1"
+	if brake {
+		path += " m 25 4 b 25 10 23 14 20 18 m 10 18 l 30 18 l 28 32 l 12 32 l 10 18 m 14 22 l 14 28 m 17 22 l 17 28 m 20 22 l 20 28 m 23 22 l 23 28 m 26 22 l 26 28"
+	} else {
+		path += " m 20 4 l 20 10 m 14 10 b 14 7 26 7 26 10 l 26 32 b 26 36 14 36 14 32 l 14 10 m 18 14 l 18 30 m 22 14 l 22 30"
+	}
+	outline := fmt.Sprintf("\\1a&HFF&\\3c%s\\bord%.1f\\shad0", color, max(1.5, 2.2*scale))
+	lines = append(lines, assDashboardVector(start, end, 5, centerX, top, scale, color, path, outline))
+	if brake || level <= 0 {
+		return lines
+	}
+	level = min(100, max(0, level))
+	iconLeft := centerX - scaleASS(20, scale)
+	clipTop := top + scaleASS(40*(100-level)/100, scale)
+	clipRight := iconLeft + scaleASS(40, scale)
+	clipBottom := top + scaleASS(40, scale)
+	clip := fmt.Sprintf("\\clip(%d,%d,%d,%d)\\1a&HFF&\\3c&H0071BF2F&\\bord%.1f\\shad0", iconLeft, clipTop, clipRight, clipBottom, max(1.5, 2.2*scale))
+	return append(lines, assDashboardVector(start, end, 6, centerX, top, scale, "&H0071BF2F&", path, clip))
+}
+
+func exportAutopilotLabel(value string) (string, bool) {
+	source := strings.TrimSpace(value)
+	normalized := strings.ToUpper(source)
+	switch {
+	case strings.Contains(normalized, "FSD"):
+		return "FSD", true
+	case normalized == "EAP":
+		return "EAP", true
+	case normalized == "AP" || strings.Contains(normalized, "AUTOSTEER") || strings.Contains(source, "自动辅助转向"):
+		return "AP", true
+	case strings.Contains(normalized, "TACC"):
+		return "TACC", false
+	default:
+		return "手动", false
+	}
 }
 
 func assTimestamp(value time.Duration) string {
@@ -1611,7 +2058,41 @@ func exportTiles(request ExportRequest, profile compositeProfile) ([]compositeTi
 		}
 		return []compositeTile{{camera: request.Cameras[0], width: width, height: profile.height}}, nil
 	}
+	if request.Quality == "high" {
+		return highExportTiles(request.Layout)
+	}
 	return teslaLayoutTiles(request.Layout, profile.height)
+}
+
+func highExportTiles(layout string) ([]compositeTile, error) {
+	// 整体画布必须直接满足 RKMPP 的 16 像素边界；不能在合成后补黑边，否则补齐区域会成为成片的可见像素。
+	switch layout {
+	case "composite6":
+		return gridTiles(
+			[]string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"},
+			[]int{842, 844, 842}, []int{544, 544},
+		), nil
+	case "composite4a":
+		return gridTiles(
+			[]string{"front", "back", "left_repeater", "right_repeater"},
+			[]int{840, 840}, []int{544, 544},
+		), nil
+	case "composite4b":
+		return []compositeTile{
+			{camera: "front", width: 1264, height: 816},
+			{camera: "right_repeater", y: 816, width: 422, height: 272},
+			{camera: "back", x: 422, y: 816, width: 420, height: 272},
+			{camera: "left_repeater", x: 842, y: 816, width: 422, height: 272},
+		}, nil
+	case "composite3":
+		return []compositeTile{
+			{camera: "front", width: 1120, height: 726},
+			{camera: "right_repeater", y: 726, width: 560, height: 362},
+			{camera: "left_repeater", x: 560, y: 726, width: 560, height: 362},
+		}, nil
+	default:
+		return nil, &InputError{Message: "不支持的合成布局"}
+	}
 }
 
 func maxTime(values ...time.Time) time.Time {

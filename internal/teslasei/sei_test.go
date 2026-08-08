@@ -1,9 +1,11 @@
 package teslasei
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -85,6 +87,44 @@ func TestReadHonorsCanceledContext(t *testing.T) {
 	if _, err := Read(ctx, path); err != context.Canceled {
 		t.Fatalf("Read() error = %v, want context.Canceled", err)
 	}
+}
+
+func TestBlockReaderCollapsesNALHeaderReads(t *testing.T) {
+	t.Parallel()
+	payload := appendVarintField(nil, 1, 2)
+	sei := append([]byte{0x06, 0x05, 0x20, 'B', 'B', 'B', 'i'}, payload...)
+	sei = append(sei, 0x80)
+	mdat := make([]byte, 0, readBlockBytes*3)
+	for range 160 {
+		nal := make([]byte, 4096)
+		nal[0] = 0x65
+		mdat = binary.BigEndian.AppendUint32(mdat, uint32(len(nal)))
+		mdat = append(mdat, nal...)
+	}
+	mdat = binary.BigEndian.AppendUint32(mdat, uint32(len(sei)))
+	mdat = append(mdat, sei...)
+	source := &countingReaderAt{ReaderAt: bytes.NewReader(mdat)}
+	reader := newBlockReaderAt(source, int64(len(mdat)))
+	items, err := readMdat(t.Context(), reader, 0, int64(len(mdat)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Version != 2 {
+		t.Fatalf("metadata = %#v", items)
+	}
+	if source.reads > 3 {
+		t.Fatalf("底层读取次数 = %d，希望不超过 3", source.reads)
+	}
+}
+
+type countingReaderAt struct {
+	io.ReaderAt
+	reads int
+}
+
+func (reader *countingReaderAt) ReadAt(destination []byte, offset int64) (int, error) {
+	reader.reads++
+	return reader.ReaderAt.ReadAt(destination, offset)
 }
 
 func testMP4(payload []byte) []byte {

@@ -46,7 +46,7 @@ const (
 	defaultSnapshotLimit   = 2 * time.Minute
 	defaultSnapshotRetry   = 10 * time.Minute
 	defaultMediaProbeLimit = 10 * time.Second
-	defaultExportLimit     = 2 * time.Minute
+	defaultExportLimit     = time.Duration(0)
 	defaultExportQueueSize = 4
 	defaultShutdownLimit   = 10 * time.Second
 	defaultWebSessionTTL   = 7 * 24 * time.Hour
@@ -146,7 +146,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	exportMaxDuration, err := envDuration("TESLABOX_EXPORT_MAX_DURATION", defaultExportLimit)
+	exportMaxDuration, err := envNonNegativeDuration("TESLABOX_EXPORT_MAX_DURATION", defaultExportLimit)
 	if err != nil {
 		return Config{}, err
 	}
@@ -333,7 +333,7 @@ func (c Config) Validate() error {
 	if c.GadgetName == "" || c.GadgetSerial == "" {
 		return fmt.Errorf("Gadget 名称和序列号不能为空")
 	}
-	if c.ScanInterval <= 0 || c.SnapshotIdleInterval <= 0 || c.SnapshotActiveWindow <= 0 || c.PollInterval <= 0 || c.OperationTimeout <= 0 || c.SnapshotTimeout <= 0 || c.SnapshotRetryMax <= 0 || c.MediaProbeTimeout <= 0 || c.ExportMaxDuration <= 0 || c.ShutdownTimeout <= 0 {
+	if c.ScanInterval <= 0 || c.SnapshotIdleInterval <= 0 || c.SnapshotActiveWindow <= 0 || c.PollInterval <= 0 || c.OperationTimeout <= 0 || c.SnapshotTimeout <= 0 || c.SnapshotRetryMax <= 0 || c.MediaProbeTimeout <= 0 || c.ExportMaxDuration < 0 || c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("时间间隔必须大于零")
 	}
 	if c.ExportQueueSize <= 0 || c.ExportQueueSize > 16 {
@@ -408,6 +408,18 @@ func envDuration(name string, fallback time.Duration) (time.Duration, error) {
 	parsed, err := time.ParseDuration(value)
 	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("解析 %s: 必须是大于零的时间", name)
+	}
+	return parsed, nil
+}
+
+func envNonNegativeDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("解析 %s: 必须是非负时间", name)
 	}
 	return parsed, nil
 }

@@ -1,14 +1,17 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="0.1.20"
-RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.20"
+INSTALLER_VERSION="0.1.23"
+RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.23"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
 BOOTSTRAP_SHA256="e4c5e35185492502f57a83395822e751faaf4bdd01b983817fcf2d0f3bf7cabc"
 # MT7922 测试内核只使用已在 ROCK 3A 上验证的固定归档，首装主程序升级不应隐式更换内核基线。
 MT7922_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.16"
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
 MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
+MT7922_BLUETOOTH_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.23"
+MT7922_BLUETOOTH_ARCHIVE="teslabox-mt7922-bluetooth-rock3a-5.10.160teslabox2.tar.gz"
+MT7922_BLUETOOTH_SHA256="482a41aadad95fa8bf3b3df06e42ea2e374c5788442d7be39449076500638fd5"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/history.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
@@ -298,7 +301,8 @@ for argument in "$@"; do
 
 默认安装 TeslaBox、FFmpeg/MPP/RGA、systemd、udev 和在线升级组件。
 安装 Debian 运行依赖前会询问是否切换到清华大学镜像源；两种选择都会禁用失效的 bullseye-backports。
-安装末尾会单独询问是否安装 MT7922 测试内核，默认不安装。
+安装末尾会单独询问是否安装 MT7922 Wi-Fi 测试内核，默认不安装。
+只有确认安装 MT7922 后，才会再次询问是否安装蓝牙驱动，蓝牙同样默认不安装。
 EOF
             exit 0
             ;;
@@ -432,7 +436,7 @@ configure_debian_apt_sources
 apt-get update
 apt-get install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
-    dosfstools libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
+    dosfstools fonts-noto-cjk libass9 libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
 
 if ! systemctl is-active --quiet teslabox.service 2>/dev/null && command -v ss >/dev/null 2>&1; then
     if ss -H -ltn 'sport = :80' 2>/dev/null | sed -n '1p' | read -r _; then
@@ -469,7 +473,7 @@ if [ ! -f /etc/teslabox/teslabox.env ]; then
 fi
 
 ENV_TEMP="${WORK_DIR}/teslabox.env.updated"
-awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|PUBLIC_KEY|CHANNEL|BOARD)=/' \
+awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|PUBLIC_KEY|CHANNEL|BOARD)=/ && !/^TESLABOX_EXPORT_MAX_DURATION=/' \
     /etc/teslabox/teslabox.env >"${ENV_TEMP}"
 {
     printf '%s\n' "TESLABOX_UPDATE_MANIFEST_URL=${UPDATE_MANIFEST_URL}"
@@ -477,6 +481,7 @@ awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|PUBLIC_KEY|CHANNEL|BOARD)=/' \
     printf '%s\n' "TESLABOX_UPDATE_PUBLIC_KEY=${UPDATE_PUBLIC_KEY}"
     printf '%s\n' 'TESLABOX_UPDATE_CHANNEL=stable'
     printf '%s\n' 'TESLABOX_UPDATE_BOARD=radxa-rock-3a'
+    printf '%s\n' 'TESLABOX_EXPORT_MAX_DURATION=0s'
 } >>"${ENV_TEMP}"
 install -m 0640 "${ENV_TEMP}" /etc/teslabox/teslabox.env
 
@@ -649,7 +654,41 @@ EOF
         "${MT_DIR}/linux-mt7922-backports-5.10.160teslabox1_5.10.160teslabox1-2_arm64.deb"
     depmod -a 5.10.160teslabox1
     systemctl enable teslabox-ap.service >/dev/null
-    warn "MT7922 测试内核已安装。请确认没有车机 USB 写入后手工执行 sudo reboot。"
+
+    printf '是否继续安装 MT7922 蓝牙驱动？此操作会升级到已验证的 5.10.160teslabox2 内核 [y/N]：' >/dev/tty
+    IFS= read -r BT_CONFIRM </dev/tty || BT_CONFIRM=""
+    case "${BT_CONFIRM}" in
+        y|Y)
+            BT_PATH="${WORK_DIR}/${MT7922_BLUETOOTH_ARCHIVE}"
+            BT_DIR="${WORK_DIR}/mt7922-bluetooth"
+            curl --fail --location --retry 3 --connect-timeout 15 \
+                --output "${BT_PATH}" "${MT7922_BLUETOOTH_RELEASE_BASE}/${MT7922_BLUETOOTH_ARCHIVE}"
+            if [ ! -s "${BT_PATH}" ]; then
+                die "MT7922 蓝牙驱动包为空。"
+            fi
+            ACTUAL_BT_SHA256="$(sha256sum "${BT_PATH}" | awk '{print tolower($1)}')"
+            if [ "${ACTUAL_BT_SHA256}" != "${MT7922_BLUETOOTH_SHA256}" ]; then
+                die "MT7922 蓝牙驱动包 SHA-256 校验失败。"
+            fi
+            mkdir -p "${BT_DIR}"
+            tar -C "${BT_DIR}" -xzf "${BT_PATH}"
+            if [ ! -s "${BT_DIR}/install.sh" ] || [ ! -s "${BT_DIR}/SHA256SUMS" ]; then
+                die "MT7922 蓝牙驱动包结构不完整。"
+            fi
+            normalize_checksum_file "${BT_DIR}/SHA256SUMS"
+            (
+                cd "${BT_DIR}"
+                sha256sum -c SHA256SUMS
+            )
+            apt-get install -y --no-install-recommends bluez
+            sh "${BT_DIR}/install.sh"
+            warn "MT7922 Wi-Fi 与蓝牙驱动已安装。请确认没有车机 USB 写入后手工执行 sudo reboot。"
+            ;;
+        *)
+            warn "已跳过 MT7922 蓝牙驱动，仅安装 MT7922 Wi-Fi 测试内核。"
+            warn "请确认没有车机 USB 写入后手工执行 sudo reboot。"
+            ;;
+    esac
 }
 
 MT7922_PRESENT="false"

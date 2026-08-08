@@ -38,6 +38,9 @@ go.work.sum
 /build/media-toolchain/
 /build/mt7922/
 /build/candidate-*/
+/internal/mediabundle/bundle/
+/deploy/bluetooth/
+/scripts/candidates/
 /.gocache/
 /.gotmp/
 *.prof

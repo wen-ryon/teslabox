@@ -199,7 +199,7 @@ func TestVideoGroupComposite(t *testing.T) {
 	root := t.TempDir()
 	recordedAt := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
 	videos := make([]teslacam.Video, 0, 3)
-	for _, camera := range []string{"front", "right_repeater", "left_repeater"} {
+	for index, camera := range []string{"front", "right_repeater", "left_repeater"} {
 		relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "clip-"+camera+".mp4"))
 		name := filepath.Join(root, filepath.FromSlash(relative))
 		if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
@@ -208,7 +208,13 @@ func TestVideoGroupComposite(t *testing.T) {
 		if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		videos = append(videos, teslacam.Video{ID: camera, Camera: camera, Path: relative, RecordedAt: recordedAt})
+		duration := 60.0
+		if camera == "front" {
+			duration = 3
+		}
+		videos = append(videos, teslacam.Video{
+			ID: camera, Camera: camera, Path: relative, RecordedAt: recordedAt.Add(time.Duration(index) * time.Second), Duration: duration,
+		})
 	}
 	compositor := &fakeMediaCompositor{}
 	controller := fakeController{
@@ -230,6 +236,9 @@ func TestVideoGroupComposite(t *testing.T) {
 	}
 	if compositor.request.Layout != "composite3" || compositor.request.Quality != "standard" || compositor.request.Camera != "front" || len(compositor.request.Inputs) != 3 {
 		t.Fatalf("request = %#v", compositor.request)
+	}
+	if compositor.request.InputOffsets["front"] != 0 || compositor.request.InputOffsets["right_repeater"] != 0 || compositor.request.InputOffsets["left_repeater"] != 0 {
+		t.Fatalf("input offsets = %#v", compositor.request.InputOffsets)
 	}
 	if acquired != 1 || released != 1 {
 		t.Fatalf("media lease acquired = %d, released = %d", acquired, released)
@@ -322,7 +331,7 @@ func TestCreateExportTransfersSnapshotLeaseAndBuildsSessionSource(t *testing.T) 
 	if released != 0 || admin.release == nil {
 		t.Fatalf("snapshot lease released before async task: released = %d", released)
 	}
-	if admin.request.SessionID != sessionID || admin.request.Layout != "single" || len(admin.source.Videos) != 4 || len(admin.source.OverlayCues) != 90 || admin.source.OverlayCues[0].Timestamp != "2026-07-20 10:00:10" || admin.source.SessionEnd.Sub(admin.source.SessionStart) != 2*time.Minute {
+	if admin.request.SessionID != sessionID || admin.request.Layout != "single" || len(admin.source.Videos) != 4 || len(admin.source.OverlayCues) != 0 || admin.source.SessionEnd.Sub(admin.source.SessionStart) != 2*time.Minute {
 		t.Fatalf("request = %#v, source = %#v", admin.request, admin.source)
 	}
 	admin.release()
@@ -499,26 +508,12 @@ func TestVideoSEIReturnsUnavailableForRecordingWithoutTelemetry(t *testing.T) {
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Available {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
-}
-
-func TestAttachExportOverlayUsesSourceWallClock(t *testing.T) {
-	t.Parallel()
-	timelineStart := time.Date(2026, 7, 30, 8, 0, 0, 0, time.FixedZone("CST", 8*60*60))
-	source := media.ExportSource{
-		SessionStart: timelineStart,
-		SessionEnd:   timelineStart.Add(2 * time.Minute),
-		Videos: []media.ExportVideo{{
-			Camera: "front", Path: filepath.Join(t.TempDir(), "front.mp4"), RecordedAt: timelineStart,
-			WallClockAt: timelineStart.Add(15 * time.Minute), Duration: 60,
-		}},
+	if response.Header().Get("X-TeslaBox-SEI-Cache") != "miss" {
+		t.Fatalf("first cache status = %q", response.Header().Get("X-TeslaBox-SEI-Cache"))
 	}
-	err := attachExportOverlayCues(t.Context(), media.ExportRequest{
-		StartSeconds: 5, DurationSeconds: 2, Cameras: []string{"front"}, BurnTimestamp: true,
-	}, &source, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(source.OverlayCues) != 2 || source.OverlayCues[0].Timestamp != "2026-07-30 08:15:05" {
-		t.Fatalf("overlay cues = %#v", source.OverlayCues)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/api/v1/videos/front/sei", nil))
+	if second.Code != http.StatusOK || second.Header().Get("X-TeslaBox-SEI-Cache") != "hit" {
+		t.Fatalf("second response = %d, cache = %q, body = %s", second.Code, second.Header().Get("X-TeslaBox-SEI-Cache"), second.Body.String())
 	}
 }

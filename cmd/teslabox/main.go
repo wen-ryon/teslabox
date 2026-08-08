@@ -25,6 +25,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
+	"github.com/wen-ryon/teslabox/internal/mediabundle"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
@@ -173,6 +174,10 @@ func main() {
 	// TeslaUSB 是车辆启动时最有时效性的链路；Web、网络和媒体管理组件不应占用其首次绑定机会。
 	go manager.Run(ctx)
 	logger.Info("TeslaUSB 核心状态机已启动", "startup_elapsed_ms", time.Since(processStartedAt).Milliseconds())
+	if err := mediabundle.EnsureEmbedded(ctx, logger); err != nil {
+		logger.Error("安装正式版本内置媒体运行时失败", "error", err)
+		os.Exit(1)
+	}
 
 	driveInspector := driveinit.NewLSBLKInspector(runner)
 	storageAdmin := storageadmin.New(storageadmin.Config{

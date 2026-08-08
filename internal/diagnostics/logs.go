@@ -27,7 +27,7 @@ const (
 	// SourceMedia 表示视频播放、FFmpeg 和媒体硬件相关日志。
 	SourceMedia = "media"
 
-	defaultLimit  = 200
+	defaultLimit  = 50
 	maximumLimit  = 500
 	maximumLine   = 4096
 	maximumBundle = 1536 * 1024
@@ -43,9 +43,7 @@ var (
 	}
 	mediaKeywords = []string{
 		"ffmpeg", "实时合成", "合成录像", "转码", "视频流", "播放诊断", "客户端播放",
-		"rkmpp", "mpp", "rga", "vpu", "decoder", "encoder", "h264", "hevc", "avc",
-		"out of memory", "oom", "killed process", "watchdog", "thermal", "overheat",
-		"媒体快照", "snapshot",
+		"视频导出", "导出任务", "rkmpp", "mpp", "rga", "vpu", "decoder", "encoder", "h264", "h265", "hevc", "avc", "avfilter", "filtergraph",
 	}
 	incidentKeywords = append(append([]string{}, usbKeywords...), append(mediaKeywords,
 		"panic", "oops", "call trace", "segfault", "reboot", "shutdown", "reset",
@@ -57,6 +55,7 @@ type Report struct {
 	Source        string                `json:"source"`
 	GeneratedAt   time.Time             `json:"generated_at"`
 	Lines         []string              `json:"lines"`
+	Summaries     []string              `json:"summaries,omitempty"`
 	Limited       bool                  `json:"limited"`
 	Redacted      int                   `json:"redacted"`
 	ServiceStates []gadget.ServiceState `json:"service_states,omitempty"`
@@ -126,7 +125,7 @@ func (m *Manager) Logs(ctx context.Context, source string, limit int) (Report, e
 		lines = lines[len(lines)-limit:]
 	}
 	report := Report{
-		Source: source, GeneratedAt: time.Now(), Lines: lines,
+		Source: source, GeneratedAt: time.Now(), Lines: lines, Summaries: summarizeLines(source, lines),
 		Limited: limited, Redacted: redacted,
 	}
 	if source == SourceUSB {
@@ -264,6 +263,58 @@ func containsKeyword(line string, keywords []string) bool {
 	lower := strings.ToLower(line)
 	for _, keyword := range keywords {
 		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+type logSummaryRule struct {
+	source string
+	groups [][]string
+	text   string
+}
+
+func summarizeLines(source string, lines []string) []string {
+	rules := []logSummaryRule{
+		{source: SourceMedia, groups: [][]string{{"no such filter", "filter not found", "找不到滤镜"}}, text: "FFmpeg 缺少所需滤镜，相关画面信息叠加或视频导出会失败。"},
+		{source: SourceMedia, groups: [][]string{{"out of memory", "oom", "killed process", "内存不足"}}, text: "系统出现内存不足或媒体进程被终止，导出和播放可能中断。"},
+		{source: SourceMedia, groups: [][]string{{"rga", "mpp", "rkmpp", "vpu"}, {"failed", "error", "失败"}}, text: "媒体硬件加速组件报告错误，请重点检查对应的 MPP/RGA 原始日志。"},
+		{source: SourceMedia, groups: [][]string{{"playback_stall", "播放累计卡顿", "加载失败", "load_failed"}}, text: "检测到客户端播放卡顿或加载失败。"},
+		{source: SourceMedia, groups: [][]string{{"导出"}, {"failed", "error", "失败"}}, text: "检测到视频导出失败。"},
+		{source: SourceUSB, groups: [][]string{{"device reset", "usb disconnect", "主机已断开", "枚举未完成"}}, text: "检测到 USB 主机重置、断开或枚举未完成；重新插线时也可能出现这类记录。"},
+		{source: SourceUSB, groups: [][]string{{"udc", "dwc3", "gadget"}, {"failed", "error", "timeout", "失败", "超时"}}, text: "USB Gadget 或控制器报告错误，请检查 OTG 线、供电和 UDC 状态。"},
+		{source: SourceNetwork, groups: [][]string{{"secrets were required", "passwords or encryption keys are required", "密码", "密钥"}}, text: "WiFi 连接缺少可用密码或密钥，请重新保存该网络密码。"},
+		{source: SourceNetwork, groups: [][]string{{"timeout expired", "连接超时", "activation failed"}}, text: "WiFi 连接或激活超时，请检查信号、频段、BSSID 和路由器兼容性。"},
+		{source: SourceNetwork, groups: [][]string{{"disconnected", "断开连接", "连接已断开"}}, text: "检测到网络连接断开。"},
+		{source: SourceApplication, groups: [][]string{{"panic", "segfault", "fatal error", "崩溃"}}, text: "TeslaBox 服务出现严重异常或崩溃迹象。"},
+		{groups: [][]string{{"i/o error", "filesystem error", "文件系统错误"}}, text: "检测到存储或文件系统 I/O 错误。"},
+	}
+
+	summaries := make([]string, 0, 4)
+	for _, rule := range rules {
+		if rule.source != "" && rule.source != source || !matchesSummaryRule(lines, rule.groups) {
+			continue
+		}
+		summaries = append(summaries, rule.text)
+		if len(summaries) == 6 {
+			break
+		}
+	}
+	return summaries
+}
+
+func matchesSummaryRule(lines []string, groups [][]string) bool {
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		matched := true
+		for _, alternatives := range groups {
+			if !containsKeyword(lower, alternatives) {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}

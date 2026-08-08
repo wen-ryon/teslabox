@@ -131,6 +131,46 @@ func TestManagerLogsCombinesMediaServiceAndKernelFailures(t *testing.T) {
 	}
 }
 
+func TestMediaLogsExcludeGadgetSnapshotLifecycle(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: strings.Join([]string{
+		"teslabox: TeslaUSB 状态已切换 from=GADGET_ACTIVE to=SNAPSHOT_CREATING",
+		"kernel: dwc3 fcc00000.dwc3: device reset",
+		"teslabox: 视频导出任务失败 error=执行 ffmpeg",
+	}, "\n")}
+	report, err := New(runner).Logs(t.Context(), SourceMedia, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(report.Lines, "\n")
+	if len(report.Lines) != 1 || strings.Contains(joined, "SNAPSHOT_CREATING") || strings.Contains(joined, "dwc3") || !strings.Contains(joined, "ffmpeg") {
+		t.Fatalf("media report = %#v", report)
+	}
+}
+
+func TestManagerLogsAddsChineseDiagnosticSummaries(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: strings.Join([]string{
+		"teslabox: ffmpeg failed: No such filter: subtitles",
+		"kernel: Out of memory: Killed process 123 (ffmpeg)",
+	}, "\n")}
+	report, err := New(runner).Logs(t.Context(), SourceMedia, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(report.Summaries, "\n")
+	if !strings.Contains(joined, "缺少所需滤镜") || !strings.Contains(joined, "内存不足") {
+		t.Fatalf("summaries = %#v", report.Summaries)
+	}
+}
+
+func TestNormalizeLimitUsesCompactDefault(t *testing.T) {
+	t.Parallel()
+	if got := normalizeLimit(0); got != 50 {
+		t.Fatalf("normalizeLimit(0) = %d, want 50", got)
+	}
+}
+
 func TestManagerBundleIncludesStateLogsAndRedaction(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{

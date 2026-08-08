@@ -1025,13 +1025,19 @@ func (m *Manager) APSettings(ctx context.Context) (APSettings, error) {
 		if profile.Mode != "ap" {
 			continue
 		}
-		return APSettings{
+		settings := APSettings{
 			Available: apAvailable, Enabled: profile.Active, ConnectionName: profile.Name, UUID: profile.UUID,
-			Interface: apInterface,
-			SSID:      profile.SSID, Band: profile.Band, Channel: profile.Channel,
-			Security: profile.Security, Address: profile.Address, AutoConnect: profile.AutoConnect,
-			Sharing: profile.IPv4Method == "shared",
-		}.withInterfaceDetails(m.interfaceDetails(ctx, apInterface)), nil
+			SSID: profile.SSID, Band: profile.Band, Channel: profile.Channel,
+			Security: profile.Security, AutoConnect: profile.AutoConnect,
+		}
+		if !profile.Active {
+			// 预配置接口可能同时正在承载上游 WiFi；热点未激活时不能把该接口的运行态误报为 AP 信息。
+			return settings, nil
+		}
+		settings.Interface = apInterface
+		settings.Address = profile.Address
+		settings.Sharing = profile.IPv4Method == "shared"
+		return settings.withInterfaceDetails(m.interfaceDetails(ctx, apInterface)), nil
 	}
 	return APSettings{Available: false}, nil
 }

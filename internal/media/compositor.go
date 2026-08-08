@@ -15,10 +15,11 @@ const streamAcquireTimeout = 5 * time.Second
 
 // CompositeRequest 集中约束单分钟合成输入，避免客户端直接传递 FFmpeg 参数。
 type CompositeRequest struct {
-	Layout  string
-	Quality string
-	Camera  string
-	Inputs  map[string]string
+	Layout       string
+	Quality      string
+	Camera       string
+	Inputs       map[string]string
+	InputOffsets map[string]float64
 }
 
 // InputError 让 API 可以区分用户参数问题和媒体工具链故障。
@@ -115,8 +116,12 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		}
 		args = append(args,
 			"-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime",
-			"-c:v", "h264_rkmpp", "-i", path.Clean(input),
+			"-c:v", "h264_rkmpp",
 		)
+		if offset := request.InputOffsets[tile.camera]; offset > 0 {
+			args = append(args, "-ss", strconv.FormatFloat(offset, 'f', 3, 64))
+		}
+		args = append(args, "-i", path.Clean(input))
 	}
 
 	filters := make([]string, 0, len(tiles)+1)
@@ -125,7 +130,7 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 	for index, tile := range tiles {
 		label := fmt.Sprintf("v%d", index)
 		filters = append(filters, fmt.Sprintf(
-			"[%d:v]fps=%d,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12[%s]",
+			"[%d:v]fps=%d,setpts=PTS-STARTPTS,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12[%s]",
 			index, profile.fps, tile.width, tile.height, label,
 		))
 		labels = append(labels, "["+label+"]")
@@ -135,7 +140,7 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		filters = append(filters, labels[0]+"null[out]")
 	} else {
 		filters = append(filters, strings.Join(labels, "")+fmt.Sprintf(
-			"xstack=inputs=%d:layout=%s:fill=black:shortest=1[out]", len(tiles), strings.Join(layout, "|"),
+			"xstack=inputs=%d:layout=%s:fill=black:shortest=0[out]", len(tiles), strings.Join(layout, "|"),
 		))
 	}
 

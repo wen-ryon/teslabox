@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
@@ -379,7 +381,7 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的日志来源"})
 			return
 		}
-		limit := boundedInt(r.URL.Query().Get("lines"), 200, 1, 500)
+		limit := boundedInt(r.URL.Query().Get("lines"), 50, 1, 500)
 		report, err := manager.Logs(r.Context(), source, limit)
 		if err != nil {
 			logger.Warn("读取诊断日志失败", "source", source, "error", err)
@@ -621,7 +623,7 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			estimated = media.EstimateSourceExportBytes(source)
 		} else {
 			source, err = exportSource(state.MediaSnapshot.MountPath, session)
-			estimated = media.EstimateExportBytes(request)
+			estimated = media.EstimateExportWorkingBytes(request)
 		}
 		if err != nil {
 			release()
@@ -633,17 +635,6 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			release()
 			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
 			return
-		}
-		if request.Mode != media.ExportModeSource && (request.BurnTimestamp || request.BurnSEI) {
-			if err := attachExportOverlayCues(r.Context(), request, &source, logger); err != nil {
-				release()
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				logger.Warn("准备导出时间叠加失败", "session_id", request.SessionID, "error", err)
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法准备导出时间信息"})
-				return
-			}
 		}
 		task, err := admin.Create(request, source, release)
 		if err != nil {
@@ -761,7 +752,17 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 			http.NotFound(w, r)
 			return
 		}
+		startSeconds := 0.0
+		if value := r.URL.Query().Get("start_seconds"); value != "" {
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 || parsed > selected.Duration {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "播放起点超出当前片段范围"})
+				return
+			}
+			startSeconds = parsed
+		}
 		inputs := make(map[string]string, len(selected.Videos))
+		inputOffsets := make(map[string]float64, len(selected.Videos))
 		for _, video := range selected.Videos {
 			name, err := snapshotVideoPath(state.MediaSnapshot.MountPath, video.Path)
 			if err != nil {
@@ -770,12 +771,20 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 				return
 			}
 			inputs[video.Camera] = name
+			offset := startSeconds + selected.RecordedAt.Sub(video.RecordedAt).Seconds()
+			offset = max(0, offset)
+			// 某一路提前结束时停在它的最后一帧，不能让它阻止其他完整视角从目标时间开始播放。
+			if video.Duration > 0 {
+				offset = min(offset, max(0, video.Duration-.1))
+			}
+			inputOffsets[video.Camera] = offset
 		}
 		tracked := &countingWriter{ResponseWriter: w}
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Cache-Control", "no-store")
 		request := media.CompositeRequest{
-			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Camera: r.URL.Query().Get("camera"), Inputs: inputs,
+			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Camera: r.URL.Query().Get("camera"),
+			Inputs: inputs, InputOffsets: inputOffsets,
 		}
 		startedAt := time.Now()
 		logger.Info("实时合成录像开始",
@@ -783,6 +792,7 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 			"layout", request.Layout,
 			"quality", request.Quality,
 			"camera", request.Camera,
+			"start_seconds", startSeconds,
 			"input_count", len(request.Inputs),
 		)
 		err := compositor.Stream(r.Context(), request, tracked)
@@ -835,6 +845,7 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 }
 
 func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector MediaInspector, logger *slog.Logger) {
+	seiCache := newSEITimelineCache(128)
 	mux.HandleFunc("GET /api/v1/media/capabilities", func(w http.ResponseWriter, r *http.Request) {
 		capabilities, err := inspector.Capabilities(r.Context())
 		if err != nil {
@@ -894,9 +905,28 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频文件暂不可用"})
 			return
 		}
+		duration := video.Duration
+		if duration <= 0 {
+			duration = defaultSegmentDuration.Seconds()
+		}
+		info, err := os.Stat(name)
+		if err != nil {
+			logger.Warn("读取 SEI 视频状态失败", "video_id", video.ID, "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频文件暂不可用"})
+			return
+		}
+		cacheKey := fmt.Sprintf("%s\x00%d\x00%d\x00%.6f", name, info.Size(), info.ModTime().UnixNano(), duration)
+		if cached, ok := seiCache.Get(cacheKey); ok {
+			w.Header().Set("X-TeslaBox-SEI-Cache", "hit")
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+		w.Header().Set("X-TeslaBox-SEI-Cache", "miss")
 		items, err := teslasei.Read(r.Context(), name)
 		if errors.Is(err, teslasei.ErrNoMetadata) {
-			writeJSON(w, http.StatusOK, seiTimelineResponse{Available: false, Message: "该录像没有可识别的 Tesla SEI 信息"})
+			response := seiTimelineResponse{Available: false, Message: "该录像没有可识别的 Tesla SEI 信息"}
+			seiCache.Put(cacheKey, response)
+			writeJSON(w, http.StatusOK, response)
 			return
 		}
 		if err != nil {
@@ -907,13 +937,11 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取 Tesla SEI 信息"})
 			return
 		}
-		duration := video.Duration
-		if duration <= 0 {
-			duration = defaultSegmentDuration.Seconds()
-		}
-		writeJSON(w, http.StatusOK, seiTimelineResponse{
+		response := seiTimelineResponse{
 			Available: true, Samples: teslasei.Timeline(items, time.Duration(duration*float64(time.Second)), 300),
-		})
+		}
+		seiCache.Put(cacheKey, response)
+		writeJSON(w, http.StatusOK, response)
 	})
 }
 
@@ -921,6 +949,59 @@ type seiTimelineResponse struct {
 	Available bool              `json:"available"`
 	Samples   []teslasei.Sample `json:"samples,omitempty"`
 	Message   string            `json:"message,omitempty"`
+}
+
+type seiTimelineCache struct {
+	mu      sync.Mutex
+	maximum int
+	entries map[string]seiTimelineResponse
+	order   []string
+}
+
+func newSEITimelineCache(maximum int) *seiTimelineCache {
+	return &seiTimelineCache{maximum: maximum, entries: make(map[string]seiTimelineResponse, maximum)}
+}
+
+func (cache *seiTimelineCache) Get(key string) (seiTimelineResponse, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	response, ok := cache.entries[key]
+	if !ok {
+		return seiTimelineResponse{}, false
+	}
+	cache.touch(key)
+	return response, true
+}
+
+func (cache *seiTimelineCache) Put(key string, response seiTimelineResponse) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.maximum <= 0 {
+		return
+	}
+	if _, exists := cache.entries[key]; exists {
+		cache.entries[key] = response
+		cache.touch(key)
+		return
+	}
+	for len(cache.entries) >= cache.maximum && len(cache.order) > 0 {
+		oldest := cache.order[0]
+		cache.order = cache.order[1:]
+		delete(cache.entries, oldest)
+	}
+	cache.entries[key] = response
+	cache.order = append(cache.order, key)
+}
+
+func (cache *seiTimelineCache) touch(key string) {
+	for index, item := range cache.order {
+		if item != key {
+			continue
+		}
+		copy(cache.order[index:], cache.order[index+1:])
+		cache.order[len(cache.order)-1] = key
+		return
+	}
 }
 
 const maximumMediaUploadRequestBytes int64 = 512 * 1024 * 1024
@@ -1927,7 +2008,7 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 			if duration <= 0 {
 				duration = defaultSegmentDuration.Seconds()
 			}
-			// 最近录像会压缩掉缺失时间段，导出必须沿用页面时间轴，否则点击的范围会落到错误片段。
+			// 播放时间轴会压缩同一会话内的切片缝隙，导出必须沿用该时间轴，否则选择范围会落到错误片段。
 			recordedAt := momentStart.Add(video.RecordedAt.Sub(moment.RecordedAt))
 			source.Videos = append(source.Videos, media.ExportVideo{
 				Camera: video.Camera, Path: name, RecordedAt: recordedAt, WallClockAt: video.RecordedAt, Duration: duration,
@@ -1935,97 +2016,6 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 		}
 	}
 	return source, nil
-}
-
-func attachExportOverlayCues(ctx context.Context, request media.ExportRequest, source *media.ExportSource, logger *slog.Logger) error {
-	if source == nil || (!request.BurnTimestamp && !request.BurnSEI) {
-		return nil
-	}
-	duration := time.Duration(request.DurationSeconds * float64(time.Second))
-	if duration <= 0 {
-		return &media.InputError{Message: "导出时长无效"}
-	}
-	startAt := source.SessionStart.Add(time.Duration(request.StartSeconds * float64(time.Second)))
-	preferredCamera := "front"
-	if !slices.ContainsFunc(source.Videos, func(video media.ExportVideo) bool { return video.Camera == preferredCamera }) {
-		preferredCamera = ""
-		for _, camera := range request.Cameras {
-			if slices.ContainsFunc(source.Videos, func(video media.ExportVideo) bool { return video.Camera == camera }) {
-				preferredCamera = camera
-				break
-			}
-		}
-	}
-	type telemetryVideo struct {
-		video    media.ExportVideo
-		metadata []teslasei.Metadata
-	}
-	telemetry := make([]telemetryVideo, 0)
-	timestampVideos := make([]media.ExportVideo, 0)
-	if preferredCamera != "" {
-		for _, video := range source.Videos {
-			if video.Camera == preferredCamera {
-				timestampVideos = append(timestampVideos, video)
-			}
-		}
-		slices.SortFunc(timestampVideos, func(left, right media.ExportVideo) int { return left.RecordedAt.Compare(right.RecordedAt) })
-	}
-	if request.BurnSEI && preferredCamera != "" {
-		for _, video := range timestampVideos {
-			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
-			if !videoEnd.After(startAt) || !video.RecordedAt.Before(startAt.Add(duration)) {
-				continue
-			}
-			items, err := teslasei.Read(ctx, video.Path)
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			if errors.Is(err, teslasei.ErrNoMetadata) {
-				continue
-			}
-			if err != nil {
-				logger.Warn("导出录像缺少可用 Tesla SEI", "path", video.Path, "error", err)
-				continue
-			}
-			telemetry = append(telemetry, telemetryVideo{video: video, metadata: items})
-		}
-	}
-	for offset := time.Duration(0); offset < duration; offset += time.Second {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		end := min(offset+time.Second, duration)
-		cue := media.ExportOverlayCue{Start: offset, End: end}
-		absolute := startAt.Add(offset)
-		if request.BurnTimestamp {
-			cue.Timestamp = absolute.Format("2006-01-02 15:04:05")
-			for _, video := range timestampVideos {
-				videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
-				if absolute.Before(video.RecordedAt) || !absolute.Before(videoEnd) || video.WallClockAt.IsZero() {
-					continue
-				}
-				cue.Timestamp = video.WallClockAt.Add(absolute.Sub(video.RecordedAt)).Format("2006-01-02 15:04:05")
-				break
-			}
-		}
-		if request.BurnSEI {
-			for _, item := range telemetry {
-				videoEnd := item.video.RecordedAt.Add(time.Duration(item.video.Duration * float64(time.Second)))
-				if absolute.Before(item.video.RecordedAt) || !absolute.Before(videoEnd) {
-					continue
-				}
-				metadata, found := teslasei.At(item.metadata, time.Duration(item.video.Duration*float64(time.Second)), absolute.Sub(item.video.RecordedAt))
-				if found {
-					cue.SEIText = teslasei.Display(metadata)
-				}
-				break
-			}
-		}
-		if cue.Timestamp != "" || cue.SEIText != "" {
-			source.OverlayCues = append(source.OverlayCues, cue)
-		}
-	}
-	return nil
 }
 
 func sourceFileExportSource(snapshotRoot string, session videoSession, request media.ExportRequest) (media.ExportSource, error) {
@@ -2211,14 +2201,6 @@ func matchingSession(sessions []videoSession, group videoGroup, continuityGap ti
 }
 
 func assignSessionTimeline(session *videoSession) {
-	if session.ClipType != "recent" {
-		for index := range session.Moments {
-			session.Moments[index].TimelineStart = session.Moments[index].RecordedAt.Sub(session.StartAt).Seconds()
-		}
-		session.Duration = session.EndAt.Sub(session.StartAt).Seconds()
-		return
-	}
-
 	var playbackDuration float64
 	for index := range session.Moments {
 		moment := &session.Moments[index]
