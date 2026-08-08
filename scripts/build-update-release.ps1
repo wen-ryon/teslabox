@@ -47,6 +47,7 @@ $ldflags = "-s -w -X github.com/wen-ryon/teslabox/internal/version.Version=$Vers
 $previousGOOS = $env:GOOS
 $previousGOARCH = $env:GOARCH
 $previousCGO = $env:CGO_ENABLED
+$previousGOCACHE = $env:GOCACHE
 try {
 	New-Item -ItemType Directory -Force -Path $bundleDirectory | Out-Null
 	Copy-Item -Force -LiteralPath $mediaPath -Destination (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz")
@@ -54,6 +55,7 @@ try {
     $env:GOOS = "linux"
     $env:GOARCH = "arm64"
     $env:CGO_ENABLED = "0"
+    $env:GOCACHE = Join-Path $root ".gocache"
     Remove-Item -Force -ErrorAction SilentlyContinue $binaryTemporary, $helperTemporary
     go build -trimpath -tags releasebundle -ldflags $ldflags -o $binaryTemporary .\cmd\teslabox
     if ($LASTEXITCODE -ne 0) {
@@ -70,6 +72,7 @@ try {
     $env:GOOS = $previousGOOS
     $env:GOARCH = $previousGOARCH
     $env:CGO_ENABLED = $previousCGO
+    $env:GOCACHE = $previousGOCACHE
 }
 
 $arguments = @(

@@ -93,10 +93,12 @@ if ($LASTEXITCODE -ne 0) {
 $previousGOOS = $env:GOOS
 $previousGOARCH = $env:GOARCH
 $previousCGO = $env:CGO_ENABLED
+$previousGOCACHE = $env:GOCACHE
 try {
     $env:GOOS = "linux"
     $env:GOARCH = "arm64"
     $env:CGO_ENABLED = "0"
+    $env:GOCACHE = Join-Path $root ".gocache"
     $commands = @(
         @{ Package = ".\cmd\teslabox-init"; Output = "bin\teslabox-init" },
         @{ Package = ".\cmd\teslabox-image-init"; Output = "bin\teslabox-image-init" },
@@ -113,6 +115,7 @@ try {
     $env:GOOS = $previousGOOS
     $env:GOARCH = $previousGOARCH
     $env:CGO_ENABLED = $previousCGO
+    $env:GOCACHE = $previousGOCACHE
 }
 
 $files = @{
