@@ -68,7 +68,15 @@ INSTALL MT7922
 
 它们提供基于 Radxa 5.10 BSP 的 `5.10.160teslabox1` 测试内核、完整 `cfg80211/mac80211/mt76/mt7921e` backports 栈和 MT7922 固件。该内核已经在本项目的 ROCK 3A + MT7922A（PCI ID `14c3:0616`）上验证，但不由 Radxa 官方维护。
 
-已有无线网卡在原厂内核下正常工作时没有必要安装。安装完成后脚本不会自动重启；请先确认车机 OTG 已断开，再手工执行：
+只有上述 MT7922 Wi-Fi 安装成功后，脚本才会继续询问：
+
+```text
+是否继续安装 MT7922 蓝牙驱动？此操作会升级到已验证的 5.10.160teslabox2 内核 [y/N]：
+```
+
+蓝牙仍默认跳过。只有输入 `Y` 或 `y` 才会安装 `5.10.160teslabox2`、对应 Wi-Fi backports、最终验证过的 `btusb/btrtl` 模块、`BT_RAM_CODE_MT7922_1_1_hdr.bin` 固件和 BlueZ。该选项不会安装蓝牙 HID、音频 Profile 或手机热点自动化服务。
+
+已有无线网卡在原厂内核下正常工作时没有必要安装。Wi-Fi 或蓝牙安装完成后脚本都不会自动重启；请先确认车机 OTG 已断开，再手工执行：
 
 ```sh
 sudo reboot

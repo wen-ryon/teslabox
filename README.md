@@ -35,7 +35,7 @@ sudo ./teslabox-install.sh
 
 脚本会自动安装 TeslaBox、systemd/udev、Rockchip FFmpeg + MPP/RGA 媒体工具链和签名在线升级组件。全新安装的管理页面初始密码为 `teslabox`，首次登录后必须修改。
 
-安装末尾会单独询问是否安装 MT7922。该选项会替换为 `5.10.160teslabox1` **测试内核**并安装 backports 驱动，不属于 Radxa 官方维护范围；已有无线网卡能正常使用时请直接回车跳过。详细前提、安装内容、存储初始化和故障处理见 [第一次安装教程](docs/zh-CN/FIRST_INSTALL.md)。
+安装末尾会先询问是否安装 MT7922 Wi-Fi 测试内核，确认成功后才会第二次询问是否安装 MT7922 蓝牙驱动；两项都默认跳过。蓝牙选项会安装已验证的 `5.10.160teslabox2`、对应 backports、`btusb/btrtl`、固件和 BlueZ，不包含个人蓝牙自动化服务。已有无线网卡能正常使用时请直接回车跳过。详细前提、安装内容、存储初始化和故障处理见 [第一次安装教程](docs/zh-CN/FIRST_INSTALL.md)。
 
 ## 当前开发状态
 
