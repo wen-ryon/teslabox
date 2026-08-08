@@ -86,9 +86,15 @@ $arguments = @(
 if ($NotesFile) {
     $arguments += @("-notes-file", $NotesFile)
 }
-& go @arguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to generate the signed update manifest."
+$manifestGOCACHE = $env:GOCACHE
+try {
+    $env:GOCACHE = Join-Path $root ".gocache"
+    & go @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to generate the signed update manifest."
+    }
+} finally {
+    $env:GOCACHE = $manifestGOCACHE
 }
 Copy-Item -Force $manifest $versionManifest
 
