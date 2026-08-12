@@ -8,6 +8,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,9 +37,11 @@ type streamingRunner interface {
 
 // Compositor 隔离硬件合成命令，让 HTTP 层不依赖 FFmpeg 参数细节。
 type Compositor struct {
-	runner     streamingRunner
-	ffmpegPath string
-	streamSlot chan struct{}
+	runner          streamingRunner
+	ffmpegPath      string
+	streamSlot      chan struct{}
+	compatibilityMu sync.RWMutex
+	compatibility   map[string]bool
 }
 
 // NewCompositor 在启动阶段拒绝不安全路径，避免请求阶段执行任意程序。
@@ -50,8 +53,9 @@ func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, erro
 		return nil, errors.New("FFmpeg 必须使用绝对路径")
 	}
 	return &Compositor{
-		runner:     runner,
-		ffmpegPath: ffmpegPath,
+		runner:        runner,
+		ffmpegPath:    ffmpegPath,
+		compatibility: make(map[string]bool),
 		// RK356x 同时运行多个实时转码很容易放大峰值功耗和内存压力。
 		streamSlot: make(chan struct{}, 1),
 	}, nil
@@ -59,10 +63,6 @@ func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, erro
 
 // Stream 沿用请求上下文，避免浏览器断开后遗留占用硬件的 FFmpeg 进程。
 func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, output io.Writer) error {
-	args, err := compositeArgs(request)
-	if err != nil {
-		return err
-	}
 	waitTimer := time.NewTimer(streamAcquireTimeout)
 	defer waitTimer.Stop()
 	select {
@@ -73,10 +73,79 @@ func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, outpu
 	case <-waitTimer.C:
 		return errors.New("实时转码资源正在使用，请稍后重试")
 	}
-	if err := c.runner.RunStreaming(ctx, c.ffmpegPath, args, output); err != nil {
-		return fmt.Errorf("实时合成录像: %w", err)
+
+	compatibility := c.compatibilitySnapshot()
+	for {
+		args, tiles, err := compositeArgsWithCompatibility(request, compatibility)
+		if err != nil {
+			return err
+		}
+		countingOutput := &byteCountingWriter{output: output}
+		if err := c.runner.RunStreaming(ctx, c.ffmpegPath, args, countingOutput); err != nil {
+			inputIndex, retry := incompatibleDRMInput(err)
+			if countingOutput.bytes > 0 || !retry || inputIndex < 0 || inputIndex >= len(tiles) {
+				return fmt.Errorf("实时合成录像: %w", err)
+			}
+			camera := tiles[inputIndex].camera
+			if compatibility[camera] {
+				return fmt.Errorf("实时合成录像: %w", err)
+			}
+			// 仅在 FFmpeg 尚未输出任何 MP4 数据时回退，避免把两段媒体流拼给浏览器。
+			compatibility[camera] = true
+			c.markCompatibleFallback(camera)
+			continue
+		}
+		return nil
 	}
-	return nil
+}
+
+type byteCountingWriter struct {
+	output io.Writer
+	bytes  int64
+}
+
+func (w *byteCountingWriter) Write(data []byte) (int, error) {
+	written, err := w.output.Write(data)
+	w.bytes += int64(written)
+	return written, err
+}
+
+func (c *Compositor) compatibilitySnapshot() map[string]bool {
+	c.compatibilityMu.RLock()
+	defer c.compatibilityMu.RUnlock()
+	snapshot := make(map[string]bool, len(c.compatibility))
+	for camera, enabled := range c.compatibility {
+		snapshot[camera] = enabled
+	}
+	return snapshot
+}
+
+func (c *Compositor) markCompatibleFallback(camera string) {
+	c.compatibilityMu.Lock()
+	defer c.compatibilityMu.Unlock()
+	c.compatibility[camera] = true
+}
+
+func incompatibleDRMInput(err error) (int, bool) {
+	message := err.Error()
+	if !strings.Contains(message, "Impossible to convert between the formats") || !strings.Contains(message, "drm_prime") {
+		return 0, false
+	}
+	const marker = "input from stream "
+	start := strings.Index(message, marker)
+	if start < 0 {
+		return 0, false
+	}
+	start += len(marker)
+	end := start
+	for end < len(message) && message[end] >= '0' && message[end] <= '9' {
+		end++
+	}
+	if end == start || end >= len(message) || message[end] != ':' {
+		return 0, false
+	}
+	inputIndex, parseErr := strconv.Atoi(message[start:end])
+	return inputIndex, parseErr == nil
 }
 
 type compositeProfile struct {
@@ -95,24 +164,29 @@ type compositeTile struct {
 }
 
 func compositeArgs(request CompositeRequest) ([]string, error) {
+	args, _, err := compositeArgsWithCompatibility(request, nil)
+	return args, err
+}
+
+func compositeArgsWithCompatibility(request CompositeRequest, compatibility map[string]bool) ([]string, []compositeTile, error) {
 	profile, ok := map[string]compositeProfile{
 		"smooth":   {width: 854, height: 480, fps: 20, bitrate: 1500},
 		"standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
 		"high":     {width: 1280, height: 720, fps: 30, bitrate: 5000},
 	}[request.Quality]
 	if !ok {
-		return nil, &InputError{Message: "不支持的播放画质"}
+		return nil, nil, &InputError{Message: "不支持的播放画质"}
 	}
 	tiles, err := playbackTiles(request, profile.height)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin"}
 	for _, tile := range tiles {
 		input := request.Inputs[tile.camera]
 		if !isLinuxAbsolutePath(input) {
-			return nil, &InputError{Message: "当前片段缺少合成所需视角"}
+			return nil, nil, &InputError{Message: "当前片段缺少合成所需视角"}
 		}
 		args = append(args,
 			"-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime",
@@ -129,10 +203,19 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 	layout := make([]string, 0, len(tiles))
 	for index, tile := range tiles {
 		label := fmt.Sprintf("v%d", index)
-		filters = append(filters, fmt.Sprintf(
-			"[%d:v]fps=%d,setpts=PTS-STARTPTS,scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12[%s]",
-			index, profile.fps, tile.width, tile.height, label,
-		))
+		if compatibility[tile.camera] {
+			// 某一路实际触发 DRM 格式协商失败后，仅让该路下载并软件缩放。
+			// 其余输入继续使用 RGA，兼顾不同固件和摄像头编码参数下的兼容性与性能。
+			filters = append(filters, fmt.Sprintf(
+				"[%d:v]hwdownload,format=nv12,scale=w=%d:h=%d:force_original_aspect_ratio=disable,fps=%d,setpts=PTS-STARTPTS[%s]",
+				index, tile.width, tile.height, profile.fps, label,
+			))
+		} else {
+			filters = append(filters, fmt.Sprintf(
+				"[%d:v]scale_rkrga=w=%d:h=%d:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12,fps=%d,setpts=PTS-STARTPTS[%s]",
+				index, tile.width, tile.height, profile.fps, label,
+			))
+		}
 		labels = append(labels, "["+label+"]")
 		layout = append(layout, strconv.Itoa(tile.x)+"_"+strconv.Itoa(tile.y))
 	}
@@ -153,7 +236,7 @@ func compositeArgs(request CompositeRequest) ([]string, error) {
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
 		"-f", "mp4", "pipe:1",
 	)
-	return args, nil
+	return args, tiles, nil
 }
 
 func playbackTiles(request CompositeRequest, height int) ([]compositeTile, error) {

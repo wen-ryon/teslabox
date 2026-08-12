@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,7 +269,7 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	if view.RepairApplied {
 		t.Fatal("Create() reported a repair for a directly mounted snapshot")
 	}
-	wantNames := []string{"cp", "losetup", "mount"}
+	wantNames := []string{"/usr/sbin/xfs_io", "cp", "losetup", "mount"}
 	gotNames := make([]string, 0, len(runner.commands))
 	for _, item := range runner.commands {
 		gotNames = append(gotNames, item.name)
@@ -276,14 +277,90 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("commands = %v, want %v", gotNames, wantNames)
 	}
-	if got := runner.commands[0].args[:2]; !reflect.DeepEqual(got, []string{"--reflink=always", "--sparse=auto"}) {
-		t.Fatalf("cp args = %v", runner.commands[0].args)
+	if got := runner.commands[0].args; !reflect.DeepEqual(got, []string{"-c", "cowextsize 1m", imagePath}) {
+		t.Fatalf("xfs_io args = %v", got)
 	}
-	if got := runner.commands[2].args[1]; got != "ro,nosuid,nodev,noexec" {
+	if got := runner.commands[1].args[:2]; !reflect.DeepEqual(got, []string{"--reflink=always", "--sparse=auto"}) {
+		t.Fatalf("cp args = %v", runner.commands[1].args)
+	}
+	if got := runner.commands[3].args[1]; got != "ro,nosuid,nodev,noexec" {
 		t.Fatalf("mount options = %q", got)
 	}
 	if slices.ContainsFunc(runner.commands, func(item command) bool { return item.name == "fsck.exfat" }) {
 		t.Fatal("Create() ran fsck for a snapshot that mounted read-only")
+	}
+}
+
+func TestManagerCreateAppliesCOWExtentHintOnlyOnce(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "teslacam.img")
+	snapshotPath := filepath.Join(root, "snapshots")
+	mountRoot := filepath.Join(root, "mounts")
+	if err := os.WriteFile(imagePath, []byte("teslacam"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(snapshotPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mountRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{}
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager.now = func() time.Time { return time.Date(2026, 8, 12, 8, 9, 10, 123, time.UTC) }
+	first, err := manager.Create(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Remove(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return time.Date(2026, 8, 12, 8, 10, 10, 123, time.UTC) }
+	second, err := manager.Create(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Remove(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+
+	count := 0
+	for _, item := range runner.commands {
+		if item.name == "/usr/sbin/xfs_io" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("xfs_io calls = %d, commands = %#v", count, runner.commands)
+	}
+}
+
+func TestManagerCreateStopsBeforeCopyWhenCOWExtentHintFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "teslacam.img")
+	snapshotPath := filepath.Join(root, "snapshots")
+	mountRoot := filepath.Join(root, "mounts")
+	if err := os.WriteFile(imagePath, []byte("teslacam"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(snapshotPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mountRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{failName: "/usr/sbin/xfs_io"}
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	_, err := manager.Create(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "COW extent 保护") {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if slices.ContainsFunc(runner.commands, func(item command) bool { return item.name == "cp" }) {
+		t.Fatalf("commands = %#v, snapshot copy must not start", runner.commands)
 	}
 }
 

@@ -18,7 +18,8 @@ func main() {
 	options := imageinit.Options{}
 	flag.StringVar(&options.DataRoot, "data-root", "/var/lib/teslabox", "已挂载的 XFS backing store")
 	flag.StringVar(&options.ImagePath, "image", "/var/lib/teslabox/images/teslacam.img", "TeslaCam 虚拟整盘镜像")
-	flag.Int64Var(&options.SizeBytes, "size-bytes", 96_000_000_000, "虚拟磁盘容量，默认保留约 28GB 物理空间")
+	flag.Int64Var(&options.SizeBytes, "size-bytes", 96_000_000_000, "车机看到的虚拟整盘容量")
+	flag.Int64Var(&options.WritableBytes, "writable-bytes", 0, "安全可写边界并预分配的容量；单分区卷仍显示完整容量，0 表示不保留")
 	flag.StringVar(&options.Label, "label", "TESLACAM", "Tesla 可识别的 exFAT 卷标")
 	flag.BoolVar(&options.MusicEnabled, "music", false, "创建独立的 FAT32 音乐分区")
 	flag.IntVar(&options.TeslaCamPercent, "teslacam-percent", 80, "启用音乐分区时 TeslaCam 所占比例")
@@ -41,7 +42,11 @@ func main() {
 
 	fmt.Printf("backing store: %s (%s, reflink=%t)\n", result.Environment.DataRoot, result.Environment.FileSystem, result.Environment.Reflink)
 	fmt.Printf("镜像: %s\n", result.Environment.ImagePath)
-	fmt.Printf("物理容量/镜像容量/预留容量: %d / %d / %d bytes\n", result.Environment.TotalBytes, options.SizeBytes, result.Environment.TotalBytes-options.SizeBytes)
+	writableBytes := options.WritableBytes
+	if writableBytes == 0 {
+		writableBytes = options.SizeBytes
+	}
+	fmt.Printf("外层容量/车机可见容量/可写布局容量/安全余量: %d / %d / %d / %d bytes\n", result.Environment.TotalBytes, options.SizeBytes, writableBytes, result.Environment.TotalBytes-writableBytes)
 	fmt.Printf("TeslaCam/音乐分区容量: %d / %d bytes\n", result.Layout.TeslaCamBytes, result.Layout.MusicBytes)
 	for index, command := range result.Commands {
 		fmt.Printf("%02d. %s %s\n", index+1, command.Name, strings.Join(command.Args, " "))

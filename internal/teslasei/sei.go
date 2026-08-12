@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -44,6 +45,8 @@ type Metadata struct {
 	AccelerationX       float64 `json:"acceleration_x"`
 	AccelerationY       float64 `json:"acceleration_y"`
 	AccelerationZ       float64 `json:"acceleration_z"`
+	mediaOffset         time.Duration
+	hasMediaOffset      bool
 }
 
 // Sample 是用于页面时间轴或导出字幕的一条定时遥测信息。
@@ -68,6 +71,19 @@ func Read(ctx context.Context, path string) ([]Metadata, error) {
 		return nil, ErrNoMetadata
 	}
 	reader := newBlockReaderAt(file, info.Size())
+	if samples, sampleErr := readVideoSamples(reader, info.Size()); sampleErr == nil {
+		metadata, readErr := readTimedSamples(ctx, reader, samples)
+		if readErr == nil {
+			if len(metadata) == 0 {
+				return nil, ErrNoMetadata
+			}
+			return metadata, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// 不完整的旧文件可能缺少可用 sample table；退回原有顺序扫描，保持已有录像可读。
+	}
 	metadata := make([]Metadata, 0)
 	for offset := int64(0); offset+8 <= info.Size(); {
 		if err := ctx.Err(); err != nil {
@@ -108,7 +124,7 @@ func Timeline(metadata []Metadata, duration time.Duration, maximum int) []Sample
 		if count > 1 && len(metadata) > count {
 			metadataIndex = int(math.Round(float64(index) * float64(len(metadata)-1) / float64(count-1)))
 		}
-		offset := sampleOffset(metadataIndex, len(metadata), duration)
+		offset := metadataOffset(metadata, metadataIndex, duration)
 		item := metadata[metadataIndex]
 		timeline = append(timeline, Sample{OffsetMS: offset.Milliseconds(), Metadata: item, Text: Display(item)})
 	}
@@ -122,6 +138,15 @@ func At(metadata []Metadata, duration, offset time.Duration) (Metadata, bool) {
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	if usesMediaOffsets(metadata) {
+		index := sort.Search(len(metadata), func(index int) bool {
+			return metadata[index].mediaOffset > offset
+		})
+		if index == 0 {
+			return Metadata{}, false
+		}
+		return metadata[index-1], true
 	}
 	if offset >= duration {
 		return metadata[len(metadata)-1], true
@@ -446,6 +471,27 @@ func sampleOffset(index, total int, duration time.Duration) time.Duration {
 		return 0
 	}
 	return time.Duration(float64(duration) * float64(index) / float64(total-1))
+}
+
+func metadataOffset(metadata []Metadata, index int, duration time.Duration) time.Duration {
+	if usesMediaOffsets(metadata) {
+		return metadata[index].mediaOffset
+	}
+	return sampleOffset(index, len(metadata), duration)
+}
+
+func usesMediaOffsets(metadata []Metadata) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	previous := time.Duration(-1)
+	for _, item := range metadata {
+		if !item.hasMediaOffset || item.mediaOffset < previous {
+			return false
+		}
+		previous = item.mediaOffset
+	}
+	return true
 }
 
 func gearName(value uint64) string {

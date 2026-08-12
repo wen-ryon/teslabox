@@ -25,6 +25,8 @@ var (
 		"e49dbbe68f4402c581238c3d55dc2906bdfc18a5c9f81d3d59ceb2b5a80244b3": {},
 		// v0.1.8 至 v0.1.10 已探测硬件能力，但尚未尊重热点开机自动连接开关。
 		"2089669d49339e1d0ec39b5e78032490b7bea12c9eb382e40043e958528ac11a": {},
+		// 旧脚本在热点关闭时直接退出，导致重启后缺少可供设置中心重新启用的虚拟接口。
+		"22d4b3ef82bc4541b0e9f3ee59460d6697435502474ec9da213588a6204f9b7f": {},
 	}
 	legacyAPUnitHashes = map[string]struct{}{
 		// v0.1.7 的 RemainAfterExit=yes 会阻止无线设备重新出现时再次执行探测。

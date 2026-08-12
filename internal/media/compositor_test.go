@@ -27,6 +27,25 @@ type blockingStreamingRunner struct {
 	release chan struct{}
 }
 
+type drmFallbackRunner struct {
+	calls       [][]string
+	failures    int
+	partialData bool
+}
+
+func (r *drmFallbackRunner) RunStreaming(_ context.Context, _ string, args []string, output io.Writer) error {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if r.failures > 0 {
+		r.failures--
+		if r.partialData {
+			_, _ = io.WriteString(output, "partial-mp4")
+		}
+		return errors.New("Impossible to convert between the formats supported by filter 'graph 0 input from stream 4:0' and 'auto_scale_0'; src: drm_prime")
+	}
+	_, err := io.WriteString(output, "fragmented-mp4")
+	return err
+}
+
 func (r *blockingStreamingRunner) RunStreaming(ctx context.Context, _ string, _ []string, _ io.Writer) error {
 	r.started.Add(1)
 	select {
@@ -152,7 +171,7 @@ func waitForStreamingCalls(t *testing.T, runner *blockingStreamingRunner, want i
 	t.Fatalf("实时转码调用数 = %d，期望至少 %d", runner.started.Load(), want)
 }
 
-func TestCompositeArgsDownloadsFramesBeforeSoftwareScaling(t *testing.T) {
+func TestCompositeArgsScalesHardwareFramesBeforeSoftwareFPS(t *testing.T) {
 	t.Parallel()
 	inputs := map[string]string{
 		"front":          "/snapshot/front.mp4",
@@ -164,11 +183,95 @@ func TestCompositeArgsDownloadsFramesBeforeSoftwareScaling(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "scale_rkrga=w=492:h=320:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12") {
-		t.Fatalf("滤镜必须在硬件缩放后下载帧，且直接填满 Tesla 比例画布: %s", joined)
+	want := "scale_rkrga=w=492:h=320:format=nv12:force_original_aspect_ratio=disable,hwdownload,format=nv12,fps=20,setpts=PTS-STARTPTS"
+	if !strings.Contains(joined, want) {
+		t.Fatalf("滤镜必须先处理 DRM 硬件帧，再下载并执行软件 FPS 滤镜: %s", joined)
 	}
-	if strings.Contains(joined, ",pad=") || strings.Contains(joined, "hwmap=mode=read") {
+	if strings.Contains(joined, "[0:v]fps=") || strings.Contains(joined, ",pad=") || strings.Contains(joined, "hwmap=mode=read") {
 		t.Fatalf("滤镜不应在只读 DRM 映射上补黑边: %s", joined)
+	}
+}
+
+func TestCompositeArgsUsesCompatibilityFallbackOnlyForDetectedCamera(t *testing.T) {
+	t.Parallel()
+	inputs := map[string]string{
+		"front":          "/snapshot/front.mp4",
+		"back":           "/snapshot/back.mp4",
+		"left_repeater":  "/snapshot/left_repeater.mp4",
+		"right_repeater": "/snapshot/right_repeater.mp4",
+	}
+	args, _, err := compositeArgsWithCompatibility(
+		CompositeRequest{Layout: "composite4a", Quality: "standard", Inputs: inputs},
+		map[string]bool{"left_repeater": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	fallbackFilter := "[2:v]hwdownload,format=nv12,scale=w=556:h=360:force_original_aspect_ratio=disable,fps=24,setpts=PTS-STARTPTS[v2]"
+	if !strings.Contains(joined, fallbackFilter) {
+		t.Fatalf("检测到不兼容的视角必须在下载 DRM 帧后使用兼容缩放链: %s", joined)
+	}
+	if strings.Contains(joined, "[2:v]scale_rkrga") {
+		t.Fatalf("检测到不兼容的视角不应继续进入 scale_rkrga: %s", joined)
+	}
+	if !strings.Contains(joined, "[0:v]scale_rkrga") || !strings.Contains(joined, "[1:v]scale_rkrga") || !strings.Contains(joined, "[3:v]scale_rkrga") {
+		t.Fatalf("单路兼容回退不应关闭其他视角的 RGA 缩放: %s", joined)
+	}
+}
+
+func TestCompositorRetriesDetectedDRMInputAndCachesFallback(t *testing.T) {
+	t.Parallel()
+	runner := &drmFallbackRunner{failures: 1}
+	compositor, err := NewCompositor(runner, "/opt/teslabox/media/bin/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]string{}
+	for _, camera := range []string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"} {
+		inputs[camera] = "/snapshot/" + camera + ".mp4"
+	}
+	request := CompositeRequest{Layout: "composite6", Quality: "standard", Inputs: inputs}
+	var output strings.Builder
+	if err := compositor.Stream(t.Context(), request, &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 || output.String() != "fragmented-mp4" {
+		t.Fatalf("调用次数 = %d，输出 = %q", len(runner.calls), output.String())
+	}
+	first := strings.Join(runner.calls[0], " ")
+	second := strings.Join(runner.calls[1], " ")
+	if !strings.Contains(first, "[4:v]scale_rkrga") || !strings.Contains(second, "[4:v]hwdownload,format=nv12,scale=") {
+		t.Fatalf("未按报错输入编号切换兼容链：首次=%s；重试=%s", first, second)
+	}
+	if !strings.Contains(second, "[0:v]scale_rkrga") || !strings.Contains(second, "[5:v]scale_rkrga") {
+		t.Fatalf("兼容回退不应影响正常视角：%s", second)
+	}
+
+	output.Reset()
+	if err := compositor.Stream(t.Context(), request, &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 3 || !strings.Contains(strings.Join(runner.calls[2], " "), "[4:v]hwdownload,format=nv12,scale=") {
+		t.Fatalf("后续请求未复用已探测的兼容链，调用次数 = %d", len(runner.calls))
+	}
+}
+
+func TestCompositorDoesNotRetryDRMFailureAfterWritingOutput(t *testing.T) {
+	t.Parallel()
+	runner := &drmFallbackRunner{failures: 1, partialData: true}
+	compositor, err := NewCompositor(runner, "/opt/teslabox/media/bin/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]string{}
+	for _, camera := range []string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"} {
+		inputs[camera] = "/snapshot/" + camera + ".mp4"
+	}
+	var output strings.Builder
+	err = compositor.Stream(t.Context(), CompositeRequest{Layout: "composite6", Quality: "standard", Inputs: inputs}, &output)
+	if err == nil || len(runner.calls) != 1 || output.String() != "partial-mp4" {
+		t.Fatalf("已输出数据后不应重试：error=%v calls=%d output=%q", err, len(runner.calls), output.String())
 	}
 }
 

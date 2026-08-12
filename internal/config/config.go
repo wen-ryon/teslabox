@@ -38,7 +38,7 @@ const (
 	defaultGadgetSerial    = "TESLABOX-071C4AAFBA8BEB80"
 	defaultReleaseGadget   = "radxa-otgutils"
 	defaultAPInterface     = "ap0"
-	defaultScanInterval    = 30 * time.Second
+	defaultScanInterval    = time.Minute
 	defaultSnapshotIdle    = 5 * time.Minute
 	defaultSnapshotWindow  = 2 * time.Minute
 	defaultPollInterval    = 3 * time.Second

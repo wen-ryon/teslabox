@@ -42,6 +42,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	mux.HandleFunc("GET /", serveEmbedded(assetFS, "index.html", "text/html; charset=utf-8", "no-store"))
 	mux.HandleFunc("GET /app.css", serveEmbedded(assetFS, "app.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /app.js", serveEmbedded(assetFS, "app.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /teslabox-logo.svg", serveEmbedded(assetFS, "teslabox-logo.svg", "image/svg+xml", "public, max-age=86400"))
 	mux.HandleFunc("GET /third-party-notices.txt", serveEmbedded(assetFS, "THIRD_PARTY_NOTICES.txt", "text/plain; charset=utf-8", "public, max-age=86400"))
 	mux.HandleFunc("GET /api/v1/auth/session", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{

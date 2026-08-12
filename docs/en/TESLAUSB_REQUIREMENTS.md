@@ -61,7 +61,7 @@ Rules:
 - Data-drive initialization may repartition or format the drive and therefore requires an explicit user action. Service startup must never do this automatically.
 - Existing recordings must be backed up before initialization.
 - The virtual disk must leave capacity for copy-on-write snapshots and runtime state.
-- The settings workflow should use as much physical capacity as practical while reserving at least 5% and no less than 20 GB; the MBR-backed image is capped at 2 TB.
+- The settings workflow should use as much physical capacity as practical while reserving at least 5% and no less than 10 GB; snapshot and export operations still enforce an 8 GiB and 5% runtime free-space floor. The MBR-backed image is capped at 2 TB.
 - Initialization may create either one exFAT TeslaCam partition or an exFAT TeslaCam partition plus a FAT32 MUSIC partition with a user-selected capacity ratio.
 - Linux must never mount the writable image while it is exposed to the vehicle.
 - Media indexes, snapshots, and high-write runtime state belong on the external data drive to reduce microSD writes.

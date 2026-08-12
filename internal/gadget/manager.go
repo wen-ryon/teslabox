@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/wen-ryon/teslabox/internal/exfatreserve"
 )
 
 const (
@@ -53,14 +55,15 @@ type Status struct {
 
 // Manager 只管理固定名称的 TeslaBox Gadget，不接管其他 configfs 配置。
 type Manager struct {
-	config  Config
-	symlink func(oldname, newname string) error
-	sleep   func(time.Duration)
+	config                Config
+	symlink               func(oldname, newname string) error
+	sleep                 func(time.Duration)
+	verifyCapacityReserve func(string) (exfatreserve.Status, error)
 }
 
 // NewManager 创建 USB Mass Storage Gadget 生命周期管理器。
 func NewManager(config Config) *Manager {
-	return &Manager{config: config, symlink: os.Symlink, sleep: time.Sleep}
+	return &Manager{config: config, symlink: os.Symlink, sleep: time.Sleep, verifyCapacityReserve: exfatreserve.Verify}
 }
 
 // Inspect 只读取 UDC 占用和 TeslaBox Gadget 状态。
@@ -272,6 +275,12 @@ func (m *Manager) PreflightStart() (Status, string, error) {
 	imagePath, err := validateImage(m.config.ImagePath)
 	if err != nil {
 		return status, "", err
+	}
+	if m.verifyCapacityReserve == nil {
+		return status, "", errors.New("TeslaCam 容量保留区检查器不可用")
+	}
+	if _, err := m.verifyCapacityReserve(imagePath); err != nil {
+		return status, "", fmt.Errorf("核验 TeslaCam 安全可写容量: %w", err)
 	}
 	if loop, err := imageLoopDevice(imagePath); err != nil {
 		return status, "", err

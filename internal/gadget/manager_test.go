@@ -1,11 +1,14 @@
 package gadget
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wen-ryon/teslabox/internal/exfatreserve"
 )
 
 func testManager(t *testing.T) (*Manager, string) {
@@ -47,6 +50,9 @@ func testManager(t *testing.T) (*Manager, string) {
 		return os.WriteFile(newname, []byte(oldname), 0o644)
 	}
 	manager.sleep = func(time.Duration) {}
+	manager.verifyCapacityReserve = func(string) (exfatreserve.Status, error) {
+		return exfatreserve.Status{Legacy: true}, nil
+	}
 	return manager, imagePath
 }
 
@@ -103,6 +109,22 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(nofua)); got != "1" {
 		t.Fatalf("nofua = %q, want %q", got, "1")
+	}
+}
+
+func TestManagerRefusesGadgetWhenCapacityReserveIsInvalid(t *testing.T) {
+	t.Parallel()
+	manager, _ := testManager(t)
+	manager.verifyCapacityReserve = func(string) (exfatreserve.Status, error) {
+		return exfatreserve.Status{}, errors.New("reserve missing")
+	}
+
+	_, err := manager.Start()
+	if err == nil || !strings.Contains(err.Error(), "安全可写容量") {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, statErr := os.Stat(manager.gadgetPath()); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("gadget path must not be created, stat error = %v", statErr)
 	}
 }
 

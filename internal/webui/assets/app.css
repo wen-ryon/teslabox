@@ -53,7 +53,8 @@ a { color: inherit; text-decoration: none; }
 
 .topbar { position: sticky; z-index: 20; top: 0; display: flex; min-height: 72px; align-items: center; justify-content: space-between; padding: 12px max(20px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line-soft); background: rgba(0,0,0,.9); backdrop-filter: blur(18px); }
 .brand { display: flex; align-items: center; gap: 11px; }
-.brand-mark { display: grid; width: 36px; min-height: 36px; padding: 0; place-items: center; border: 0; border-radius: 11px; color: #fff; background: var(--accent); box-shadow: 0 8px 30px var(--accent-soft); font-weight: 850; }
+.brand-mark { display: grid; width: 36px; min-height: 36px; padding: 0; place-items: center; border: 0; border-radius: 11px; color: #fff; background: transparent; box-shadow: 0 8px 30px var(--accent-soft); font-weight: 850; overflow: hidden; }
+.brand-mark img { display: block; width: 100%; height: 100%; }
 .brand-mark.static { cursor: default; }
 .brand-copy strong, .brand-copy small { display: block; }
 .brand strong { font-size: 15px; letter-spacing: .02em; }
@@ -403,6 +404,21 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 .action-modal-card h2 { margin-bottom: 10px; font-size: 27px; }
 .action-modal-card > label { margin-top: 18px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.onboarding-modal { z-index: 66; }
+.onboarding-card { width: min(620px,100%); max-height: calc(100dvh - 36px); overflow: auto; padding: 30px; }
+.onboarding-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.onboarding-heading h2 { margin: 0; }
+.onboarding-heading > span { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); background: var(--accent-soft); font-size: var(--ui-small-font); font-weight: 750; }
+.onboarding-intro { margin: 14px 0 0; color: var(--muted); font-size: var(--ui-meta-font); line-height: 1.65; }
+.onboarding-steps { display: grid; gap: 10px; margin: 22px 0 0; padding: 0; list-style: none; }
+.onboarding-step { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 14px; background: #050505; }
+.onboarding-step > i { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); font-size: 13px; font-style: normal; font-weight: 800; }
+.onboarding-step-primary { border-color: color-mix(in srgb,var(--accent) 45%,var(--line)); background: color-mix(in srgb,var(--accent-soft) 54%,#050505); }
+.onboarding-step-primary > i { border-color: var(--accent); color: #fff; background: var(--accent); }
+.onboarding-step strong { display: block; color: var(--text); font-size: var(--ui-main-font); }
+.onboarding-step p { margin: 5px 0 0; color: var(--muted); font-size: var(--ui-meta-font); line-height: 1.55; }
+.onboarding-note { margin: 16px 0 0; padding: 11px 12px; border-radius: 10px; color: #fbbf24; background: rgba(245,158,11,.08); font-size: var(--ui-small-font); line-height: 1.55; }
+.onboarding-actions { align-items: center; justify-content: space-between; }
 .wifi-ipv4-form { display: grid; gap: 18px; }
 .wifi-ipv4-form > * { margin: 0; }
 .wifi-ipv4-form > label { margin-top: 0; color: var(--text); font-size: var(--ui-main-font); gap: 9px; }
@@ -471,6 +487,11 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 
 .login-shell { display: grid; min-height: 100dvh; padding: 24px; place-items: center; }
 .login-card { width: min(440px, 100%); padding: clamp(28px, 7vw, 52px); border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: var(--shadow); }
+.login-brand { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+.login-brand img { width: 52px; height: 52px; filter: drop-shadow(0 12px 26px rgba(37,99,235,.25)); }
+.login-brand strong, .login-brand small { display: block; }
+.login-brand strong { font-size: 18px; letter-spacing: .01em; }
+.login-brand small { margin-top: 3px; color: var(--muted); font-size: 12px; }
 .login-card h1 { margin-bottom: 16px; font-size: clamp(32px, 10vw, 50px); }
 .login-card > .muted { line-height: 1.7; }
 .login-form { display: grid; gap: 10px; margin-top: 28px; }
@@ -494,8 +515,50 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 .player-event-context { display: inline-flex; align-items: center; gap: 6px; color: #d4d4d8; }
 .icon-button { width: 40px; min-height: 40px; padding: 0; border-color: var(--line); background: var(--surface-raised); font-size: 24px; }
 .main-video-frame { position: relative; display: grid; width: 100%; max-height: 66dvh; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; background: #000; }
-.main-video-frame:fullscreen, .main-video-frame:-webkit-full-screen { width: 100vw !important; height: 100vh !important; max-height: none !important; margin: 0 !important; aspect-ratio: auto !important; }
+.session-player-view:fullscreen, .session-player-view:-webkit-full-screen, .session-player-view.player-fullscreen-fallback { display: grid; box-sizing: border-box; width: 100vw; height: 100vh; height: 100dvh; grid-template-rows: auto auto auto; align-content: center; justify-items: center; overflow: hidden; color: var(--text); background: #000; }
+.session-player-view.player-fullscreen-fallback { position: fixed; z-index: 90; inset: 0; }
+html.player-fullscreen-active, html.player-fullscreen-active body { overflow: hidden; }
+.session-player-view:fullscreen .main-video-frame, .session-player-view:-webkit-full-screen .main-video-frame, .session-player-view.player-fullscreen-fallback .main-video-frame { width: var(--fullscreen-video-width,100%) !important; height: var(--fullscreen-video-height,auto) !important; min-height: 0; max-height: none !important; margin: 0 !important; aspect-ratio: auto !important; justify-self: center; }
+.session-player-view:fullscreen .camera-switcher, .session-player-view:-webkit-full-screen .camera-switcher, .session-player-view.player-fullscreen-fallback .camera-switcher { display: none; }
+.session-player-view:fullscreen :is(.player-actions,.active-camera-label,.composite-tile-label), .session-player-view:-webkit-full-screen :is(.player-actions,.active-camera-label,.composite-tile-label), .session-player-view.player-fullscreen-fallback :is(.player-actions,.active-camera-label,.composite-tile-label) { display: none; }
+.session-player-view:fullscreen .playback-telemetry, .session-player-view:-webkit-full-screen .playback-telemetry, .session-player-view.player-fullscreen-fallback .playback-telemetry { box-sizing: border-box; width: var(--fullscreen-stage-width,100%); flex-shrink: 0; }
+.session-player-view:fullscreen .unified-controls, .session-player-view:-webkit-full-screen .unified-controls, .session-player-view.player-fullscreen-fallback .unified-controls { box-sizing: border-box; display: grid; width: var(--fullscreen-stage-width,100%); grid-template-columns: auto minmax(0,1fr) auto auto; gap: 10px; padding: 8px max(12px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left)); background: rgba(5,5,5,.96); }
+.session-player-view:fullscreen .unified-controls > .play-toggle, .session-player-view:-webkit-full-screen .unified-controls > .play-toggle, .session-player-view.player-fullscreen-fallback .unified-controls > .play-toggle { display: none; }
+.session-player-view:fullscreen .unified-controls > span, .session-player-view:-webkit-full-screen .unified-controls > span, .session-player-view.player-fullscreen-fallback .unified-controls > span { display: block; min-width: 48px; color: #d4d4d8; font-size: 12px; }
+.session-player-view:fullscreen #current-time, .session-player-view:-webkit-full-screen #current-time, .session-player-view.player-fullscreen-fallback #current-time { grid-column: 1; }
+.session-player-view:fullscreen .timeline-control, .session-player-view:-webkit-full-screen .timeline-control, .session-player-view.player-fullscreen-fallback .timeline-control { grid-column: 2; }
+.session-player-view:fullscreen #total-time, .session-player-view:-webkit-full-screen #total-time, .session-player-view.player-fullscreen-fallback #total-time { grid-column: 3; }
+.session-player-view:fullscreen #fullscreen-button, .session-player-view:-webkit-full-screen #fullscreen-button, .session-player-view.player-fullscreen-fallback #fullscreen-button { grid-column: 4; min-width: 88px; min-height: 38px; }
+.session-player-view[data-fullscreen-density="compact"] .unified-controls { gap: 6px; }
+.session-player-view[data-fullscreen-density="compact"] .unified-controls > span { min-width: 40px; font-size: 10px; }
+.session-player-view[data-fullscreen-density="compact"] #fullscreen-button { min-width: 76px; padding-inline: 10px; }
+@media (orientation: portrait) and (max-width: 620px) {
+  .session-player-view:fullscreen .unified-controls, .session-player-view:-webkit-full-screen .unified-controls, .session-player-view.player-fullscreen-fallback .unified-controls { grid-template-columns: auto minmax(0,1fr) auto; }
+  .session-player-view:fullscreen .unified-controls > span, .session-player-view:-webkit-full-screen .unified-controls > span, .session-player-view.player-fullscreen-fallback .unified-controls > span { min-width: 54px; font-size: 10px; white-space: nowrap; }
+  .session-player-view:fullscreen #fullscreen-button, .session-player-view:-webkit-full-screen #fullscreen-button, .session-player-view.player-fullscreen-fallback #fullscreen-button { width: 100%; grid-column: 1 / -1; grid-row: 2; min-height: 34px; }
+}
+.session-player-view[data-fullscreen-density="compact"] .playback-telemetry { min-height: 50px; gap: 2px; padding: 3px 10px 4px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-main-row { gap: 8px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-time { min-width: 124px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-time small { font-size: 10px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-time strong { font-size: 11px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-dashboard { grid-template-columns: repeat(7,52px); gap: 1px; padding: 4px 8px; border-radius: 22px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-dashboard > div:not(.telemetry-blinker) { min-height: 44px; grid-template-rows: 27px 13px; gap: 2px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-dashboard small { font-size: 10px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-gear, .session-player-view[data-fullscreen-density="compact"] .telemetry-speed, .session-player-view[data-fullscreen-density="compact"] .telemetry-item, .session-player-view[data-fullscreen-density="compact"] .telemetry-steering, .session-player-view[data-fullscreen-density="compact"] .telemetry-blinker { width: 52px; min-width: 52px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-gear strong { font-size: 20px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-speed-reading strong { font-size: 24px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-speed-reading small { margin-top: 3px; font-size: 9px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-item > svg, .session-player-view[data-fullscreen-density="compact"] .telemetry-accelerator-gauge, .session-player-view[data-fullscreen-density="compact"] .telemetry-accelerator-gauge svg { width: 24px; min-width: 24px; height: 24px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-steering-icon { width: 22px !important; min-width: 22px !important; height: 22px !important; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-blinker { min-height: 27px; margin-bottom: 15px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-blinker svg { width: 23px; height: 23px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-assistance { top: 3px; min-height: 13px; }
+.session-player-view[data-fullscreen-density="compact"] .telemetry-assistance strong { font-size: 10px; }
 .main-video-frame > video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.player-loading { position: absolute; z-index: 5; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; color: #f4f4f5; background: rgba(0,0,0,.7); font-size: 13px; font-weight: 700; letter-spacing: .02em; pointer-events: none; }
+.player-loading[hidden] { display: none; }
+.player-loading .loading-spinner { border-color: rgba(255,255,255,.24); border-top-color: var(--accent); filter: drop-shadow(0 0 8px rgba(59,130,246,.34)); }
 .composite-grid { display: grid; width: 100%; height: 100%; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); background: #000; }
 .composite-grid[data-layout="composite4a"] { grid-template-columns: repeat(2,1fr); grid-template-rows: repeat(2,1fr); }
 .composite-grid[data-layout="composite4b"] { grid-template-columns: repeat(3,1fr); grid-template-rows: 3fr 1fr; }
@@ -513,19 +576,19 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 .telemetry-time { display: grid; min-width: 156px; gap: 2px; }
 .telemetry-time small { color: #71717a; font-size: 14px; font-weight: 750; letter-spacing: .05em; }
 .telemetry-time strong { font-size: 14px; letter-spacing: .01em; white-space: nowrap; }
-.telemetry-dashboard { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 12px; padding: 8px 15px; border-radius: 27px; background: #202020; box-shadow: 0 8px 22px rgba(0,0,0,.22); }
+.telemetry-dashboard { display: grid; min-width: 0; grid-template-columns: repeat(7,68px); align-items: center; justify-content: center; gap: 4px; padding: 8px 15px; border-radius: 27px; background: #202020; box-shadow: 0 8px 22px rgba(0,0,0,.22); }
 .telemetry-dashboard > div:not(.telemetry-blinker) { display: grid; min-height: 58px; grid-template-rows: 36px 18px; align-items: center; justify-items: center; gap: 4px; }
 .telemetry-dashboard small { align-self: end; margin: 0; color: #a1a1aa; font-size: 12px; font-weight: 700; letter-spacing: .025em; line-height: 1; white-space: nowrap; }
-.telemetry-gear { width: 48px; }
+.telemetry-gear { width: 68px; }
 .telemetry-gear > small, .telemetry-item > small { font-size: 13px; font-weight: 700; }
 .telemetry-gear strong { color: #a1a1aa; font-size: 25px; line-height: .95; }
 .telemetry-gear[data-gear="D"] strong { color: #60a5fa; text-shadow: 0 0 12px rgba(59,130,246,.52); }
 .telemetry-gear[data-gear="R"] strong { color: #f59e0b; }
-.telemetry-speed { min-width: 68px; }
+.telemetry-speed { width: 68px; min-width: 68px; }
 .telemetry-speed-reading { position: relative; top: 3px; display: grid; align-self: center; justify-items: center; gap: 0; }
 .telemetry-speed-reading strong { font-size: 30px; font-weight: 800; line-height: .8; }
 .telemetry-speed-reading small { align-self: auto; margin-top: 4px; font-size: 12px; line-height: 1; }
-.telemetry-item { box-sizing: border-box; width: 82px; min-width: 82px; padding: 3px 8px; color: #71717a; }
+.telemetry-item { box-sizing: border-box; width: 68px; min-width: 68px; padding: 3px 2px; color: #71717a; }
 .telemetry-item > svg { width: 32px; min-width: 32px; height: 32px; }
 .telemetry-steering-icon { width: 29px !important; min-width: 29px !important; height: 29px !important; overflow: visible; fill: currentColor; stroke: none; }
 .telemetry-brake-icon { overflow: visible; fill: none; stroke: currentColor; stroke-width: 2.35; stroke-linecap: round; stroke-linejoin: round; }
@@ -537,11 +600,13 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 .telemetry-accelerator-level { position: absolute; z-index: 2; right: 0; bottom: 0; left: 0; height: var(--accelerator-level,0%); overflow: hidden; color: var(--telemetry-green); transition: height 120ms linear; }
 .telemetry-accelerator-level svg { position: absolute; right: 0; bottom: 0; left: 0; color: inherit; }
 .telemetry-accelerator[data-active="true"] .telemetry-accelerator-gauge { color: #fff; }
-.telemetry-steering { width: 92px; min-width: 92px; color: #fff; }
+.telemetry-accelerator > small { display: flex; width: 100%; align-items: baseline; justify-content: center; gap: 0; letter-spacing: 0; }
+.telemetry-accelerator > small strong { display: inline; width: auto; font-variant-numeric: tabular-nums; text-align: center; }
+.telemetry-steering { width: 68px; min-width: 68px; color: #fff; }
 .telemetry-steering svg { transform: rotate(0deg); transition: transform 120ms linear; }
 .telemetry-steering small strong { display: inline-block; width: 43px; color: currentColor; font-variant-numeric: tabular-nums; text-align: left; }
 .telemetry-steering[data-assisted="true"] { color: #60a5fa; filter: drop-shadow(0 0 5px rgba(62,106,225,.5)); }
-.telemetry-blinker { display: grid; width: 32px; min-height: 36px; margin-bottom: 18px; place-items: center; color: #27272a; }
+.telemetry-blinker { display: grid; width: 68px; min-width: 68px; min-height: 36px; margin-bottom: 18px; place-items: center; color: #27272a; }
 .telemetry-blinker svg { width: 30px; height: 30px; fill: currentColor; }
 .telemetry-blinker[data-active="true"] { color: #32d74b; animation: telemetry-blinker-pulse 1s steps(1,end) infinite; filter: drop-shadow(0 0 6px rgba(50,215,75,.7)); }
 @keyframes telemetry-blinker-pulse { 0%,49% { opacity: 1; } 50%,100% { opacity: .12; } }
@@ -552,7 +617,7 @@ html[data-tesla-browser-compatibility="true"] select.compat-select-native { posi
 .playback-telemetry[data-state="ready"] .telemetry-message { display: none; }
 .playback-telemetry:not([data-state="ready"]) .telemetry-dashboard { opacity: .34; }
 @media (prefers-reduced-motion: reduce) { .telemetry-blinker[data-active="true"] { animation: none; } }
-.player-message { position: absolute; margin: 0; padding: 10px 14px; border-radius: 10px; color: var(--muted); background: rgba(10,10,10,.9); font-size: 13px; }
+.player-message { position: absolute; z-index: 6; margin: 0; padding: 10px 14px; border-radius: 10px; color: var(--muted); background: rgba(10,10,10,.9); font-size: 13px; }
 .camera-switcher { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 14px 20px 8px; }
 .camera-switcher button { min-height: 38px; padding: 0 8px; border-color: var(--line); color: var(--muted); background: var(--surface); font-size: 11px; }
 .camera-switcher button.active { border-color: var(--accent); color: #fff; background: var(--accent); }
@@ -596,6 +661,12 @@ html[data-ui-font] .wifi-ipv4-static-fields label { font-size: var(--ui-meta-fon
 }
 
 @media (max-width: 620px) {
+  .onboarding-card { padding: 22px 18px; }
+  .onboarding-heading { align-items: center; }
+  .onboarding-step { grid-template-columns: 30px minmax(0,1fr); padding: 12px; }
+  .onboarding-step > i { width: 30px; height: 30px; }
+  .onboarding-step > .badge { grid-column: 2; justify-self: start; }
+  .onboarding-actions { align-items: stretch; flex-direction: column-reverse; }
   .topbar { min-height: 64px; padding-right: 12px; padding-left: 12px; }
   .brand small { display: none; }
   .top-actions { gap: 6px; }
@@ -643,22 +714,24 @@ html[data-ui-font] .wifi-ipv4-static-fields label { font-size: var(--ui-meta-fon
   .telemetry-time { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 6px; }
   .telemetry-time small { display: none; }
   .telemetry-time strong { font-size: 10px; }
-  .telemetry-dashboard { box-sizing: border-box; width: 100%; justify-content: space-between; gap: 1px; padding: 5px 7px; border-radius: 22px; }
+  .telemetry-dashboard { box-sizing: border-box; width: calc(100% - 12px); max-width: 360px; grid-template-columns: repeat(7,minmax(0,1fr)); justify-content: center; gap: 0; padding: 5px 4px; border-radius: 22px; }
   .telemetry-dashboard > div:not(.telemetry-blinker) { min-height: 47px; grid-template-rows: 29px 14px; gap: 4px; }
   .telemetry-dashboard small { font-size: 10px; }
-  .telemetry-gear { width: 32px; min-width: 32px; }
+  .telemetry-gear { width: 100%; min-width: 0; }
   .telemetry-gear strong { font-size: 20px; }
-  .telemetry-speed { min-width: 43px; }
+  .telemetry-speed { width: 100%; min-width: 0; }
   .telemetry-speed-reading strong { font-size: 24px; }
   .telemetry-speed-reading small { margin-top: 3px; font-size: 10px; }
-  .telemetry-item { width: 54px; min-width: 54px; padding: 1px 3px; }
+  .telemetry-item { width: 100%; min-width: 0; padding: 1px 0; }
   .telemetry-gear > small, .telemetry-item > small { font-size: 11px; }
   .telemetry-item > svg, .telemetry-accelerator-gauge, .telemetry-accelerator-gauge svg { width: 25px; min-width: 25px; height: 25px; }
   .telemetry-steering-icon { width: 23px !important; min-width: 23px !important; height: 23px !important; }
-  .telemetry-accelerator { min-width: 48px; }
-  .telemetry-steering { width: 63px; min-width: 63px; }
+  .telemetry-accelerator { min-width: 0; contain: inline-size; }
+  .telemetry-accelerator-gauge { align-self: center; transform: translateY(1px); }
+  .telemetry-accelerator > small { box-sizing: border-box; overflow: visible; transform: translateX(-2px); }
+  .telemetry-steering { width: 100%; min-width: 0; }
   .telemetry-steering small strong { width: 34px; }
-  .telemetry-blinker { width: 26px; min-width: 26px; min-height: 29px; margin-bottom: 18px; }
+  .telemetry-blinker { width: 100%; min-width: 0; min-height: 29px; margin-bottom: 18px; }
   .telemetry-blinker svg { width: 25px; height: 25px; }
   .telemetry-assistance { min-height: 14px; }
   .telemetry-assistance strong { font-size: 11px; }

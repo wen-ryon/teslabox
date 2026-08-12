@@ -29,7 +29,7 @@ const (
 	gadgetBootBindingWindow      = 60 * time.Second
 	dataDriveConfirmationWait    = 500 * time.Millisecond
 	fallbackSnapshotScanInterval = 30 * time.Second
-	fallbackSnapshotIdleInterval = 5 * time.Minute
+	minimumSnapshotScanInterval  = time.Minute
 	fallbackSnapshotActiveWindow = 2 * time.Minute
 )
 
@@ -95,6 +95,8 @@ type Snapshot struct {
 	GadgetPaused        bool                      `json:"gadget_paused"`
 	GadgetResumePending bool                      `json:"gadget_resume_pending"`
 	MediaSnapshot       *mediasnapshot.View       `json:"media_snapshot,omitempty"`
+	MediaVolumeSpace    mediasnapshot.VolumeSpace `json:"media_volume_space"`
+	MediaVolumeSpaceAt  *time.Time                `json:"media_volume_space_updated_at,omitempty"`
 	VideoCount          int                       `json:"video_count"`
 	Videos              []teslacam.Video          `json:"-"`
 	LastRefreshAt       *time.Time                `json:"last_refresh_at,omitempty"`
@@ -492,6 +494,10 @@ func cloneSnapshot(source Snapshot) Snapshot {
 		view := *source.MediaSnapshot
 		result.MediaSnapshot = &view
 	}
+	if source.MediaVolumeSpaceAt != nil {
+		updatedAt := *source.MediaVolumeSpaceAt
+		result.MediaVolumeSpaceAt = &updatedAt
+	}
 	if source.SnapshotRetryAt != nil {
 		retryAt := *source.SnapshotRetryAt
 		result.SnapshotRetryAt = &retryAt
@@ -538,7 +544,14 @@ func (m *Manager) snapshotWithTimeout(parent context.Context) {
 
 	ctx, cancel := context.WithTimeout(parent, m.cfg.SnapshotTimeout)
 	defer cancel()
-	if !m.shouldRunAutomaticSnapshotLocked(m.now()) {
+	now := m.now()
+	if err := m.releaseIdleMediaSnapshotLocked(ctx, now); err != nil && !isContextTermination(ctx, err) {
+		m.logger.Warn("释放空闲 TeslaCam 媒体快照失败", "error", err)
+		m.cleanupRetired(ctx)
+		return
+	}
+	m.cleanupRetired(ctx)
+	if !m.shouldRunAutomaticSnapshotLocked(now) {
 		return
 	}
 	if err := m.refreshSnapshotLocked(ctx); err != nil && !errors.Is(err, ErrSnapshotUnavailable) && !isContextTermination(ctx, err) {
@@ -570,6 +583,9 @@ func (m *Manager) cleanupWithTimeout(parent context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	if err := m.releaseIdleMediaSnapshotLocked(ctx, m.now()); err != nil && !isContextTermination(ctx, err) {
+		m.logger.Warn("释放空闲 TeslaCam 媒体快照失败", "error", err)
+	}
 	m.cleanupRetired(ctx)
 }
 
@@ -940,6 +956,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	ready := previous
 	ready.Phase = PhaseSnapshotReady
 	ready.MediaSnapshot = &view
+	ready.MediaVolumeSpace = view.VolumeSpace
 	ready.Videos = slices.Clone(videos)
 	ready.VideoCount = len(videos)
 	ready.LastError = ""
@@ -948,6 +965,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	ready.SnapshotFailures = 0
 	ready.SnapshotRetryAt = nil
 	now := m.now()
+	ready.MediaVolumeSpaceAt = &now
 	ready.LastRefreshAt = &now
 	m.store(ready)
 	m.snapshotFailures = 0
@@ -979,7 +997,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 
 func (m *Manager) storeSnapshotFailure(previous Snapshot, cause error) error {
 	m.snapshotFailures++
-	delay := snapshotRetryDelay(m.automaticSnapshotIntervalLocked(m.now()), m.cfg.SnapshotRetryMax, m.snapshotFailures)
+	delay := snapshotRetryDelay(m.snapshotScanInterval(), m.cfg.SnapshotRetryMax, m.snapshotFailures)
 	m.snapshotRetryAt = m.now().Add(delay)
 	degraded := previous
 	degraded.Phase = PhaseDegraded
@@ -1027,25 +1045,53 @@ func (m *Manager) shouldRunAutomaticSnapshotLocked(now time.Time) bool {
 	if !m.snapshotRetryAt.IsZero() && now.Before(m.snapshotRetryAt) {
 		return false
 	}
+	if m.hasMediaLeases() {
+		// 轮换被播放或导出的 reflink 会同时保留新旧两份共享视图，车机随后覆盖写时会制造更多 COW extent。
+		// 显式扫描仍可由用户触发；后台任务等待租约释放后再更新索引。
+		return false
+	}
 	state := m.Snapshot()
 	if state.MediaSnapshot == nil || m.lastSnapshotAt.IsZero() {
 		// 启动后没有浏览请求时不扫描 96GB/更大镜像，避免无意义的磁盘唤醒和车端 I/O 抖动。
 		return now.Before(m.mediaActiveUntil)
 	}
-	return now.Sub(m.lastSnapshotAt) >= m.automaticSnapshotIntervalLocked(now)
+	return now.Before(m.mediaActiveUntil) && now.Sub(m.lastSnapshotAt) >= m.snapshotScanInterval()
 }
 
-func (m *Manager) automaticSnapshotIntervalLocked(now time.Time) time.Duration {
-	if m.Snapshot().MediaSnapshot == nil {
-		return m.snapshotScanInterval()
-	}
+// releaseIdleMediaSnapshotLocked 在媒体页面停止活动后解除 reflink 共享，避免车机覆盖写持续产生 COW extent。
+// 调用方必须持有 refreshMu；状态摘除和租约检查在同一个 stateMu 临界区完成，防止新请求借到待删除视图。
+func (m *Manager) releaseIdleMediaSnapshotLocked(ctx context.Context, now time.Time) error {
 	if now.Before(m.mediaActiveUntil) {
-		return m.snapshotScanInterval()
+		return nil
 	}
-	if m.cfg.SnapshotIdleInterval > 0 {
-		return m.cfg.SnapshotIdleInterval
+
+	m.stateMu.Lock()
+	state := m.state
+	if state.MediaSnapshot == nil || !state.GadgetStatus.Bound || m.mediaLeases[state.MediaSnapshot.ID] > 0 {
+		m.stateMu.Unlock()
+		return nil
 	}
-	return fallbackSnapshotIdleInterval
+	view := *state.MediaSnapshot
+	previousPhase := state.Phase
+	state.MediaSnapshot = nil
+	if state.Phase == PhaseSnapshotReady {
+		state.Phase = PhaseGadgetActive
+	}
+	m.state = state
+	m.lastSnapshotAt = time.Time{}
+	m.snapshotFailures = 0
+	m.snapshotRetryAt = time.Time{}
+	m.stateMu.Unlock()
+
+	if previousPhase != state.Phase {
+		m.logger.Info("TeslaUSB 状态已切换", "from", previousPhase, "to", state.Phase)
+	}
+	if err := m.snapshotter.Remove(ctx, view); err != nil {
+		m.retired = append(m.retired, view)
+		return fmt.Errorf("删除空闲 TeslaCam 快照 %s: %w", view.ID, err)
+	}
+	m.logger.Info("媒体浏览已空闲，已释放 TeslaCam reflink 快照", "snapshot_id", view.ID, "video_count", state.VideoCount)
+	return nil
 }
 
 func (m *Manager) extendMediaActivityLocked(now time.Time) {
@@ -1053,10 +1099,12 @@ func (m *Manager) extendMediaActivityLocked(now time.Time) {
 }
 
 func (m *Manager) snapshotScanInterval() time.Duration {
-	if m.cfg.ScanInterval > 0 {
-		return m.cfg.ScanInterval
+	interval := m.cfg.ScanInterval
+	if interval <= 0 {
+		interval = fallbackSnapshotScanInterval
 	}
-	return fallbackSnapshotScanInterval
+	// TeslaCam 文件按分钟滚动，小于一分钟只会重复克隆同一批数据并增加 COW 写放大。
+	return max(interval, minimumSnapshotScanInterval)
 }
 
 func (m *Manager) snapshotActiveWindow() time.Duration {
@@ -1226,6 +1274,11 @@ func preserveMedia(target, source Snapshot) Snapshot {
 	if source.MediaSnapshot != nil {
 		view := *source.MediaSnapshot
 		target.MediaSnapshot = &view
+	}
+	target.MediaVolumeSpace = source.MediaVolumeSpace
+	if source.MediaVolumeSpaceAt != nil {
+		updatedAt := *source.MediaVolumeSpaceAt
+		target.MediaVolumeSpaceAt = &updatedAt
 	}
 	target.Videos = slices.Clone(source.Videos)
 	target.VideoCount = source.VideoCount

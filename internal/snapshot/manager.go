@@ -80,11 +80,12 @@ type Config struct {
 
 // Manager 串行创建快照，避免多个 fsck 和 loop 挂载同时操作同一镜像族。
 type Manager struct {
-	runner system.Runner
-	config Config
-	now    func() time.Time
-	space  func(string) (uint64, uint64, error)
-	mu     sync.Mutex
+	runner         system.Runner
+	config         Config
+	now            func() time.Time
+	space          func(string) (uint64, uint64, error)
+	cowHintApplied bool
+	mu             sync.Mutex
 }
 
 // New 创建快照管理器，目录本身必须由显式初始化或 systemd 准备完成。
@@ -209,6 +210,9 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 	if !space.Ready {
 		return View{}, &InsufficientSpaceError{Status: space}
 	}
+	if err := m.ensureCOWExtentHint(ctx); err != nil {
+		return View{}, err
+	}
 
 	createdAt := m.now().UTC()
 	id := createdAt.Format("20060102T150405.000000000Z")
@@ -310,6 +314,19 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 			FreePercent: freePercent,
 		},
 	}, nil
+}
+
+func (m *Manager) ensureCOWExtentHint(ctx context.Context) error {
+	if m.cowHintApplied {
+		return nil
+	}
+	// reflink 存活期间车机会继续覆盖原镜像；提前设置 1 MiB COW 分配提示，
+	// 可以为旧版本创建的镜像补迁移，避免小块覆盖持续制造 4--64 KiB extent。
+	if _, err := m.runner.Run(ctx, "/usr/sbin/xfs_io", "-c", "cowextsize 1m", m.config.ImagePath); err != nil {
+		return fmt.Errorf("设置 TeslaCam 镜像 COW extent 保护: %w", err)
+	}
+	m.cowHintApplied = true
+	return nil
 }
 
 // Remove 先卸载只读视图再删除快照，不会触碰正在向 Tesla 暴露的原始镜像。

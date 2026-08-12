@@ -76,6 +76,30 @@ func TestTimelineAndAtUseVideoDuration(t *testing.T) {
 	}
 }
 
+func TestTimelineAndAtUseRealMP4SamplePTS(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "timed-sei.mp4")
+	first := appendVarintField(nil, 3, 100)
+	second := appendVarintField(nil, 3, 101)
+	if err := os.WriteFile(path, testTimedMP4(first, second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := Read(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeline := Timeline(items, 6*time.Second, 10)
+	if len(timeline) != 2 || timeline[0].OffsetMS != 4000 || timeline[1].OffsetMS != 5000 {
+		t.Fatalf("timeline = %#v", timeline)
+	}
+	if item, found := At(items, 6*time.Second, 3999*time.Millisecond); found {
+		t.Fatalf("At() = %#v, true before first SEI", item)
+	}
+	if item, found := At(items, 6*time.Second, 4500*time.Millisecond); !found || item.FrameSequence != 100 {
+		t.Fatalf("At() = %#v, %t", item, found)
+	}
+}
+
 func TestReadHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "sei.mp4")
@@ -150,6 +174,68 @@ func testMP4WithoutSEI() []byte {
 	copy(atom[4:8], []byte("mdat"))
 	copy(atom[8:], mdat)
 	return atom
+}
+
+func testTimedMP4(firstPayload, secondPayload []byte) []byte {
+	samples := [][]byte{
+		testNALSample([]byte{0x65, 0x88, 0x99}),
+		testNALSample(append(append([]byte{0x06, 0x05, 0x20, 'B', 'B', 'B', 'i'}, firstPayload...), 0x80)),
+		testNALSample(append(append([]byte{0x06, 0x05, 0x20, 'B', 'B', 'B', 'i'}, secondPayload...), 0x80)),
+	}
+	mdatPayload := bytes.Join(samples, nil)
+	mdat := testBox("mdat", mdatPayload)
+	offsets := make([]uint32, len(samples))
+	position := uint32(8)
+	for index, sample := range samples {
+		offsets[index] = position
+		position += uint32(len(sample))
+	}
+	hdlr := make([]byte, 12)
+	copy(hdlr[8:12], []byte("vide"))
+	mdhd := make([]byte, 20)
+	binary.BigEndian.PutUint32(mdhd[12:16], 1000)
+	binary.BigEndian.PutUint32(mdhd[16:20], 6000)
+	stsz := make([]byte, 12+len(samples)*4)
+	binary.BigEndian.PutUint32(stsz[8:12], uint32(len(samples)))
+	for index, sample := range samples {
+		binary.BigEndian.PutUint32(stsz[12+index*4:16+index*4], uint32(len(sample)))
+	}
+	stco := make([]byte, 8+len(offsets)*4)
+	binary.BigEndian.PutUint32(stco[4:8], uint32(len(offsets)))
+	for index, offset := range offsets {
+		binary.BigEndian.PutUint32(stco[8+index*4:12+index*4], offset)
+	}
+	stsc := make([]byte, 20)
+	binary.BigEndian.PutUint32(stsc[4:8], 1)
+	binary.BigEndian.PutUint32(stsc[8:12], 1)
+	binary.BigEndian.PutUint32(stsc[12:16], 1)
+	binary.BigEndian.PutUint32(stsc[16:20], 1)
+	stts := make([]byte, 24)
+	binary.BigEndian.PutUint32(stts[4:8], 2)
+	binary.BigEndian.PutUint32(stts[8:12], 1)
+	binary.BigEndian.PutUint32(stts[12:16], 4000)
+	binary.BigEndian.PutUint32(stts[16:20], uint32(len(samples)-1))
+	binary.BigEndian.PutUint32(stts[20:24], 1000)
+	stbl := testBox("stbl", bytes.Join([][]byte{testBox("stsz", stsz), testBox("stco", stco), testBox("stsc", stsc), testBox("stts", stts)}, nil))
+	minf := testBox("minf", stbl)
+	mdia := testBox("mdia", bytes.Join([][]byte{testBox("mdhd", mdhd), testBox("hdlr", hdlr), minf}, nil))
+	moov := testBox("moov", testBox("trak", mdia))
+	return append(mdat, moov...)
+}
+
+func testNALSample(nal []byte) []byte {
+	result := make([]byte, 4+len(nal))
+	binary.BigEndian.PutUint32(result[:4], uint32(len(nal)))
+	copy(result[4:], nal)
+	return result
+}
+
+func testBox(typ string, payload []byte) []byte {
+	result := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint32(result[:4], uint32(len(result)))
+	copy(result[4:8], typ)
+	copy(result[8:], payload)
+	return result
 }
 
 func appendVarintField(destination []byte, field int, value uint64) []byte {

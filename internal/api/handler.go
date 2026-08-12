@@ -20,6 +20,7 @@ import (
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
+	"github.com/wen-ryon/teslabox/internal/fragmentation"
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
@@ -56,6 +57,9 @@ type DeviceAdmin interface {
 // StorageAdmin 定义设置中心的外接存储发现和显式初始化能力。
 type StorageAdmin interface {
 	Status(context.Context) (storageadmin.Status, error)
+	Fragmentation(context.Context) (fragmentation.Report, error)
+	Defragment(context.Context, storageadmin.DefragmentRequest) (storageadmin.DefragmentResult, error)
+	MigrateAdvertisedCapacity(context.Context, storageadmin.CapacityMigrationRequest) (storageadmin.CapacityMigrationResult, error)
 	Initialize(context.Context, storageadmin.InitializeRequest) (storageadmin.Candidate, error)
 	Cancel(context.Context, storageadmin.CancelRequest) error
 }
@@ -1487,6 +1491,65 @@ func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *
 		}
 		writeJSON(w, http.StatusOK, status)
 	})
+	mux.HandleFunc("GET /api/v1/storage/fragmentation", func(w http.ResponseWriter, r *http.Request) {
+		report, err := admin.Fragmentation(r.Context())
+		if err != nil {
+			logger.Warn("读取 TeslaCam 镜像碎片诊断失败", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法读取镜像碎片诊断"})
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	})
+	mux.HandleFunc("POST /api/v1/storage/defragment", func(w http.ResponseWriter, r *http.Request) {
+		var input storageadmin.DefragmentRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		operationCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Hour)
+		defer cancel()
+		result, err := admin.Defragment(operationCtx, input)
+		if err != nil {
+			logger.Warn("整理 TeslaCam 镜像失败", "error", err)
+			if errors.Is(err, storageadmin.ErrUnsafeState) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "当前仍有录像播放、导出或 USB 存储占用，无法安全整理"})
+				return
+			}
+			var inputError *storageadmin.InputError
+			if errors.As(err, &inputError) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "镜像整理失败，Gadget 已保持安全断开，请查看日志"})
+			return
+		}
+		logger.Info("TeslaCam 镜像整理完成", "before_extents", result.Before.ExtentCount, "after_extents", result.After.ExtentCount, "changed", result.Changed)
+		writeJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("POST /api/v1/storage/migrate-capacity", func(w http.ResponseWriter, r *http.Request) {
+		var input storageadmin.CapacityMigrationRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		operationCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
+		defer cancel()
+		result, err := admin.MigrateAdvertisedCapacity(operationCtx, input)
+		if err != nil {
+			logger.Warn("迁移车机可见整盘容量失败", "error", err)
+			if errors.Is(err, storageadmin.ErrUnsafeState) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "当前仍有录像播放、导出或 USB 存储占用，无法安全迁移"})
+				return
+			}
+			var inputError *storageadmin.InputError
+			if errors.As(err, &inputError) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "容量迁移失败，Gadget 已保持安全断开，请查看日志"})
+			return
+		}
+		logger.Info("车机可见整盘容量迁移完成", "before_bytes", result.PreviousAdvertisedBytes, "after_bytes", result.AdvertisedBytes, "changed", result.Changed)
+		writeJSON(w, http.StatusOK, result)
+	})
 	mux.HandleFunc("POST /api/v1/storage/initialize", func(w http.ResponseWriter, r *http.Request) {
 		var input storageadmin.InitializeRequest
 		if !decodeJSON(w, r, &input) {
@@ -2231,6 +2294,11 @@ func sessionAcceptsGroup(session videoSession, group videoGroup, continuityGap t
 	}
 	if session.Event != group.Event {
 		return false
+	}
+	// SavedClips 和 SentryClips 的事件目录才是车机展示“一条录像”的真实边界。
+	// 同一目录内不同视角的文件时长和起点可能相差几十秒，不能再按切片间隔拆成多条。
+	if (session.ClipType == "saved" || session.ClipType == "sentry") && session.Event != "" {
+		return true
 	}
 	return !group.RecordedAt.After(session.EndAt.Add(continuityGap))
 }

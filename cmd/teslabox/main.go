@@ -31,6 +31,7 @@ import (
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/storage"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
+	"github.com/wen-ryon/teslabox/internal/storagebench"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 	"github.com/wen-ryon/teslabox/internal/updater"
@@ -185,7 +186,7 @@ func main() {
 		ImagePath:  filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
 		DataLabel:  cfg.DataLabel,
 		ImageLabel: "TESLACAM",
-	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager)
+	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager, storagebench.New(storagebench.DefaultConfig()))
 	authManager, err := webauth.New(webauth.Config{
 		StatePath:      cfg.WebAuthStatePath,
 		PasswordSHA256: cfg.WebPasswordSHA256,

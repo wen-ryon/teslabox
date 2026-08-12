@@ -64,16 +64,24 @@ func TestRunDryRunDoesNotExecute(t *testing.T) {
 	if len(runner.commands) != 0 {
 		t.Fatalf("dry-run executed %d commands", len(runner.commands))
 	}
-	want := Command{Name: "truncate", Args: []string{"--size", "96000000000", "/var/lib/teslabox/images/teslacam.img"}}
+	want := Command{Name: "fallocate", Args: []string{"--length", "96000000000", "--", "/var/lib/teslabox/images/teslacam.img"}}
 	if !reflect.DeepEqual(result.Commands[0], want) {
 		t.Fatalf("first command = %#v, want %#v", result.Commands[0], want)
+	}
+	logicalSize := Command{Name: "truncate", Args: []string{"--size", "96000000000", "--", "/var/lib/teslabox/images/teslacam.img"}}
+	if !reflect.DeepEqual(result.Commands[1], logicalSize) {
+		t.Fatalf("second command = %#v, want %#v", result.Commands[1], logicalSize)
+	}
+	cowHint := Command{Name: "/usr/sbin/xfs_io", Args: []string{"-c", "cowextsize 1m", "/var/lib/teslabox/images/teslacam.img"}}
+	if !reflect.DeepEqual(result.Commands[2], cowHint) {
+		t.Fatalf("third command = %#v, want %#v", result.Commands[2], cowHint)
 	}
 	partition := Command{
 		Name: "parted",
 		Args: []string{"--script", "--align", "optimal", "/var/lib/teslabox/images/teslacam.img", "mkpart", "primary", "ntfs", "1MiB", "100%"},
 	}
-	if !reflect.DeepEqual(result.Commands[2], partition) {
-		t.Fatalf("partition command = %#v, want %#v", result.Commands[2], partition)
+	if !reflect.DeepEqual(result.Commands[4], partition) {
+		t.Fatalf("partition command = %#v, want %#v", result.Commands[4], partition)
 	}
 }
 
@@ -105,8 +113,103 @@ func TestRunDryRunPlansMusicPartition(t *testing.T) {
 	if !slices.Contains(names, "mkfs.exfat") || !slices.Contains(names, "mkfs.vfat") {
 		t.Fatalf("commands = %#v", result.Commands)
 	}
-	if got := result.Commands[3]; got.Name != "parted" || !slices.Contains(got.Args, "fat32") || !slices.Contains(got.Args, "100%") {
+	if got := result.Commands[5]; got.Name != "parted" || !slices.Contains(got.Args, "fat32") || !slices.Contains(got.Args, "452995MiB") {
 		t.Fatalf("music partition command = %#v", got)
+	}
+}
+
+func TestRunSeparatesAdvertisedAndWritableCapacity(t *testing.T) {
+	options := validOptions()
+	options.SizeBytes = 123_924_905_984
+	options.WritableBytes = 103_000_000_000
+	environment := validEnvironment()
+	result, err := New(fakeInspector{environment: environment}, &fakeRunner{}).Run(t.Context(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Commands[0]; got.Name != "fallocate" || !slices.Contains(got.Args, "103000000000") {
+		t.Fatalf("preallocation command = %#v", got)
+	}
+	if got := result.Commands[1]; got.Name != "truncate" || !slices.Contains(got.Args, "123924905984") {
+		t.Fatalf("advertised size command = %#v", got)
+	}
+	partition := result.Commands[4]
+	if !slices.Contains(partition.Args, "100%") {
+		t.Fatalf("partition command = %#v", partition)
+	}
+	if result.Layout.TeslaCamBytes <= options.WritableBytes {
+		t.Fatalf("TeslaCam volume bytes = %d, want full visible volume larger than writable boundary", result.Layout.TeslaCamBytes)
+	}
+}
+
+func TestCapacityReserveOnlyAppliesToSingleTeslaCamPartition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		options  Options
+		expected bool
+	}{
+		{name: "single partition with reserve", options: Options{SizeBytes: 128, WritableBytes: 96}, expected: true},
+		{name: "same capacities", options: Options{SizeBytes: 96, WritableBytes: 96}, expected: false},
+		{name: "legacy implicit capacity", options: Options{SizeBytes: 96}, expected: false},
+		{name: "music layout", options: Options{SizeBytes: 128, WritableBytes: 96, MusicEnabled: true}, expected: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldInstallCapacityReserve(test.options); got != test.expected {
+				t.Fatalf("shouldInstallCapacityReserve() = %t, want %t", got, test.expected)
+			}
+		})
+	}
+}
+
+func TestRunRejectsMissingPreallocationToolBeforeCreatingImage(t *testing.T) {
+	options := validOptions()
+	options.Execute = true
+	runner := &fakeRunner{}
+	initializer := New(fakeInspector{environment: validEnvironment()}, runner)
+	initializer.lookPath = func(name string) (string, error) {
+		if strings.HasSuffix(name, "fallocate") {
+			return "", errors.New("not found")
+		}
+		return name, nil
+	}
+	_, err := initializer.Run(t.Context(), options)
+	if err == nil || !strings.Contains(err.Error(), "util-linux") {
+		t.Fatalf("Run() error = %v, want util-linux guidance", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("missing preallocation tool must fail before disk commands: %#v", runner.commands)
+	}
+}
+
+func TestRunRejectsMissingExFATCheckerBeforeCreatingImage(t *testing.T) {
+	options := validOptions()
+	options.Execute = true
+	runner := &fakeRunner{}
+	initializer := New(fakeInspector{environment: validEnvironment()}, runner)
+	initializer.lookPath = func(name string) (string, error) {
+		if strings.HasSuffix(name, "fsck.exfat") {
+			return "", errors.New("not found")
+		}
+		return name, nil
+	}
+	_, err := initializer.Run(t.Context(), options)
+	if err == nil || !strings.Contains(err.Error(), "exfatprogs") {
+		t.Fatalf("Run() error = %v, want exfatprogs guidance", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("missing fsck tool must fail before disk commands: %#v", runner.commands)
+	}
+}
+
+func TestRunRejectsFreeSpaceThatCannotFullyAllocateImage(t *testing.T) {
+	environment := validEnvironment()
+	environment.FreeBytes = 100_000_000_000
+	_, err := New(fakeInspector{environment: environment}, &fakeRunner{}).Run(t.Context(), validOptions())
+	if err == nil || !strings.Contains(err.Error(), "完整预分配") {
+		t.Fatalf("Run() error = %v, want preallocation reserve error", err)
 	}
 }
 

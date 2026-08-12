@@ -12,12 +12,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wen-ryon/teslabox/internal/exfatreserve"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
 const (
 	minimumImageSize          = 32 * 1000 * 1000 * 1000
-	minimumReserve            = 16 * 1000 * 1000 * 1000
+	minimumReserve            = 8 * 1024 * 1024 * 1024
 	minimumTeslaCamPartition  = 32 * 1000 * 1000 * 1000
 	minimumMusicPartition     = 1 * 1000 * 1000 * 1000
 	minimumTeslaCamPercentage = 10
@@ -30,6 +31,7 @@ type Options struct {
 	DataRoot        string
 	ImagePath       string
 	SizeBytes       int64
+	WritableBytes   int64
 	Label           string
 	MusicEnabled    bool
 	TeslaCamPercent int
@@ -143,14 +145,18 @@ func (i *OSInspector) Inspect(ctx context.Context, options Options) (Environment
 
 // Initializer 在完成环境核验后创建可供 Gadget 导出的 TeslaCam 镜像。
 type Initializer struct {
-	inspector Inspector
-	runner    system.Runner
-	lookPath  func(string) (string, error)
+	inspector              Inspector
+	runner                 system.Runner
+	lookPath               func(string) (string, error)
+	installCapacityReserve func(string, int64) (exfatreserve.Status, error)
 }
 
 // New 创建镜像初始化器。
 func New(inspector Inspector, runner system.Runner) *Initializer {
-	return &Initializer{inspector: inspector, runner: runner, lookPath: exec.LookPath}
+	return &Initializer{
+		inspector: inspector, runner: runner, lookPath: exec.LookPath,
+		installCapacityReserve: exfatreserve.Install,
+	}
 }
 
 // Run 默认只返回计划，Execute 为真时才创建镜像和文件系统。
@@ -158,7 +164,8 @@ func (i *Initializer) Run(ctx context.Context, options Options) (result Result, 
 	if err := validateOptions(options); err != nil {
 		return Result{}, err
 	}
-	layout, err := PlanLayout(options.SizeBytes, options.MusicEnabled, options.TeslaCamPercent)
+	writableBytes := effectiveWritableBytes(options)
+	layout, err := PlanLayout(layoutCapacityBytes(options), options.MusicEnabled, options.TeslaCamPercent)
 	if err != nil {
 		return Result{}, err
 	}
@@ -166,7 +173,7 @@ func (i *Initializer) Run(ctx context.Context, options Options) (result Result, 
 	if err != nil {
 		return Result{}, err
 	}
-	if err := validateEnvironment(environment, options.SizeBytes); err != nil {
+	if err := validateEnvironment(environment, writableBytes); err != nil {
 		return Result{}, err
 	}
 
@@ -185,6 +192,9 @@ func (i *Initializer) Run(ctx context.Context, options Options) (result Result, 
 		if err != nil && created {
 			if removeErr := os.Remove(environment.ImagePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 				err = errors.Join(err, fmt.Errorf("清理未完成镜像: %w", removeErr))
+			}
+			if removeErr := os.Remove(exfatreserve.MarkerPath(environment.ImagePath)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("清理未完成容量保护标记: %w", removeErr))
 			}
 		}
 	}()
@@ -258,22 +268,44 @@ func (i *Initializer) Run(ctx context.Context, options Options) (result Result, 
 		return result, fmt.Errorf("解除 TeslaCam loop 设备: %w", err)
 	}
 	loopAttached = false
+	if shouldInstallCapacityReserve(options) {
+		if i.installCapacityReserve == nil {
+			return result, errors.New("TeslaCam 安全容量保留区安装器不可用")
+		}
+		if _, err = i.installCapacityReserve(environment.ImagePath, writableBytes); err != nil {
+			return result, fmt.Errorf("安装 TeslaCam 安全容量保留区: %w", err)
+		}
+		if err = i.verifyCapacityReserveFileSystem(ctx, tools.fsckExFAT, environment.ImagePath); err != nil {
+			return result, err
+		}
+	}
 	result.WasExecuted = true
 	return result, nil
 }
 
 type formattingTools struct {
-	exFAT string
-	vfat  string
+	exFAT     string
+	fsckExFAT string
+	vfat      string
 }
 
-// requiredFormattingTools 在写入镜像前验证格式化程序，避免已经擦除数据盘后才因缺少系统依赖而中断。
+// requiredFormattingTools 在写入镜像前验证所有外部程序，避免已经擦除数据盘后才因缺少系统依赖而中断。
 func (i *Initializer) requiredFormattingTools(options Options) (formattingTools, error) {
+	if _, err := i.findTool("fallocate", "util-linux"); err != nil {
+		return formattingTools{}, err
+	}
+	if _, err := i.findTool("xfs_io", "xfsprogs"); err != nil {
+		return formattingTools{}, err
+	}
 	exFAT, err := i.findTool("mkfs.exfat", "exfatprogs")
 	if err != nil {
 		return formattingTools{}, err
 	}
-	tools := formattingTools{exFAT: exFAT}
+	fsckExFAT, err := i.findTool("fsck.exfat", "exfatprogs")
+	if err != nil {
+		return formattingTools{}, err
+	}
+	tools := formattingTools{exFAT: exFAT, fsckExFAT: fsckExFAT}
 	if !options.MusicEnabled {
 		return tools, nil
 	}
@@ -283,6 +315,29 @@ func (i *Initializer) requiredFormattingTools(options Options) (formattingTools,
 	}
 	tools.vfat = vfat
 	return tools, nil
+}
+
+func (i *Initializer) verifyCapacityReserveFileSystem(ctx context.Context, fsckExFAT, imagePath string) (resultErr error) {
+	output, err := i.runner.Run(ctx, "losetup", "--find", "--show", "--read-only", "--partscan", imagePath)
+	if err != nil {
+		return fmt.Errorf("建立容量保留区校验 loop 设备: %w", err)
+	}
+	loopDevice := strings.TrimSpace(string(output))
+	if !strings.HasPrefix(loopDevice, "/dev/loop") || strings.ContainsAny(loopDevice, " \t\r\n") {
+		return fmt.Errorf("losetup 返回了异常设备路径 %q", loopDevice)
+	}
+	defer func() {
+		if _, detachErr := i.runner.Run(context.WithoutCancel(ctx), "losetup", "--detach", loopDevice); detachErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("解除容量保留区校验 loop 设备: %w", detachErr))
+		}
+	}()
+	if _, err := i.runner.Run(ctx, "udevadm", "settle"); err != nil {
+		return fmt.Errorf("等待容量保留区校验分区设备: %w", err)
+	}
+	if _, err := i.runner.Run(ctx, fsckExFAT, "-n", loopDevice+"p1"); err != nil {
+		return fmt.Errorf("只读检查容量保护后的 TeslaCam 文件系统: %w", err)
+	}
+	return nil
 }
 
 func (i *Initializer) findTool(name, packageName string) (string, error) {
@@ -308,6 +363,12 @@ func validateOptions(options Options) error {
 	}
 	if options.SizeBytes < minimumImageSize {
 		return fmt.Errorf("size-bytes 不能小于 %d", minimumImageSize)
+	}
+	if options.WritableBytes < 0 || options.WritableBytes > options.SizeBytes {
+		return errors.New("writable-bytes 必须大于 0 且不能超过车机可见整盘容量")
+	}
+	if effectiveWritableBytes(options) < minimumImageSize {
+		return fmt.Errorf("writable-bytes 不能小于 %d", minimumImageSize)
 	}
 	if strings.TrimSpace(options.Label) == "" || len(options.Label) > 15 || strings.ContainsAny(options.Label, "/\\\t\r\n") {
 		return errors.New("label 必须是 1 到 15 字节且不含路径分隔符或空白的 exFAT 卷标")
@@ -336,8 +397,8 @@ func validateEnvironment(environment Environment, imageSize int64) error {
 	if environment.TotalBytes-imageSize < minimumReserve {
 		return fmt.Errorf("镜像过大，必须为快照至少预留 %d 字节", minimumReserve)
 	}
-	if environment.FreeBytes < minimumReserve {
-		return fmt.Errorf("数据盘剩余空间不足 %d 字节", minimumReserve)
+	if environment.FreeBytes < imageSize || environment.FreeBytes-imageSize < minimumReserve {
+		return fmt.Errorf("数据盘空间不足以完整预分配镜像并保留 %d 字节安全余量", minimumReserve)
 	}
 	return nil
 }
@@ -362,20 +423,47 @@ func buildPlan(imagePath string, options Options, layout Layout) []Command {
 }
 
 func imageCreationCommands(imagePath string, options Options, layout Layout) []Command {
+	writableBytes := effectiveWritableBytes(options)
 	commands := []Command{
-		{Name: "truncate", Args: []string{"--size", strconv.FormatInt(options.SizeBytes, 10), imagePath}},
+		// 稀疏镜像会把车机的顺序写入持续拆成新的 XFS extent；完整预分配可避免新盘从首次录像开始累积严重碎片。
+		{Name: "fallocate", Args: []string{"--length", strconv.FormatInt(writableBytes, 10), "--", imagePath}},
+		// LUN 使用真实设备容量；只有安全可写区在外层 XFS 预分配，卷尾保留簇继续保持稀疏。
+		{Name: "truncate", Args: []string{"--size", strconv.FormatInt(options.SizeBytes, 10), "--", imagePath}},
+		// reflink 快照存在时覆盖写仍会触发 COW；1 MiB 提示让 XFS 为这些写入预留连续空间，降低块层 IOPS 峰值。
+		{Name: "/usr/sbin/xfs_io", Args: []string{"-c", "cowextsize 1m", imagePath}},
 		{Name: "parted", Args: []string{"--script", imagePath, "mklabel", "msdos"}},
 	}
 	// exFAT 与 NTFS 在 MBR 中共用 0x07 类型码；先声明 ntfs 才能稳定写入车机需要的分区类型码。
 	if !options.MusicEnabled {
+		// 单 TeslaCam 分区覆盖完整 LUN，卷尾保留文件负责限制空闲容量，车机因此能读取真实卷总容量。
 		return append(commands, Command{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "ntfs", "1MiB", "100%"}})
 	}
+	// FAT32 音乐分区暂不支持同等强度的卷尾保留校验，继续使用物理安全边界，避免尾部稀疏区被写穿。
+	writableEnd := strconv.FormatInt(writableBytes/bytesPerMiB, 10) + "MiB"
 	teslaCamEndMiB := 1 + layout.TeslaCamBytes/bytesPerMiB
 	boundary := strconv.FormatInt(teslaCamEndMiB, 10) + "MiB"
 	return append(commands,
 		Command{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "ntfs", "1MiB", boundary}},
-		Command{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "fat32", boundary, "100%"}},
+		Command{Name: "parted", Args: []string{"--script", "--align", "optimal", imagePath, "mkpart", "primary", "fat32", boundary, writableEnd}},
 	)
+}
+
+func effectiveWritableBytes(options Options) int64 {
+	if options.WritableBytes > 0 {
+		return options.WritableBytes
+	}
+	return options.SizeBytes
+}
+
+func layoutCapacityBytes(options Options) int64 {
+	if !options.MusicEnabled {
+		return options.SizeBytes
+	}
+	return effectiveWritableBytes(options)
+}
+
+func shouldInstallCapacityReserve(options Options) bool {
+	return !options.MusicEnabled && options.WritableBytes > 0 && options.WritableBytes < options.SizeBytes
 }
 
 // PlanLayout 在执行任何磁盘写入前验证分区比例并返回实际 MiB 对齐容量。

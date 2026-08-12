@@ -12,6 +12,7 @@ const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
+const onboardingPreferenceKey = "teslabox-onboarding-complete";
 const initialPage = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
 const state = {
   offset: 0, total: 0, loading: false, refreshing: false, authEnabled: true,
@@ -31,6 +32,7 @@ const timelineList = $("video-grid");
 const notice = $("notice");
 const toastRegion = $("toast-region");
 const playerModal = $("player-modal");
+const sessionPlayerView = $("session-player-view");
 const mainVideoFrame = document.querySelector(".main-video-frame");
 const compositeGrid = $("composite-grid");
 const sessionVideo = $("session-video");
@@ -96,6 +98,8 @@ let networkLoadingTimer = 0;
 const compatibilitySelects = new Map();
 let compatibilitySelectSequence = 0;
 let compatibilitySelectDocumentObserver = null;
+let onboardingStorage = null;
+let onboardingChecking = false;
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
@@ -272,6 +276,7 @@ async function initialize() {
     if (state.page === "media") await loadMediaAssets();
     if (state.page === "settings") await loadSettings();
     if (state.page === "logs") await loadLogs();
+    await maybeShowOnboarding();
   } catch (error) {
     showApp();
     setNotice(`无法连接 TeslaBox：${error.message}`, true);
@@ -299,6 +304,7 @@ loginForm.addEventListener("submit", async (event) => {
       return;
     }
     await refreshAll();
+    await maybeShowOnboarding();
   } catch (error) {
     loginError.textContent = error.message;
   } finally {
@@ -387,7 +393,12 @@ $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
 $("wifi-ipv4-form").addEventListener("submit", saveWiFiIPv4Settings);
 $("wifi-ipv4-mode").addEventListener("change", renderWiFiIPv4Fields);
 $("storage-refresh").addEventListener("click", loadStorageDevices);
+$("storage-fragmentation-check").addEventListener("click", inspectStorageFragmentation);
+$("storage-capacity-migrate").addEventListener("click", migrateStorageCapacity);
+$("storage-defragment").addEventListener("click", defragmentStorageImage);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
+$("onboarding-skip").addEventListener("click", dismissOnboarding);
+$("onboarding-primary").addEventListener("click", followOnboardingPrimaryAction);
 $("storage-music-enabled").addEventListener("change", renderStoragePartitionPreview);
 $("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
 $("maintenance-auto-recovery").addEventListener("click", toggleMaintenanceAutoRecovery);
@@ -441,6 +452,10 @@ document.querySelectorAll("[data-period]").forEach((button) => button.addEventLi
 document.querySelectorAll("[data-close-player]").forEach((element) => element.addEventListener("click", closePlayer));
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (isPlayerFullscreen()) {
+    exitPlayerFullscreen();
+    return;
+  }
   if (closeOpenCompatibilitySelect()) return;
   if (!$("confirm-modal").hidden) resolveConfirmation(false);
   else if (!$("password-modal").hidden) closePasswordModal(false);
@@ -460,7 +475,12 @@ sessionVideo.addEventListener("play", () => {
 });
 sessionVideo.addEventListener("pause", updatePlayButton);
 sessionVideo.addEventListener("waiting", markPlaybackStall);
-sessionVideo.addEventListener("playing", () => { isPlaybackBuffering = false; });
+sessionVideo.addEventListener("loadeddata", finishPlayerLoadingFromMedia);
+sessionVideo.addEventListener("canplay", finishPlayerLoadingFromMedia);
+sessionVideo.addEventListener("playing", () => {
+  isPlaybackBuffering = false;
+  finishPlayerLoadingFromMedia();
+});
 sessionVideo.addEventListener("error", handlePlaybackError);
 navigator.connection?.addEventListener?.("change", updatePlaybackDiagnostics);
 window.addEventListener("resize", handlePlayerViewportChange);
@@ -559,6 +579,7 @@ async function changeManagementPassword(event) {
     await refreshAll();
     if (state.page === "settings") await loadSettings();
     if (state.page === "logs") await loadLogs();
+    await maybeShowOnboarding();
   } catch (error) {
     errorElement.textContent = error.message;
   } finally {
@@ -2051,6 +2072,66 @@ async function loadStorageDevices() {
   }
 }
 
+async function inspectStorageFragmentation() {
+  const button = $("storage-fragmentation-check");
+  button.disabled = true;
+  button.textContent = "检查中…";
+  try {
+    const report = await request("/api/v1/storage/fragmentation");
+    renderStorageFragmentation(report);
+    setSettingsNotice("镜像碎片检查完成", false);
+  } catch (error) {
+    $("storage-fragmentation-detail").textContent = error.message;
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "检查碎片";
+  }
+}
+
+function renderStorageFragmentation(report) {
+  const levels = {healthy:"正常", warning:"偏多", critical:"严重"};
+  $("storage-fragmentation-detail").textContent = `${levels[report.severity] || "未知"} · ${formatNumber(report.extent_count || 0)} 个 extent · ${report.reason || "无诊断说明"}`;
+}
+
+async function defragmentStorageImage() {
+  const confirmed = window.confirm("请先物理拔掉车机或电脑的 OTG 线。整理期间不要关机、拔数据盘或启动录像播放/导出。确认继续吗？");
+  if (!confirmed) return;
+  const button = $("storage-defragment");
+  button.disabled = true;
+  button.textContent = "整理中，请勿断电…";
+  try {
+    const result = await postJSON("/api/v1/storage/defragment", {confirm_otg_disconnected:true});
+    renderStorageFragmentation(result.after || result.before || {});
+    const summary = result.changed ? "镜像整理并校验完成" : "镜像无需整理，文件系统校验完成";
+    setSettingsNotice(`${summary}；请关机后重新上电恢复 Gadget`, false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "离线整理";
+  }
+}
+
+async function migrateStorageCapacity() {
+  const confirmed = window.confirm("此操作会先预分配新增可写空间，再把固定 20GB 保留区优化为 10GB 或物理容量的 5%（取较大值），不会删除录像。操作期间必须保持供电稳定；旧式 95.9 GiB 分区仍需备份后重新初始化。请先物理拔掉 OTG，确认继续吗？");
+  if (!confirmed) return;
+  const button = $("storage-capacity-migrate");
+  button.disabled = true;
+  button.textContent = "优化中，请勿断电…";
+  try {
+    const result = await postJSON("/api/v1/storage/migrate-capacity", {confirm_otg_disconnected:true});
+    const action = result.changed ? "保留空间已安全优化" : "容量布局无需调整";
+    const restart = result.requires_cold_boot ? "；请关机后重新上电恢复 Gadget" : "";
+    setSettingsNotice(`${action}：卷总容量 ${formatBytes(result.advertised_bytes)}，安全可写约 ${formatBytes(result.writable_bytes)}${restart}`, false);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "优化保留空间";
+  }
+}
+
 function renderStorageDevices(storage) {
   const devices = storage.devices || [];
   const list = $("storage-device-list");
@@ -2058,6 +2139,7 @@ function renderStorageDevices(storage) {
   const ready = devices.filter((device) => device.initialized).length;
   $("storage-status").textContent = ready ? `${ready} 个已初始化` : devices.length ? "需要初始化" : "未检测到设备";
   $("storage-status").className = `badge${ready ? " ok" : devices.length ? " error" : ""}`;
+  renderStorageBenchmark(storage.benchmark, storage.benchmark_error);
   if (!devices.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
@@ -2106,6 +2188,19 @@ function renderStorageDevices(storage) {
   });
 }
 
+function renderStorageBenchmark(report, error) {
+  if (error) {
+    $("storage-benchmark-detail").textContent = `性能体检记录不可用：${error}`;
+    return;
+  }
+  if (!report) {
+    $("storage-benchmark-detail").textContent = "尚无性能体检结果；新初始化数据盘时会自动执行一次。";
+    return;
+  }
+  const profiles = {stable:"稳定", limited:"受限", unsafe:"不建议"};
+  $("storage-benchmark-detail").textContent = `${profiles[report.profile] || "未知"} · 最低突发 ${Number(report.minimum_burst_mbps || 0).toFixed(1)} MB/s · 最长写停顿 ${formatDurationMS(report.maximum_write_stall_ms || 0)} · fsync P95 ${formatDurationMS(report.fsync_p95_ms || 0)}。${report.reason || ""}`;
+}
+
 function renderStorageUnavailable(message) {
   $("storage-status").textContent = "不可用";
   $("storage-status").className = "badge error";
@@ -2131,8 +2226,9 @@ function openStorageModal(device) {
   pendingStorage = device;
   const reinitialize = Boolean(device.initialized && device.can_reinitialize);
   $("storage-modal-title").textContent = device.can_resume ? "继续初始化存储设备" : reinitialize ? "重新初始化存储设备" : "初始化存储设备";
-  const imageSize = device.planned_image_size_bytes || device.size_bytes;
-  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，物理容量 ${formatBytes(device.size_bytes)}，预计向车机提供 ${formatBytes(imageSize)}。目标序列号：${device.serial}。该操作会擦除整块设备。`;
+  const advertisedSize = device.planned_image_size_bytes || device.size_bytes;
+  const writableSize = device.planned_writable_bytes || advertisedSize;
+  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，物理容量 ${formatBytes(device.size_bytes)}；TeslaCam 单分区卷显示完整 ${formatBytes(advertisedSize)}，安全可写约 ${formatBytes(writableSize)}，其余空间由受保护保留区留给快照和持续写入。目标序列号：${device.serial}。该操作会擦除整块设备。`;
   $("storage-music-enabled").checked = false;
   $("storage-teslacam-percent").value = "80";
   $("storage-confirm-serial").value = "";
@@ -2148,7 +2244,7 @@ function renderStoragePartitionPreview() {
   $("storage-partition-options").hidden = !enabled;
   if (!pendingStorage || !enabled) return;
   const percent = Number($("storage-teslacam-percent").value || 80);
-  const total = Number(pendingStorage.planned_image_size_bytes || pendingStorage.size_bytes || 0);
+  const total = Number(pendingStorage.planned_writable_bytes || pendingStorage.planned_image_size_bytes || pendingStorage.size_bytes || 0);
   const teslaCam = Math.floor(total * percent / 100);
   $("storage-partition-preview").textContent = `TeslaCam ${percent}%（约 ${formatBytes(teslaCam)}） · MUSIC ${100 - percent}%（约 ${formatBytes(total - teslaCam)}）`;
 }
@@ -2156,6 +2252,70 @@ function renderStoragePartitionPreview() {
 function closeStorageModal() {
   $("storage-modal").hidden = true;
   pendingStorage = null;
+}
+
+async function maybeShowOnboarding() {
+  if (onboardingChecking || readPreference(onboardingPreferenceKey, "false") === "true" || state.mustChangePassword || appView.hidden) return;
+  onboardingChecking = true;
+  const button = $("onboarding-primary");
+  button.disabled = true;
+  button.textContent = "正在检查…";
+  $("onboarding-modal").hidden = false;
+  try {
+    onboardingStorage = state.storage || await request("/api/v1/storage/devices", {loading:false});
+    renderOnboardingStorage(onboardingStorage);
+  } catch (error) {
+    onboardingStorage = null;
+    $("onboarding-storage-status").textContent = "暂不可用";
+    $("onboarding-storage-status").className = "badge error";
+    $("onboarding-storage-detail").textContent = `暂时无法读取存储状态：${error.message}`;
+    button.textContent = "打开存储设置";
+  } finally {
+    onboardingChecking = false;
+    button.disabled = false;
+    window.setTimeout(() => button.focus(), 0);
+  }
+}
+
+function renderOnboardingStorage(storage) {
+  const devices = Array.isArray(storage?.devices) ? storage.devices : [];
+  const initialized = devices.find((device) => device.active || device.initialized);
+  const candidate = devices.find((device) => device.can_resume || device.can_initialize);
+  const status = $("onboarding-storage-status");
+  const detail = $("onboarding-storage-detail");
+  const button = $("onboarding-primary");
+  if (initialized) {
+    status.textContent = "已就绪";
+    status.className = "badge ok";
+    detail.textContent = `${initialized.model || "数据盘"} 已初始化，可以直接查看和管理录像。`;
+    button.textContent = "完成指引";
+    return;
+  }
+  status.textContent = candidate ? "需要初始化" : "等待设备";
+  status.className = "badge error";
+  detail.textContent = candidate
+    ? `已检测到 ${candidate.model || "外接存储设备"}（${formatBytes(candidate.size_bytes)}），请先完成安全初始化。`
+    : "尚未检测到可初始化的数据盘；请插入带稳定序列号的 USB 存储设备或 NVMe 数据盘。";
+  button.textContent = candidate ? "前往初始化存储" : "打开存储设置";
+}
+
+function dismissOnboarding() {
+  writePreference(onboardingPreferenceKey, "true");
+  $("onboarding-modal").hidden = true;
+}
+
+function followOnboardingPrimaryAction() {
+  const devices = Array.isArray(onboardingStorage?.devices) ? onboardingStorage.devices : [];
+  const initialized = devices.some((device) => device.active || device.initialized);
+  if (initialized) {
+    dismissOnboarding();
+    return;
+  }
+  const candidate = devices.find((device) => device.can_resume || device.can_initialize);
+  dismissOnboarding();
+  showPage("settings", true);
+  window.requestAnimationFrame(() => $("storage-settings-section").scrollIntoView({behavior:"smooth", block:"start"}));
+  if (candidate) openStorageModal(candidate);
 }
 
 async function initializeStorageDevice(event) {
@@ -2306,17 +2466,21 @@ function renderStatus(storage) {
   $("video-count").textContent = `${formatNumber(storage.video_count || 0)} 个`;
 
   const outerSpace = storage.snapshot_space || {};
-  const volumeSpace = storage.media_snapshot?.volume_space || {};
+  const liveVolumeSpace = storage.media_snapshot?.volume_space || {};
+  const cachedVolumeSpace = storage.media_volume_space || {};
+  const hasLiveVolumeSpace = Number(liveVolumeSpace.total_bytes || 0) > 0;
+  const volumeSpace = hasLiveVolumeSpace ? liveVolumeSpace : cachedVolumeSpace;
   const hasVolumeSpace = Number(volumeSpace.total_bytes || 0) > 0;
-  const displayedSpace = hasVolumeSpace ? volumeSpace : outerSpace;
-  const freePercent = Number(displayedSpace.free_percent || 0);
-  $("space-value").textContent = formatBytes(displayedSpace.free_bytes || 0);
+  const freePercent = Number(volumeSpace.free_percent || 0);
+  $("space-value").textContent = hasVolumeSpace ? formatBytes(volumeSpace.free_bytes || 0) : "—";
   $("space-progress").style.width = `${Math.max(0, Math.min(100, 100-freePercent))}%`;
   $("space-progress").style.background = freePercent < 10 ? "var(--warning)" : "var(--ok)";
   const outerPercent = Number(outerSpace.free_percent || 0);
+  const sampledAt = storage.media_volume_space_updated_at ? formatDate(storage.media_volume_space_updated_at) : "";
+  const volumeLabel = hasLiveVolumeSpace ? "exFAT" : `exFAT 上次采样${sampledAt ? `于 ${sampledAt}` : ""}`;
   $("space-detail").textContent = hasVolumeSpace
-    ? `exFAT 可用 ${freePercent.toFixed(1)}% · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`
-    : `等待虚拟盘快照 · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`;
+    ? `${volumeLabel} · 可用 ${freePercent.toFixed(1)}% · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`
+    : `正在读取车机虚拟盘空间 · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`;
 
   const snapshot = storage.media_snapshot;
   $("snapshot-state").className = "badge";
@@ -2849,6 +3013,7 @@ async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1
   if (!activeSession) return false;
   const requestID = ++timelinePositionRequestID;
   const token = ++loadToken;
+  showPlayerLoading(token);
   timelinePositionPending = true;
   requestedPosition = Math.max(0, Math.min(Number(position), Number(activeSession.duration_seconds)));
   activeStreamTimelineStart = null;
@@ -3381,12 +3546,12 @@ function renderPlaybackTelemetry() {
   }
   const samples = Array.isArray(activeTelemetry.samples) ? activeTelemetry.samples : [];
   const currentMS = Math.max(0, Math.round(sourceSeconds*1000));
-  let selected = samples[0];
+  let selected = null;
   for (const sample of samples) {
     if (Number(sample.offset_ms || 0) > currentMS) break;
     selected = sample;
   }
-  renderPlaybackTelemetrySample(selected?.metadata, selected?.metadata ? "ready" : "unavailable", "该录像没有可显示的 Tesla SEI 字段");
+  renderPlaybackTelemetrySample(selected?.metadata, selected?.metadata ? "ready" : "unavailable", "当前画面尚无 Tesla SEI 信息");
 }
 
 function renderPlaybackTelemetrySample(metadata, state, message) {
@@ -3500,6 +3665,8 @@ async function setDisplayMode(display) {
   const autoplay = !sessionVideo.paused;
   pauseCompositeTracks();
   sessionVideo.pause();
+  // 不同合成布局的宽高比不同，切换前必须清除上一布局留下的内联尺寸和全屏舞台变量。
+  resetCompositeFrameGeometry();
   activeDisplay = display;
   resetPlaybackFallbackState();
   if (isCompositeDisplay(display)) writePreference("teslabox-player-layout", display);
@@ -4064,6 +4231,8 @@ function fitCompositeFrame() {
 
 function handlePlayerViewportChange() {
   if (playerModal.hidden) return;
+  updatePlayerFullscreenDensity();
+  updateFullscreenButton();
   window.requestAnimationFrame(() => {
     if (isPlayerFullscreen()) fitFullscreenCompositeGrid();
     else fitCompositeFrame();
@@ -4071,17 +4240,34 @@ function handlePlayerViewportChange() {
 }
 
 function fitFullscreenCompositeGrid() {
-  if (!activeCompositeAspect || !isCompositeDisplay(activeDisplay)) return;
-  const availableWidth = mainVideoFrame.clientWidth || window.innerWidth;
-  const availableHeight = mainVideoFrame.clientHeight || window.innerHeight;
-  const width = Math.min(availableWidth, availableHeight*activeCompositeAspect);
-  const height = width/activeCompositeAspect;
-  const content = usesServerComposite() ? sessionVideo : compositeGrid;
+  if (!isPlayerFullscreen()) return;
+  const telemetryHeight = $("playback-telemetry").getBoundingClientRect().height;
+  const controlsHeight = document.querySelector(".unified-controls").getBoundingClientRect().height;
+  const availableWidth = sessionPlayerView.clientWidth || window.innerWidth;
+  const availableHeight = Math.max(120,(sessionPlayerView.clientHeight || window.innerHeight)-telemetryHeight-controlsHeight);
+  const aspect = fullscreenPlaybackAspect();
+  const width = Math.min(availableWidth,availableHeight*aspect);
+  const height = width/aspect;
+  const minimumChromeWidth = sessionPlayerView.dataset.fullscreenDensity === "compact" ? 372 : 520;
+  const stageWidth = Math.min(availableWidth,Math.max(width,minimumChromeWidth));
+  sessionPlayerView.style.setProperty("--fullscreen-stage-width",`${Math.floor(stageWidth)}px`);
+  sessionPlayerView.style.setProperty("--fullscreen-video-width",`${Math.floor(width)}px`);
+  sessionPlayerView.style.setProperty("--fullscreen-video-height",`${Math.floor(height)}px`);
+  const content = isCompositeDisplay(activeDisplay) && !usesServerComposite() ? compositeGrid : sessionVideo;
   content.style.width = `${Math.floor(width)}px`;
   content.style.height = `${Math.floor(height)}px`;
 }
 
+function fullscreenPlaybackAspect() {
+  if (isCompositeDisplay(activeDisplay) && activeCompositeAspect > 0) return activeCompositeAspect;
+  if (sessionVideo.videoWidth > 0 && sessionVideo.videoHeight > 0) return sessionVideo.videoWidth/sessionVideo.videoHeight;
+  return isCompositeDisplay(activeDisplay) ? (724/469)*compositeLayoutFactor(activeDisplay) : 4/3;
+}
+
 function resetFullscreenCompositeGrid() {
+  sessionPlayerView.style.removeProperty("--fullscreen-stage-width");
+  sessionPlayerView.style.removeProperty("--fullscreen-video-width");
+  sessionPlayerView.style.removeProperty("--fullscreen-video-height");
   compositeGrid.style.removeProperty("width");
   compositeGrid.style.removeProperty("height");
   sessionVideo.style.removeProperty("width");
@@ -4089,14 +4275,15 @@ function resetFullscreenCompositeGrid() {
 }
 
 function isPlayerFullscreen() {
-  if (document.fullscreenElement === mainVideoFrame || document.webkitFullscreenElement === mainVideoFrame) return true;
+  if (sessionPlayerView.classList.contains("player-fullscreen-fallback")) return true;
+  const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+  if (fullscreenElement && (fullscreenElement === sessionPlayerView || sessionPlayerView.contains(fullscreenElement))) return true;
   try {
-    if (mainVideoFrame.matches(":fullscreen") || mainVideoFrame.matches(":-webkit-full-screen")) return true;
+    if (sessionPlayerView.matches(":fullscreen") || sessionPlayerView.matches(":-webkit-full-screen")) return true;
   } catch (_) {
-    // 某些浏览器不识别带前缀的全屏伪类，继续使用尺寸兜底判断。
+    // 不支持全屏伪类的浏览器仍可通过 fullscreenElement 或页面级回退类判断。
   }
-  const rect = mainVideoFrame.getBoundingClientRect();
-  return rect.width >= window.innerWidth-2 && rect.height >= window.innerHeight-2;
+  return false;
 }
 
 function resetCompositeFrameGeometry() {
@@ -4164,10 +4351,54 @@ function hasBufferedTime(video, time) {
   return false;
 }
 
-function enterFullscreen() {
-  const frame = document.querySelector(".main-video-frame");
-  if (frame.requestFullscreen) frame.requestFullscreen().then(handlePlayerViewportChange).catch(() => {});
-  else if (sessionVideo.webkitEnterFullscreen) sessionVideo.webkitEnterFullscreen();
+async function enterFullscreen() {
+  if (isPlayerFullscreen()) {
+    await exitPlayerFullscreen();
+    return;
+  }
+  try {
+    if (sessionPlayerView.requestFullscreen) await sessionPlayerView.requestFullscreen();
+    else if (sessionPlayerView.webkitRequestFullscreen) sessionPlayerView.webkitRequestFullscreen();
+    else activatePlayerFullscreenFallback();
+  } catch (_) {
+    activatePlayerFullscreenFallback();
+  }
+  handlePlayerViewportChange();
+}
+
+async function exitPlayerFullscreen() {
+  sessionPlayerView.classList.remove("player-fullscreen-fallback");
+  document.documentElement.classList.remove("player-fullscreen-active");
+  try {
+    if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
+    else if (document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen();
+  } catch (_) {
+    // 全屏状态可能已由浏览器退出，继续恢复播放器布局。
+  }
+  handlePlayerViewportChange();
+}
+
+function activatePlayerFullscreenFallback() {
+  sessionPlayerView.classList.add("player-fullscreen-fallback");
+  document.documentElement.classList.add("player-fullscreen-active");
+  updatePlayerFullscreenDensity();
+  updateFullscreenButton();
+}
+
+function updatePlayerFullscreenDensity() {
+  if (!isPlayerFullscreen()) {
+    delete sessionPlayerView.dataset.fullscreenDensity;
+    return;
+  }
+  const shortEdge = Math.min(window.innerWidth,window.innerHeight);
+  sessionPlayerView.dataset.fullscreenDensity = shortEdge <= 620 ? "compact" : shortEdge <= 900 ? "medium" : "large";
+}
+
+function updateFullscreenButton() {
+  const button = $("fullscreen-button");
+  const fullscreen = isPlayerFullscreen();
+  button.textContent = fullscreen ? "退出全屏" : "全屏";
+  button.setAttribute("aria-label", fullscreen ? "退出全屏播放" : "进入全屏播放");
 }
 
 function waitForMetadata(video, timeout = 4000) {
@@ -4193,7 +4424,10 @@ function seekVideoElement(video, requestedTime, token, timeout = 4000) {
   const target = Number.isFinite(video.duration)
     ? Math.min(Math.max(0, requestedTime), Math.max(0, video.duration-.05))
     : Math.max(0, requestedTime);
-  if (!video.seeking && Math.abs(video.currentTime-target) < .05) return Promise.resolve(!video.error);
+  if (!video.seeking && Math.abs(video.currentTime-target) < .05) {
+    if (video === sessionVideo) finishPlayerLoadingFromMedia();
+    return Promise.resolve(!video.error);
+  }
   return new Promise((resolve) => {
     let settled = false;
     let timer = 0;
@@ -4205,7 +4439,9 @@ function seekVideoElement(video, requestedTime, token, timeout = 4000) {
       video.removeEventListener("error", done);
       video.removeEventListener("emptied", done);
       const positioned = !video.seeking && Math.abs(video.currentTime-target) < .25;
-      resolve(token === loadToken && !video.error && positioned);
+      const ready = token === loadToken && !video.error && positioned;
+      if (ready && video === sessionVideo) finishPlayerLoadingFromMedia();
+      resolve(ready);
     };
     video.addEventListener("seeked", done);
     video.addEventListener("error", done);
@@ -4220,14 +4456,38 @@ function seekVideoElement(video, requestedTime, token, timeout = 4000) {
 }
 
 function showPlayerMessage(message) {
+  hidePlayerLoading();
   $("player-message").textContent = message;
   $("player-message").hidden = false;
 }
 
 function hidePlayerMessage() { $("player-message").hidden = true; }
 
+function showPlayerLoading(token) {
+  const loading = $("player-loading");
+  const display = activeDisplay === "single"
+    ? cameraLabel(activeCamera)
+    : (compositeLayouts[activeDisplay]?.label || "多路合成");
+  loading.dataset.token = String(token);
+  $("player-loading-message").textContent = `正在加载${display} · ${qualityLabel(effectivePlaybackQuality)}…`;
+  loading.hidden = false;
+}
+
+function hidePlayerLoading(token = null) {
+  const loading = $("player-loading");
+  if (token !== null && loading.dataset.token !== String(token)) return;
+  loading.hidden = true;
+  delete loading.dataset.token;
+}
+
+function finishPlayerLoadingFromMedia() {
+  if (sessionVideo.error || sessionVideo.readyState < 2) return;
+  hidePlayerLoading(loadToken);
+}
+
 function closePlayerMedia() {
   loadToken++;
+  hidePlayerLoading();
   telemetryAbortController?.abort();
   telemetryAbortController = null;
   clearTimeout(telemetryPrefetchTimer);
@@ -4327,6 +4587,7 @@ function canAutomaticallyFallback() {
 }
 
 function handlePlaybackError() {
+  hidePlayerLoading();
   // 设置新媒体源期间的错误由对应加载任务判定，避免旧源的迟到事件触发错误降级。
   if (!sessionVideo.getAttribute("src") || sessionVideo.dataset.loadingToken) return;
   reportPlaybackDiagnostic("media_error", "浏览器触发视频元素错误");
@@ -4551,6 +4812,7 @@ function finishSessionVideoLoad(token) {
 
 function closePlayer() {
   closeExportModal();
+  if (isPlayerFullscreen()) void exitPlayerFullscreen();
   closePlayerMedia();
   playerModal.hidden = true;
   document.body.style.overflow = "";
@@ -4948,6 +5210,12 @@ function formatDuration(value) {
   const seconds = total%60;
   if (hours > 0) return `${String(hours).padStart(2,"0")}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`;
   return `${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`;
+}
+
+function formatDurationMS(value) {
+  const milliseconds = Math.max(0, Number(value || 0));
+  if (milliseconds >= 1000) return `${(milliseconds/1000).toFixed(2)} 秒`;
+  return `${Math.round(milliseconds)} 毫秒`;
 }
 
 function formatBytes(value) {

@@ -1256,10 +1256,16 @@ func TestManagerAutomaticSnapshotUsesFailureBackoff(t *testing.T) {
 	}
 }
 
-func TestManagerAutomaticSnapshotUsesIdleAndActiveCadence(t *testing.T) {
+func TestManagerAutomaticSnapshotReleasesIdleViewAndKeepsIndex(t *testing.T) {
 	t.Parallel()
 	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
-	snapshotter := &fakeSnapshotter{}
+	volumeSpace := mediasnapshot.VolumeSpace{TotalBytes: 128_000_000_000, FreeBytes: 84_000_000_000, FreePercent: 65.625}
+	snapshotter := &fakeSnapshotter{views: []mediasnapshot.View{
+		{ID: "snapshot-1", MountPath: "/run/teslabox/snapshots/snapshot-1", VolumeSpace: volumeSpace},
+		{ID: "snapshot-1", MountPath: "/run/teslabox/snapshots/snapshot-1", VolumeSpace: volumeSpace},
+		{ID: "snapshot-1", MountPath: "/run/teslabox/snapshots/snapshot-1", VolumeSpace: volumeSpace},
+	}}
+	videos := []teslacam.Video{{ID: "video-1"}}
 	manager := NewManager(
 		config.Config{
 			ScanInterval:         30 * time.Second,
@@ -1271,7 +1277,7 @@ func TestManagerAutomaticSnapshotUsesIdleAndActiveCadence(t *testing.T) {
 		fakeDetector{device: device},
 		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
 		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
-		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{videos: videos},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	now := time.Date(2026, 7, 23, 17, 0, 0, 0, time.UTC)
@@ -1290,7 +1296,7 @@ func TestManagerAutomaticSnapshotUsesIdleAndActiveCadence(t *testing.T) {
 	if snapshotter.createCalls != 1 {
 		t.Fatalf("media activation create calls = %d", snapshotter.createCalls)
 	}
-	now = now.Add(29 * time.Second)
+	now = now.Add(59 * time.Second)
 	if err := manager.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -1306,12 +1312,133 @@ func TestManagerAutomaticSnapshotUsesIdleAndActiveCadence(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	manager.snapshotWithTimeout(t.Context())
 	if snapshotter.createCalls != 2 {
-		t.Fatalf("idle create calls before interval = %d", snapshotter.createCalls)
+		t.Fatalf("idle create calls = %d, want 2", snapshotter.createCalls)
+	}
+	state := manager.Snapshot()
+	if state.MediaSnapshot != nil || state.Phase != PhaseGadgetActive {
+		t.Fatalf("idle state = phase %s snapshot %#v", state.Phase, state.MediaSnapshot)
+	}
+	if state.VideoCount != 1 || len(state.Videos) != 1 || state.Videos[0].ID != "video-1" {
+		t.Fatalf("idle media index = count %d videos %#v", state.VideoCount, state.Videos)
+	}
+	if state.MediaVolumeSpace != volumeSpace || state.MediaVolumeSpaceAt == nil {
+		t.Fatalf("idle media volume space = %#v at %#v", state.MediaVolumeSpace, state.MediaVolumeSpaceAt)
+	}
+	if len(snapshotter.removed) != 1 {
+		t.Fatalf("idle removed snapshots = %d, want 1", len(snapshotter.removed))
 	}
 	now = now.Add(3 * time.Minute)
 	manager.snapshotWithTimeout(t.Context())
-	if snapshotter.createCalls != 3 {
-		t.Fatalf("idle create calls at interval = %d", snapshotter.createCalls)
+	if snapshotter.createCalls != 2 {
+		t.Fatalf("inactive create calls = %d, want 2", snapshotter.createCalls)
+	}
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotter.createCalls != 3 || manager.Snapshot().MediaSnapshot == nil {
+		t.Fatalf("reactivated snapshot = calls %d state %#v", snapshotter.createCalls, manager.Snapshot().MediaSnapshot)
+	}
+}
+
+func TestManagerIdleSnapshotWaitsForLeaseRelease(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	snapshotter := &fakeSnapshotter{}
+	manager := NewManager(
+		config.Config{ScanInterval: time.Minute, SnapshotActiveWindow: 2 * time.Minute, SnapshotTimeout: time.Second, OperationTimeout: time.Second},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, release := manager.AcquireMediaSnapshot()
+	now = now.Add(3 * time.Minute)
+	manager.snapshotWithTimeout(t.Context())
+	if manager.Snapshot().MediaSnapshot == nil || len(snapshotter.removed) != 0 {
+		t.Fatalf("leased idle snapshot was released: state %#v removed %#v", manager.Snapshot().MediaSnapshot, snapshotter.removed)
+	}
+	release()
+	manager.cleanupWithTimeout(t.Context())
+	if manager.Snapshot().MediaSnapshot != nil || len(snapshotter.removed) != 1 {
+		t.Fatalf("released idle snapshot was retained: state %#v removed %#v", manager.Snapshot().MediaSnapshot, snapshotter.removed)
+	}
+}
+
+func TestManagerIdleSnapshotRemovalFailureKeepsCleanupResponsibility(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	snapshotter := &fakeSnapshotter{removeErr: errors.New("temporary remove failure")}
+	manager := NewManager(
+		config.Config{ScanInterval: time.Minute, SnapshotActiveWindow: time.Minute, SnapshotTimeout: time.Second},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	manager.snapshotWithTimeout(t.Context())
+	if manager.Snapshot().MediaSnapshot != nil || len(manager.retired) != 1 {
+		t.Fatalf("failed removal state = snapshot %#v retired %#v", manager.Snapshot().MediaSnapshot, manager.retired)
+	}
+
+	snapshotter.removeErr = nil
+	manager.snapshotWithTimeout(t.Context())
+	if len(manager.retired) != 0 {
+		t.Fatalf("retired snapshots after retry = %#v", manager.retired)
+	}
+}
+
+func TestManagerAutomaticSnapshotDoesNotRotateLeasedView(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	snapshotter := &fakeSnapshotter{}
+	manager := NewManager(
+		config.Config{
+			ScanInterval: time.Minute, SnapshotIdleInterval: 5 * time.Minute,
+			SnapshotActiveWindow: 2 * time.Minute, SnapshotTimeout: time.Second,
+		},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, &fakeVideoScanner{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, release := manager.AcquireMediaSnapshot()
+	now = now.Add(time.Minute)
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 1 {
+		t.Fatalf("leased automatic create calls = %d, want 1", snapshotter.createCalls)
+	}
+	release()
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 2 {
+		t.Fatalf("released automatic create calls = %d, want 2", snapshotter.createCalls)
 	}
 }
 

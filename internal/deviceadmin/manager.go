@@ -418,7 +418,9 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 			continue
 		}
 		if profile.Active {
-			status.CurrentConnection = profile.Name
+			// NetworkManager 的连接配置名称可以由程序或用户任意命名，不能当作实际 SSID 展示。
+			// 例如 TeslaBox 管理的配置名可能是 TeslaBox-Upstream，但真实接入点仍是家庭 WiFi。
+			status.CurrentConnection = profile.SSID
 		}
 		status.SavedNetworks = append(status.SavedNetworks, SavedNetwork{
 			Name: profile.Name, UUID: profile.UUID, SSID: profile.SSID,

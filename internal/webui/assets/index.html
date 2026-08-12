@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
-  <link rel="stylesheet" href="/app.css?v=20260808-7">
-  <script src="/app.js?v=20260808-5" defer></script>
+  <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=20260812-9">
+  <script src="/app.js?v=20260812-7" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
     <section class="login-card" aria-labelledby="login-title">
-      <p class="eyebrow">TESLABOX</p>
+      <div class="login-brand">
+        <img src="/teslabox-logo.svg?v=20260811-2" alt="" width="52" height="52">
+        <div><strong>TeslaBox</strong><small>车载存储中心</small></div>
+      </div>
       <h1 id="login-title">连接你的行车记录</h1>
       <p class="muted">管理页面仅在本地网络中工作。请输入设备管理密码继续。</p>
       <form id="login-form" class="login-form">
@@ -26,7 +30,7 @@
   <main id="app-view" hidden>
     <header class="topbar">
       <div class="brand">
-        <button id="nav-toggle" class="brand-mark" type="button" aria-label="打开主导航" aria-expanded="false">T</button>
+        <button id="nav-toggle" class="brand-mark" type="button" aria-label="打开主导航" aria-expanded="false"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></button>
         <a class="brand-copy" href="/" data-page-link="dashboard"><strong>TeslaBox</strong><small>车载存储中心</small></a>
       </div>
       <div class="top-actions">
@@ -57,7 +61,7 @@
 
     <div id="nav-backdrop" class="nav-backdrop" hidden></div>
     <aside id="nav-drawer" class="nav-drawer" aria-label="主导航" hidden>
-      <div class="drawer-head"><span class="brand-mark static">T</span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
+      <div class="drawer-head"><span class="brand-mark static"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
       <nav class="drawer-nav">
         <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
         <button type="button" data-page-link="media"><span>媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
@@ -258,13 +262,18 @@
         </form>
       </section>
 
-      <section class="settings-section" aria-labelledby="storage-settings-title">
+      <section id="storage-settings-section" class="settings-section" aria-labelledby="storage-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-settings-title">外接存储</h2></div><span id="storage-status" class="badge">读取中</span></div>
         <div class="settings-warning">初始化会擦除目标整盘。系统会列出具有稳定序列号、未被系统使用的 USB 存储设备和 NVMe 数据盘；TF 系统盘、已挂载盘、swap 盘和容量不足的盘不会列出。</div>
         <article class="settings-card">
           <div class="settings-card-head"><div><h3>存储设备</h3><p>已完成初始化的设备会同时登记在 TF 系统盘和数据盘内；插拔后由状态机自动解绑或恢复车机存储。</p></div><button id="storage-refresh" class="secondary compact" type="button">扫描设备</button></div>
           <div id="storage-device-list" class="storage-device-list"><p class="empty-state">正在读取…</p></div>
         </article>
+        <article class="settings-card power-card">
+          <div><h3>存储健康与兼容性</h3><p id="storage-benchmark-detail">性能体检会在首次初始化的空数据盘上模拟六路分钟文件写入。</p><p id="storage-fragmentation-detail">碎片诊断按需读取外层 XFS extent；日常打开设置页不会扫描整块镜像。</p></div>
+          <div class="power-actions"><button id="storage-fragmentation-check" class="secondary" type="button">检查碎片</button><button id="storage-capacity-migrate" class="secondary" type="button">优化保留空间</button><button id="storage-defragment" class="danger-button" type="button">离线整理</button></div>
+        </article>
+        <div class="settings-warning">离线整理必须先物理拔掉 OTG，并确保没有录像播放或导出。整理结束后 Gadget 会继续保持暂停，需冷启动后才能重新连接车机。</div>
       </section>
 
       <section class="settings-section" aria-labelledby="maintenance-settings-title">
@@ -437,6 +446,21 @@
     </form>
   </section>
 
+  <section id="onboarding-modal" class="action-modal onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" hidden>
+    <div class="action-modal-backdrop"></div>
+    <div class="action-modal-card onboarding-card">
+      <div class="onboarding-heading"><div><p class="eyebrow">FIRST USE</p><h2 id="onboarding-title">欢迎使用 TeslaBox</h2></div><span>首次使用指引</span></div>
+      <p class="onboarding-intro">按下面顺序完成准备，可以避免存储未初始化、热点不可用或车机无法识别 USB。</p>
+      <ol class="onboarding-steps">
+        <li class="onboarding-step onboarding-step-primary"><i>1</i><div><strong>初始化外接存储</strong><p id="onboarding-storage-detail">正在检查存储设备…</p></div><span id="onboarding-storage-status" class="badge">检查中</span></li>
+        <li class="onboarding-step"><i>2</i><div><strong>确认 WiFi 与 AP 热点</strong><p>可在设置中心连接上游 WiFi，并按无线网卡能力选择是否开启 TeslaBox 热点。</p></div></li>
+        <li class="onboarding-step"><i>3</i><div><strong>连接车机 USB</strong><p>ROCK 3A 请先插好 OTG 线再冷启动；运行中不要强制反复绑定 Gadget。</p></div></li>
+      </ol>
+      <p class="onboarding-note">初始化会擦除所选整块数据盘，进入下一步后仍需核对序列号并再次确认，不会在此窗口直接执行。</p>
+      <div class="modal-actions onboarding-actions"><button id="onboarding-skip" class="ghost" type="button">跳过指引</button><button id="onboarding-primary" class="primary" type="button">正在检查…</button></div>
+    </div>
+  </section>
+
   <section id="player-modal" class="player-modal" role="dialog" aria-modal="true" aria-labelledby="player-title" hidden>
     <div class="player-backdrop" data-close-player></div>
     <div class="player-panel">
@@ -488,7 +512,7 @@
             <span id="playback-sei" class="telemetry-message">正在读取 Tesla SEI 信息…</span>
           </div>
         </div>
-        <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><p id="player-message" class="player-message" hidden></p></div>
+        <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><div id="player-loading" class="player-loading" role="status" aria-live="polite" aria-atomic="true" hidden><i class="loading-spinner large" aria-hidden="true"></i><span id="player-loading-message">正在加载视频…</span></div><p id="player-message" class="player-message" hidden></p></div>
         <div id="camera-switcher" class="camera-switcher" aria-label="摄像头视角"></div>
         <div class="unified-controls">
           <button id="play-toggle" class="primary play-toggle" type="button" aria-label="播放">▶</button>

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wen-ryon/teslabox/internal/fragmentation"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 )
 
@@ -18,6 +19,15 @@ type fakeStorageAdmin struct {
 }
 
 func (a *fakeStorageAdmin) Status(context.Context) (storageadmin.Status, error) { return a.status, nil }
+func (a *fakeStorageAdmin) Fragmentation(context.Context) (fragmentation.Report, error) {
+	return fragmentation.Report{ExtentCount: 7598, Severity: fragmentation.SeverityCritical}, nil
+}
+func (a *fakeStorageAdmin) Defragment(context.Context, storageadmin.DefragmentRequest) (storageadmin.DefragmentResult, error) {
+	return storageadmin.DefragmentResult{Changed: true, FileSystemChecked: true, RequiresColdBoot: true}, nil
+}
+func (a *fakeStorageAdmin) MigrateAdvertisedCapacity(context.Context, storageadmin.CapacityMigrationRequest) (storageadmin.CapacityMigrationResult, error) {
+	return storageadmin.CapacityMigrationResult{Changed: true, FileSystemChecked: true, AdvertisedBytes: 128_000_000_000}, nil
+}
 func (a *fakeStorageAdmin) Initialize(_ context.Context, request storageadmin.InitializeRequest) (storageadmin.Candidate, error) {
 	a.request = request
 	return storageadmin.Candidate{StablePath: request.StablePath, Initialized: true}, nil
@@ -33,6 +43,24 @@ func TestStorageAdminRoutes(t *testing.T) {
 	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/v1/storage/devices", nil))
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"state":"uninitialized"`) {
 		t.Fatalf("status = %d, body = %s", status.Code, status.Body.String())
+	}
+
+	fragmentationStatus := httptest.NewRecorder()
+	handler.ServeHTTP(fragmentationStatus, httptest.NewRequest(http.MethodGet, "/api/v1/storage/fragmentation", nil))
+	if fragmentationStatus.Code != http.StatusOK || !strings.Contains(fragmentationStatus.Body.String(), `"extent_count":7598`) {
+		t.Fatalf("fragmentation status = %d, body = %s", fragmentationStatus.Code, fragmentationStatus.Body.String())
+	}
+
+	defragment := httptest.NewRecorder()
+	handler.ServeHTTP(defragment, httptest.NewRequest(http.MethodPost, "/api/v1/storage/defragment", strings.NewReader(`{"confirm_otg_disconnected":true}`)))
+	if defragment.Code != http.StatusOK || !strings.Contains(defragment.Body.String(), `"file_system_checked":true`) {
+		t.Fatalf("defragment status = %d, body = %s", defragment.Code, defragment.Body.String())
+	}
+
+	migrate := httptest.NewRecorder()
+	handler.ServeHTTP(migrate, httptest.NewRequest(http.MethodPost, "/api/v1/storage/migrate-capacity", strings.NewReader(`{"confirm_otg_disconnected":true}`)))
+	if migrate.Code != http.StatusOK || !strings.Contains(migrate.Body.String(), `"advertised_bytes":128000000000`) {
+		t.Fatalf("migrate status = %d, body = %s", migrate.Code, migrate.Body.String())
 	}
 
 	initialize := httptest.NewRecorder()

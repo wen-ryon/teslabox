@@ -83,6 +83,29 @@ func TestWiFiStatusSeparatesAPAndSavedNetworks(t *testing.T) {
 	}
 }
 
+func TestWiFiStatusReportsActiveSSIDInsteadOfProfileName(t *testing.T) {
+	t.Parallel()
+	const upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-Upstream:" + upstreamUUID + ":802-11-wireless:wlan0:yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID: "infrastructure\nExampleWiFi-5G\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                  "wlan0:wifi:connected\n",
+		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": "*:ExampleWiFi-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:161:WPA2\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	status, err := manager.WiFiStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.CurrentConnection != "ExampleWiFi-5G" {
+		t.Fatalf("current connection = %q, want active SSID", status.CurrentConnection)
+	}
+	if len(status.SavedNetworks) != 1 || status.SavedNetworks[0].Name != "TeslaBox-Upstream" || !status.SavedNetworks[0].Active {
+		t.Fatalf("saved networks = %#v", status.SavedNetworks)
+	}
+}
+
 func TestAPSettingsIncludesInterfaceDetails(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{responses: map[string]string{

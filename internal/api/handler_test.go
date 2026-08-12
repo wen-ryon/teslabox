@@ -247,15 +247,27 @@ func TestGroupVideoSessionsCompressesSavedClipSeams(t *testing.T) {
 	}
 }
 
-func TestGroupVideoSessionsKeepsGappedSavedClipsSeparate(t *testing.T) {
+func TestGroupVideoSessionsKeepsOneSavedEventDirectoryAsOneRecording(t *testing.T) {
 	t.Parallel()
-	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
+	base := time.Date(2026, 8, 11, 23, 24, 54, 0, time.Local)
 	groups := []videoGroup{
-		{ID: "first", ClipType: "saved", Event: "event-1", RecordedAt: base, EndAt: base.Add(time.Minute)},
-		{ID: "after-gap", ClipType: "saved", Event: "event-1", RecordedAt: base.Add(3 * time.Minute), EndAt: base.Add(4 * time.Minute)},
+		{ID: "first", ClipType: "saved", Event: "2026-08-11_23-35-07", RecordedAt: base, EndAt: base.Add(2 * time.Minute), Duration: 120},
+		{ID: "second", ClipType: "saved", Event: "2026-08-11_23-35-07", RecordedAt: base.Add(2*time.Minute + 44*time.Second), EndAt: base.Add(7*time.Minute + 2*time.Second), Duration: 258},
+		{ID: "third", ClipType: "saved", Event: "2026-08-11_23-35-07", RecordedAt: base.Add(7*time.Minute + 48*time.Second), EndAt: base.Add(10*time.Minute + 12*time.Second), Duration: 189},
+		{ID: "other-event", ClipType: "saved", Event: "2026-08-12_00-00-00", RecordedAt: base.Add(time.Hour), EndAt: base.Add(time.Hour + time.Minute), Duration: 60},
 	}
-	if sessions := groupVideoSessions(groups, 5*time.Second); len(sessions) != 2 {
+	sessions := groupVideoSessions(groups, 5*time.Second)
+	if len(sessions) != 2 {
 		t.Fatalf("len(sessions) = %d, want 2: %#v", len(sessions), sessions)
+	}
+	var saved videoSession
+	for _, session := range sessions {
+		if session.Event == "2026-08-11_23-35-07" {
+			saved = session
+		}
+	}
+	if saved.SegmentCount != 3 || saved.StartAt != base || saved.EndAt != base.Add(10*time.Minute+12*time.Second) || saved.Duration != 567 {
+		t.Fatalf("saved session = %#v", saved)
 	}
 }
 
