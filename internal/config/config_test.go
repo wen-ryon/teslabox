@@ -15,6 +15,7 @@ func TestLoad(t *testing.T) {
 	t.Setenv("TESLABOX_SNAPSHOT_ACTIVE_WINDOW", "3m")
 	t.Setenv("TESLABOX_MIN_FREE_BYTES", "1073741824")
 	t.Setenv("TESLABOX_MIN_FREE_PERCENT", "7")
+	t.Setenv("TESLABOX_INIT_FREE_HEADROOM_BYTES", "2147483648")
 
 	cfg, err := Load()
 	if err != nil {
@@ -37,6 +38,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.MinFreeBytes != 1073741824 || cfg.MinFreePercent != 7 {
 		t.Errorf("free-space thresholds = %d bytes, %d percent", cfg.MinFreeBytes, cfg.MinFreePercent)
+	}
+	if cfg.InitializationHeadroomBytes != 2147483648 {
+		t.Errorf("InitializationHeadroomBytes = %d", cfg.InitializationHeadroomBytes)
 	}
 	if cfg.FFmpegPath != "/opt/teslabox/media/bin/ffmpeg" || cfg.FFprobePath != "/opt/teslabox/media/bin/ffprobe" || cfg.MediaProbeTimeout != 10*time.Second {
 		t.Errorf("media config = %q, %q, %s", cfg.FFmpegPath, cfg.FFprobePath, cfg.MediaProbeTimeout)
@@ -120,6 +124,14 @@ func TestLoadRejectsInvalidFreeSpaceThreshold(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsOverflowingSnapshotPolicy(t *testing.T) {
+	t.Setenv("TESLABOX_MIN_FREE_BYTES", "18446744073709551615")
+	t.Setenv("TESLABOX_INIT_FREE_HEADROOM_BYTES", "1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "策略配置无效") {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
 func TestLoadRejectsInvalidNetworkInterfaces(t *testing.T) {
 	t.Setenv("TESLABOX_WIFI_INTERFACE", "wlan0;reboot")
 	if _, err := Load(); err == nil {
@@ -129,49 +141,52 @@ func TestLoadRejectsInvalidNetworkInterfaces(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	valid := Config{
-		HTTPAddr:             ":80",
-		DataLabel:            "TESLABOX",
-		DataMountPath:        "/var/lib/teslabox",
-		ImagePath:            "images/teslacam.img",
-		SnapshotPath:         "snapshots",
-		SnapshotMountPath:    "/run/teslabox/snapshots",
-		IndexPath:            "index",
-		StatePath:            "state",
-		ExportPath:           "exports",
-		ExportStatePath:      "/var/lib/teslabox-system/export-state.json",
-		RegistryPath:         "/var/lib/teslabox-system/storage-registry.json",
-		WebAuthStatePath:     "/var/lib/teslabox-system/web-auth.json",
-		UpdateChannel:        "stable",
-		UpdateBoard:          "radxa-rock-3a",
-		UpdateDownloadDir:    "/var/lib/teslabox-system/updates",
-		UpdateRequestPath:    "/var/lib/teslabox-system/update-request.json",
-		UpdateResultPath:     "/var/lib/teslabox-system/update-result.json",
-		UpdateMaxBytes:       128 * 1024 * 1024,
-		GadgetPauseStatePath: "/var/lib/teslabox-system/gadget-paused",
-		BootIDPath:           "/proc/sys/kernel/random/boot_id",
-		BootUptimePath:       "/proc/uptime",
-		ConfigFSPath:         "/sys/kernel/config/usb_gadget",
-		UDCPath:              "/sys/class/udc",
-		GadgetName:           "teslabox",
-		GadgetSerial:         "TESLABOX-TEST",
-		ReleaseGadget:        "radxa-otgutils",
-		APInterface:          "ap0",
-		ScanInterval:         time.Second,
-		SnapshotIdleInterval: time.Minute,
-		SnapshotActiveWindow: time.Minute,
-		PollInterval:         time.Second,
-		OperationTimeout:     time.Second,
-		SnapshotTimeout:      time.Minute,
-		SnapshotRetryMax:     10 * time.Minute,
-		MediaProbeTimeout:    10 * time.Second,
-		ExportMaxDuration:    30 * time.Minute,
-		ExportQueueSize:      4,
-		ShutdownTimeout:      time.Second,
-		MinFreeBytes:         8 * 1024 * 1024 * 1024,
-		MinFreePercent:       5,
-		WebSessionTTL:        7 * 24 * time.Hour,
-		FFmpegPath:           "/opt/teslabox/media/bin/ffmpeg",
-		FFprobePath:          "/opt/teslabox/media/bin/ffprobe",
+		HTTPAddr:                    ":80",
+		DataLabel:                   "TESLABOX",
+		DataMountPath:               "/var/lib/teslabox",
+		ImagePath:                   "images/teslacam.img",
+		SnapshotPath:                "snapshots",
+		SnapshotMountPath:           "/run/teslabox/snapshots",
+		IndexPath:                   "index",
+		StatePath:                   "state",
+		ExportPath:                  "exports",
+		ExportStatePath:             "/var/lib/teslabox-system/export-state.json",
+		RegistryPath:                "/var/lib/teslabox-system/storage-registry.json",
+		WebAuthStatePath:            "/var/lib/teslabox-system/web-auth.json",
+		UpdateChannel:               "stable",
+		UpdateBoard:                 "radxa-rock-3a",
+		UpdateDownloadDir:           "/var/lib/teslabox-system/updates",
+		UpdateRequestPath:           "/var/lib/teslabox-system/update-request.json",
+		UpdateResultPath:            "/var/lib/teslabox-system/update-result.json",
+		UpdateMaxBytes:              128 * 1024 * 1024,
+		GadgetPauseStatePath:        "/var/lib/teslabox-system/gadget-paused",
+		MaintenanceLockPath:         "/run/teslabox/storage-maintenance.lock",
+		MaintenanceOperationPath:    "/var/lib/teslabox-system/storage-maintenance.json",
+		BootIDPath:                  "/proc/sys/kernel/random/boot_id",
+		BootUptimePath:              "/proc/uptime",
+		ConfigFSPath:                "/sys/kernel/config/usb_gadget",
+		UDCPath:                     "/sys/class/udc",
+		GadgetName:                  "teslabox",
+		GadgetSerial:                "TESLABOX-TEST",
+		ReleaseGadget:               "radxa-otgutils",
+		APInterface:                 "ap0",
+		ScanInterval:                time.Second,
+		SnapshotIdleInterval:        time.Minute,
+		SnapshotActiveWindow:        time.Minute,
+		PollInterval:                time.Second,
+		OperationTimeout:            time.Second,
+		SnapshotTimeout:             time.Minute,
+		SnapshotRetryMax:            10 * time.Minute,
+		MediaProbeTimeout:           10 * time.Second,
+		ExportMaxDuration:           30 * time.Minute,
+		ExportQueueSize:             4,
+		ShutdownTimeout:             time.Second,
+		MinFreeBytes:                8 * 1024 * 1024 * 1024,
+		MinFreePercent:              5,
+		InitializationHeadroomBytes: 4 * 1024 * 1024 * 1024,
+		WebSessionTTL:               7 * 24 * time.Hour,
+		FFmpegPath:                  "/opt/teslabox/media/bin/ffmpeg",
+		FFprobePath:                 "/opt/teslabox/media/bin/ffprobe",
 	}
 
 	tests := []struct {

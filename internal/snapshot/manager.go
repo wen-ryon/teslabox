@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -27,13 +28,16 @@ var ErrInsufficientSpace = errors.New("快照空间不足")
 
 // SpaceStatus 描述快照创建前的数据盘容量门槛。
 type SpaceStatus struct {
-	TotalBytes     uint64  `json:"total_bytes"`
-	FreeBytes      uint64  `json:"free_bytes"`
-	FreePercent    float64 `json:"free_percent"`
-	MinFreeBytes   uint64  `json:"min_free_bytes"`
-	MinFreePercent uint64  `json:"min_free_percent"`
-	Ready          bool    `json:"ready"`
-	Reason         string  `json:"reason,omitempty"`
+	TotalBytes     uint64                   `json:"total_bytes"`
+	FreeBytes      uint64                   `json:"free_bytes"`
+	FreePercent    float64                  `json:"free_percent"`
+	MinFreeBytes   uint64                   `json:"min_free_bytes"`
+	MinFreePercent uint64                   `json:"min_free_percent"`
+	Ready          bool                     `json:"ready"`
+	Reason         string                   `json:"reason,omitempty"`
+	ReasonCode     storagepolicy.ReasonCode `json:"reason_code,omitempty"`
+	RequiredBytes  uint64                   `json:"required_bytes"`
+	DeficitBytes   uint64                   `json:"deficit_bytes,omitempty"`
 }
 
 // VolumeSpace 描述车机实际使用的 exFAT 虚拟盘容量，避免与承载镜像的外层 XFS 容量混淆。
@@ -71,11 +75,10 @@ type View struct {
 
 // Config 固定原始镜像、快照目录和运行时只读挂载根目录。
 type Config struct {
-	ImagePath      string
-	SnapshotPath   string
-	MountRoot      string
-	MinFreeBytes   uint64
-	MinFreePercent uint64
+	ImagePath    string
+	SnapshotPath string
+	MountRoot    string
+	Policy       storagepolicy.SnapshotReservePolicy
 }
 
 // Manager 串行创建快照，避免多个 fsck 和 loop 挂载同时操作同一镜像族。
@@ -104,15 +107,20 @@ func (m *Manager) Space() (SpaceStatus, error) {
 	}
 	status := SpaceStatus{
 		TotalBytes: total, FreeBytes: free,
-		MinFreeBytes: m.config.MinFreeBytes, MinFreePercent: m.config.MinFreePercent,
+		MinFreeBytes: m.config.Policy.MinFreeBytes(), MinFreePercent: m.config.Policy.MinFreePercent(),
 		Ready: true,
 	}
-	if total > 0 {
-		status.FreePercent = float64(free) * 100 / float64(total)
+	evaluation, err := m.config.Policy.EvaluateRuntime(total, free)
+	if err != nil {
+		return SpaceStatus{}, fmt.Errorf("评价快照目录容量: %w", err)
 	}
-	if free < m.config.MinFreeBytes || status.FreePercent < float64(m.config.MinFreePercent) {
-		status.Ready = false
-		status.Reason = fmt.Sprintf("快照空间不足：可用 %d 字节（%.2f%%），至少保留 %d 字节且不低于 %d%%", free, status.FreePercent, m.config.MinFreeBytes, m.config.MinFreePercent)
+	status.FreePercent = evaluation.FreePercent
+	status.Ready = evaluation.Ready
+	status.ReasonCode = evaluation.ReasonCode
+	status.RequiredBytes = evaluation.RequiredBytes
+	status.DeficitBytes = evaluation.DeficitBytes
+	if !status.Ready {
+		status.Reason = fmt.Sprintf("快照空间不足：可用 %d 字节（%.2f%%），至少保留 %d 字节且不低于 %d%%", free, status.FreePercent, status.MinFreeBytes, status.MinFreePercent)
 	}
 	return status, nil
 }

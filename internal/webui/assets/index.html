@@ -6,8 +6,8 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20260819-1">
-  <script src="/app.js?v=20260819-1" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260819-2">
+  <script src="/app.js?v=20260819-2" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -285,10 +285,10 @@
       <section class="settings-section" aria-labelledby="maintenance-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge">读取中</span></div>
         <article class="settings-card power-card">
-          <div><h3>媒体自动断开与温重启</h3><p>启用后，录像删除会在一次维护中完成批量删除和空间回收，再自动温重启恢复 Gadget。上传文件本身只会暂存，不会触发重启。</p></div>
-          <div class="power-actions"><button id="storage-reclaim" class="secondary" type="button">回收历史旧空间</button><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
+          <div><h3>媒体自动断开与温重启</h3><p>启用后，录像删除会在一次维护中完成批量删除和空间回收，再自动温重启恢复 Gadget。上传文件本身只会暂存，不会触发重启。</p><p id="snapshot-reserve-detail" class="muted">正在读取快照预留空间…</p></div>
+          <div class="power-actions"><button id="snapshot-reserve-repair" class="primary" type="button">修复快照预留空间</button><button id="snapshot-reserve-cancel" class="secondary" type="button" hidden>安全放弃修复</button><button id="storage-reclaim" class="secondary" type="button">回收历史旧空间</button><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
         </article>
-        <div class="settings-warning">网页删除录像时已经自动回收空间，此按钮只处理旧版本或电脑直接删除后遗留的历史占用。它只回收 exFAT 分配位图确认空闲的簇，执行期间会暂停 USB Gadget。</div>
+        <div class="settings-warning">“修复快照预留空间”只回收达到安全目标所需的空闲簇，可重复执行且不会删除录像；“回收历史旧空间”会处理全部可回收空闲簇。两项操作都必须在 Gadget 暂停的维护窗口执行。</div>
       </section>
 
       <section class="settings-section" aria-labelledby="export-settings-title">

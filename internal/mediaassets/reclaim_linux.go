@@ -12,7 +12,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func platformReclaimSpace(ctx context.Context, imagePath string) (SpaceReclaimResult, error) {
+const reclaimSyncBatch = 64
+
+func platformReclaimSpace(ctx context.Context, imagePath string, targetBytes uint64) (SpaceReclaimResult, error) {
 	image, err := os.OpenFile(imagePath, os.O_RDWR, 0)
 	if err != nil {
 		return SpaceReclaimResult{}, fmt.Errorf("打开 TeslaCam 镜像: %w", err)
@@ -41,21 +43,45 @@ func platformReclaimSpace(ctx context.Context, imagePath string) (SpaceReclaimRe
 	}
 	for _, extent := range space.extents {
 		if err := ctx.Err(); err != nil {
+			_ = image.Sync()
+			if current, allocationErr := allocatedBytes(image); allocationErr == nil && before > current {
+				result.ReclaimedBytes = before - current
+			}
 			return result, err
 		}
 		if extent.offset > math.MaxInt64 || extent.length > math.MaxInt64 {
 			return result, errors.New("exFAT 空闲区间超出系统打洞限制")
 		}
+		length := extent.length
+		if targetBytes > 0 {
+			remaining := targetBytes - min(targetBytes, result.ReclaimedBytes)
+			if remaining == 0 {
+				break
+			}
+			length = boundedReclaimLength(extent.length, space.clusterSize, remaining)
+		}
 		err := unix.Fallocate(
 			int(image.Fd()),
 			unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE,
 			int64(extent.offset),
-			int64(extent.length),
+			int64(length),
 		)
 		if err != nil {
 			return result, fmt.Errorf("回收 exFAT 空闲簇: %w", err)
 		}
 		result.ProcessedRanges++
+		current, allocationErr := allocatedBytes(image)
+		if allocationErr != nil {
+			return result, allocationErr
+		}
+		if before > current {
+			result.ReclaimedBytes = before - current
+		}
+		if result.ProcessedRanges%reclaimSyncBatch == 0 {
+			if err := image.Sync(); err != nil {
+				return result, fmt.Errorf("分批同步 TeslaCam 镜像回收结果: %w", err)
+			}
+		}
 	}
 	if err := image.Sync(); err != nil {
 		return result, fmt.Errorf("同步 TeslaCam 镜像回收结果: %w", err)

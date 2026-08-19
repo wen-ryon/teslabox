@@ -22,6 +22,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/hostmigration"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
+	"github.com/wen-ryon/teslabox/internal/maintenanceguard"
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
@@ -32,6 +33,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/storage"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/storagebench"
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
 	"github.com/wen-ryon/teslabox/internal/updater"
@@ -49,8 +51,28 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("加载配置失败", "error", err)
+		if errors.Is(err, storagepolicy.ErrPolicyInvalid) {
+			logger.Error("加载配置失败", "reason_code", storagepolicy.ReasonPolicyInvalid, "error", err)
+		} else {
+			logger.Error("加载配置失败", "error", err)
+		}
 		os.Exit(1)
+	}
+	spacePolicy, err := storagepolicy.NewSnapshotReservePolicy(cfg.MinFreeBytes, cfg.MinFreePercent, cfg.InitializationHeadroomBytes)
+	if err != nil {
+		logger.Error("初始化快照空间策略失败", "error", err)
+		os.Exit(1)
+	}
+	// 主状态机已经在同一临界区维护 gadget-paused；独立命令才需要额外读取该文件。
+	maintenanceGuard, err := maintenanceguard.New(cfg.MaintenanceLockPath, cfg.MaintenanceOperationPath)
+	if err != nil {
+		logger.Error("初始化存储维护守卫失败", "error", err)
+		os.Exit(1)
+	}
+	if state, exists, recoverErr := maintenanceGuard.RecoverInterrupted(); recoverErr != nil {
+		logger.Error("恢复存储维护状态失败，将拒绝重新绑定 Gadget", "error", recoverErr)
+	} else if exists && state.State == maintenanceguard.StateInterrupted {
+		logger.Warn("检测到上次未完成的存储维护，将保持 Gadget 暂停", "operation", state.Operation)
 	}
 	teslaTimeLocation, err := time.LoadLocation(cfg.TeslaTimeZone)
 	if err != nil {
@@ -162,13 +184,13 @@ func main() {
 		os.Exit(1)
 	}
 	snapshotManager := mediasnapshot.New(runner, mediasnapshot.Config{
-		ImagePath:      filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
-		SnapshotPath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.SnapshotPath)),
-		MountRoot:      cfg.SnapshotMountPath,
-		MinFreeBytes:   cfg.MinFreeBytes,
-		MinFreePercent: cfg.MinFreePercent,
+		ImagePath:    filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		SnapshotPath: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.SnapshotPath)),
+		MountRoot:    cfg.SnapshotMountPath,
+		Policy:       spacePolicy,
 	})
-	manager := service.NewManager(cfg, detector, inspector, prober, mounter, gadgetManager, snapshotManager, teslacam.NewScanner(teslaTimeLocation), logger)
+	guardedGadget := gadget.NewGuardedLifecycle(gadgetManager, maintenanceGuard)
+	manager := service.NewManager(cfg, detector, inspector, prober, mounter, guardedGadget, snapshotManager, teslacam.NewScanner(teslaTimeLocation), logger, maintenanceGuard)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -186,6 +208,7 @@ func main() {
 		ImagePath:  filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
 		DataLabel:  cfg.DataLabel,
 		ImageLabel: "TESLACAM",
+		Policy:     spacePolicy,
 	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager, storagebench.New(storagebench.DefaultConfig()))
 	authManager, err := webauth.New(webauth.Config{
 		StatePath:      cfg.WebAuthStatePath,
@@ -231,14 +254,28 @@ func main() {
 		os.Exit(1)
 	}
 	mediaAssets, err := mediaassets.New(mediaassets.Config{
-		ImagePath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
-		StatePath:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath)),
-		StagingPath: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath), "media-staging"),
-		MountPath:   "/run/teslabox/media-assets",
+		ImagePath:      filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
+		StatePath:      filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath)),
+		StagingPath:    filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath), "media-staging"),
+		MountPath:      "/run/teslabox/media-assets",
+		Policy:         spacePolicy,
+		OperationGuard: maintenanceGuard,
 	}, runner, manager, manager)
 	if err != nil {
 		logger.Error("初始化媒体中心失败，拒绝以不完整写入保护启动", "error", err)
 		os.Exit(1)
+	}
+	// 升级或服务启动后只读取外层 XFS；不足时提前提示，但不在线扫描车机可能正在写入的 exFAT 位图。
+	if reserveStatus, reserveErr := mediaAssets.SnapshotReserveRepairStatus(); reserveErr != nil {
+		logger.Warn("启动阶段检查快照预留空间失败", "reason_code", "space_measurement_failed", "error", reserveErr)
+	} else if reserveStatus.OuterTotalBytes > 0 && !reserveStatus.RuntimeReady {
+		logger.Warn(
+			"快照预留空间低于运行期门槛，等待用户进入维护窗口修复",
+			"reason_code", reserveStatus.ReasonCode,
+			"free_bytes", reserveStatus.OuterFreeBytes,
+			"required_bytes", reserveStatus.RequiredBytes,
+			"deficit_bytes", reserveStatus.DeficitBytes,
+		)
 	}
 	updateManager, err := updater.New(updater.Config{
 		ManifestURL: cfg.UpdateManifestURL, CatalogURL: cfg.UpdateCatalogURL, PublicKey: cfg.UpdatePublicKey,

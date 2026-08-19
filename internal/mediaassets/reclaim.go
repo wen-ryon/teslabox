@@ -51,6 +51,20 @@ type allocationBitmap struct {
 	dataLength   uint64
 }
 
+func boundedReclaimLength(extentLength, clusterSize, remaining uint64) uint64 {
+	if extentLength == 0 || clusterSize == 0 || remaining == 0 {
+		return 0
+	}
+	if extentLength <= remaining {
+		return extentLength
+	}
+	length := remaining / clusterSize * clusterSize
+	if length == 0 {
+		return min(extentLength, clusterSize)
+	}
+	return min(extentLength, length)
+}
+
 func scanExFATFreeSpace(ctx context.Context, reader io.ReaderAt, imageSize int64) (exFATFreeSpace, error) {
 	if reader == nil || imageSize <= 0 {
 		return exFATFreeSpace{}, errors.New("TeslaCam 镜像读取器无效")

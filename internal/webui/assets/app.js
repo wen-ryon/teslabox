@@ -518,6 +518,8 @@ $("storage-music-enabled").addEventListener("change", renderStoragePartitionPrev
 $("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
 $("maintenance-auto-recovery").addEventListener("click", toggleMaintenanceAutoRecovery);
 $("storage-reclaim").addEventListener("click", reclaimStorageSpace);
+$("snapshot-reserve-repair").addEventListener("click", repairSnapshotReserve);
+$("snapshot-reserve-cancel").addEventListener("click", cancelSnapshotReserveRepair);
 $("password-change-open").addEventListener("click", () => openPasswordModal(false));
 $("password-change-form").addEventListener("submit", changeManagementPassword);
 document.querySelectorAll("[data-close-password]").forEach((element) => element.addEventListener("click", () => closePasswordModal(false)));
@@ -1325,8 +1327,8 @@ async function postJSON(path, body) {
 async function loadSettings() {
   return withPageLoading("正在读取网络、存储与系统设置…", async () => {
     setSettingsNotice("正在读取网络设置…", false, false);
-    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, exportSettingsResult, exportHistoryResult] = await Promise.allSettled([
-      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/export-settings"), request("/api/v1/exports/history"),
+    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, reserveResult, exportSettingsResult, exportHistoryResult] = await Promise.allSettled([
+      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/storage/snapshot-reserve"), request("/api/v1/export-settings"), request("/api/v1/exports/history"),
     ]);
     if (wifiResult.status === "fulfilled") {
       state.wifi = wifiResult.value;
@@ -1358,6 +1360,7 @@ async function loadSettings() {
     } else {
       renderMaintenanceUnavailable(maintenanceResult.reason.message);
     }
+    if (reserveResult.status === "fulfilled") renderSnapshotReserveStatus(reserveResult.value);
     if (exportSettingsResult.status === "fulfilled" && exportHistoryResult.status === "fulfilled") {
       state.exportSettings = exportSettingsResult.value;
       state.exportHistory = exportHistoryResult.value;
@@ -1478,6 +1481,7 @@ function renderMaintenanceSettings(settings) {
   const enabled = Boolean(settings.auto_recovery);
   const toggle = $("maintenance-auto-recovery");
   $("storage-reclaim").disabled = false;
+  $("snapshot-reserve-repair").disabled = false;
   toggle.disabled = false;
   toggle.setAttribute("aria-pressed", String(enabled));
   $("maintenance-toggle-title").textContent = enabled ? "媒体自动恢复已开启" : "媒体自动恢复已禁用";
@@ -1496,6 +1500,7 @@ function renderMaintenanceUnavailable(message) {
   toggle.setAttribute("aria-pressed", "false");
   toggle.disabled = true;
   $("storage-reclaim").disabled = true;
+  $("snapshot-reserve-repair").disabled = true;
   $("maintenance-toggle-title").textContent = "媒体自动恢复不可用";
   $("maintenance-toggle-detail").textContent = "请检查设备状态";
   $("maintenance-status").textContent = "不可用";
@@ -1562,6 +1567,64 @@ async function reclaimStorageSpace() {
     button.disabled = false;
     button.textContent = originalLabel;
   }
+}
+
+async function repairSnapshotReserve() {
+  const automatic = Boolean(state.maintenance?.auto_recovery);
+  const confirmed = await askConfirmation(
+    "修复快照预留空间",
+    "系统会进入维护窗口，重新测量实际缺口，并且只打洞回收达到安全目标所需的 exFAT 空闲簇。操作可在中断后安全重试，不会删除录像。",
+    "确认修复",
+    true,
+  );
+  if (!confirmed) return;
+  const button = $("snapshot-reserve-repair");
+  button.disabled = true;
+  button.textContent = "正在修复…";
+  setSettingsNotice("正在校验文件系统并定量回收快照空间，请勿断电或插拔数据盘…", false, false);
+  try {
+    const result = await postJSON("/api/v1/storage/snapshot-reserve/repair", {confirm_otg_disconnected:!automatic});
+    const states = {
+      completed:"修复完成",
+      cancelled_safe:"已满足运行门槛",
+      cancelled_unsafe:"空间仍不足",
+      interrupted:"修复已中断",
+      failed:"修复失败",
+    };
+    const summary = `${states[result.state] || "修复结束"}：目标 ${formatBytes(result.target_bytes || 0)}，实际释放 ${formatBytes(result.reclaimed_bytes || 0)}，外层可用 ${formatBytes(result.outer_free_bytes || 0)}。${result.message || ""}`;
+    setSettingsNotice(summary, !result.runtime_ready);
+    if (!automatic || !result.runtime_ready) await loadStatus();
+  } catch (error) {
+    setSettingsNotice(`修复中断：${error.message}。重新执行时会按磁盘实际状态继续。`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "修复快照预留空间";
+  }
+}
+
+function renderSnapshotReserveStatus(result) {
+  const interrupted = ["running", "interrupted", "failed"].includes(result.state);
+  $("snapshot-reserve-cancel").hidden = !interrupted;
+  const labels = {pending:"待修复", repairing:"修复中", interrupted:"修复中断", completed:"修复完成", no_reclaimable_space:"无可回收空间"};
+  $("snapshot-reserve-detail").textContent = `${labels[result.phase] || "状态正常"} · 外层可用 ${formatBytes(result.outer_free_bytes || 0)} · 运行门槛 ${formatBytes(result.required_bytes || 0)}`;
+  if (!result.runtime_ready && result.reason_code === "needs_maintenance_diagnosis") {
+    setSettingsNotice(`快照空间需要维护：外层可用 ${formatBytes(result.outer_free_bytes || 0)}，运行期至少需要 ${formatBytes(result.required_bytes || 0)}。`, true);
+  } else if (interrupted) {
+    setSettingsNotice(`上次快照空间修复未正常结束：${result.message || "可以继续修复或执行安全放弃校验。"}`, true);
+  }
+}
+
+async function cancelSnapshotReserveRepair() {
+  const confirmed = await askConfirmation(
+    "安全放弃修复",
+    "系统不会回滚已经释放的空闲簇。放弃前会重新检查 exFAT 和运行期空间；只有校验通过后才允许冷启动恢复 Gadget。",
+    "确认放弃",
+    true,
+  );
+  if (!confirmed) return;
+  const result = await postJSON("/api/v1/storage/snapshot-reserve/cancel", {confirm_otg_disconnected:true});
+  renderSnapshotReserveStatus(result);
+  setSettingsNotice(result.message || "放弃校验完成", !result.runtime_ready);
 }
 
 function renderUpdate(update) {

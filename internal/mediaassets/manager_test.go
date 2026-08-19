@@ -3,6 +3,7 @@ package mediaassets
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -11,7 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wen-ryon/teslabox/internal/maintenanceguard"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -444,7 +447,7 @@ func TestManagerDeleteRecordingsAndReclaimUsesOneMaintenanceWindow(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.reclaim = func(_ context.Context, path string) (SpaceReclaimResult, error) {
+	manager.reclaim = func(_ context.Context, path string, _ uint64) (SpaceReclaimResult, error) {
 		if path != imagePath || !runner.detached {
 			t.Fatalf("reclaim path = %q, detached = %t", path, runner.detached)
 		}
@@ -476,7 +479,7 @@ func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.reclaim = func(_ context.Context, path string) (SpaceReclaimResult, error) {
+	manager.reclaim = func(_ context.Context, path string, _ uint64) (SpaceReclaimResult, error) {
 		if path != imagePath || !runner.detached {
 			t.Fatalf("reclaim path = %q, detached = %t", path, runner.detached)
 		}
@@ -497,6 +500,124 @@ func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *test
 	}
 	if !checked {
 		t.Fatal("ReclaimSpace() did not check exFAT before punching holes")
+	}
+}
+
+func TestManagerRepairSnapshotReserveOnlyReclaimsDeficitAndCanResume(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := maintenanceguard.New(filepath.Join(root, "run", "lock"), filepath.Join(root, "operation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := storagepolicy.DefaultSnapshotReservePolicy()
+	runner := &captureRunner{}
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+		Policy: policy, OperationGuard: guard,
+	}, runner, &fakeMaintenance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const total = uint64(128_000_000_000)
+	free := uint64(10_000_000_000)
+	manager.outerSpace = func(string) (uint64, uint64, error) { return total, free, nil }
+	manager.reclaim = func(_ context.Context, _ string, target uint64) (SpaceReclaimResult, error) {
+		free += target
+		return SpaceReclaimResult{CandidateBytes: target + 20_000_000_000, ReclaimedBytes: target}, nil
+	}
+	wantTarget, err := policy.InitializationRequiredBytes(total)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTarget -= free
+	result, err := manager.RepairSnapshotReserve(t.Context())
+	if err != nil {
+		t.Fatalf("RepairSnapshotReserve() error = %v", err)
+	}
+	if result.TargetBytes != wantTarget || result.ReclaimedBytes != wantTarget || result.State != maintenanceguard.StateCompleted || !result.RuntimeReady {
+		t.Fatalf("RepairSnapshotReserve() = %+v, want target %d", result, wantTarget)
+	}
+	state, exists, err := guard.Load()
+	if err != nil || !exists || state.State != maintenanceguard.StateCompleted {
+		t.Fatalf("guard state = %+v, %t, %v", state, exists, err)
+	}
+}
+
+func TestManagerRepairSnapshotReservePersistsInterruptedState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "image.img")
+	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := maintenanceguard.New(filepath.Join(root, "run", "lock"), filepath.Join(root, "operation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := New(Config{
+		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+		Policy: storagepolicy.DefaultSnapshotReservePolicy(), OperationGuard: guard,
+	}, &captureRunner{}, &fakeMaintenance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.outerSpace = func(string) (uint64, uint64, error) { return 128_000_000_000, 4_000_000_000, nil }
+	manager.reclaim = func(context.Context, string, uint64) (SpaceReclaimResult, error) {
+		return SpaceReclaimResult{ReclaimedBytes: 1024}, context.Canceled
+	}
+	result, err := manager.RepairSnapshotReserve(t.Context())
+	if !errors.Is(err, context.Canceled) || result.ReclaimedBytes != 1024 {
+		t.Fatalf("RepairSnapshotReserve() = %+v, %v", result, err)
+	}
+	state, exists, loadErr := guard.Load()
+	if loadErr != nil || !exists || state.State != maintenanceguard.StateInterrupted || state.ReclaimedBytes != 1024 {
+		t.Fatalf("guard state = %+v, %t, %v", state, exists, loadErr)
+	}
+}
+
+func TestManagerCancelSnapshotReserveRepairValidatesRuntimeSafety(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		freeBytes uint64
+		wantState maintenanceguard.OperationState
+		wantReady bool
+	}{
+		{name: "runtime safe without initialization headroom", freeBytes: 10_000_000_000, wantState: maintenanceguard.StateCancelledSafe, wantReady: true},
+		{name: "runtime unsafe", freeBytes: 4_000_000_000, wantState: maintenanceguard.StateCancelledUnsafe},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			imagePath := filepath.Join(root, "image.img")
+			if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			guard, err := maintenanceguard.New(filepath.Join(root, "run", "lock"), filepath.Join(root, "operation.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager, err := New(Config{
+				ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+				Policy: storagepolicy.DefaultSnapshotReservePolicy(), OperationGuard: guard,
+			}, &captureRunner{}, &fakeMaintenance{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.outerSpace = func(string) (uint64, uint64, error) { return 128_000_000_000, test.freeBytes, nil }
+			result, err := manager.CancelSnapshotReserveRepair(t.Context())
+			if err != nil {
+				t.Fatalf("CancelSnapshotReserveRepair() error = %v", err)
+			}
+			if result.State != test.wantState || result.RuntimeReady != test.wantReady {
+				t.Fatalf("CancelSnapshotReserveRepair() = %+v", result)
+			}
+		})
 	}
 }
 

@@ -100,6 +100,13 @@ type MediaAssetsAdmin interface {
 	OpenPreview(context.Context, string) (*os.File, mediaassets.Asset, error)
 }
 
+// SnapshotReserveRepairAdmin 是旧布局定量补足快照空间的可选能力。
+type SnapshotReserveRepairAdmin interface {
+	RepairSnapshotReserve(context.Context) (mediaassets.SpaceReclaimResult, error)
+	CancelSnapshotReserveRepair(context.Context) (mediaassets.SpaceReclaimResult, error)
+	SnapshotReserveRepairStatus() (mediaassets.SpaceReclaimResult, error)
+}
+
 // MediaCompositor 定义请求取消后必须停止的实时合成边界。
 type MediaCompositor interface {
 	Stream(context.Context, media.CompositeRequest, io.Writer) error
@@ -1195,6 +1202,82 @@ func registerMediaAssetRoutes(mux *http.ServeMux, controller Controller, admin M
 			"reclaimed_bytes", result.ReclaimedBytes,
 			"range_count", result.RangeCount,
 		)
+		writeJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("POST /api/v1/storage/snapshot-reserve/repair", func(w http.ResponseWriter, r *http.Request) {
+		repairAdmin, ok := admin.(SnapshotReserveRepairAdmin)
+		if !ok {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "当前版本不支持快照空间定量修复"})
+			return
+		}
+		var input struct {
+			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		automatic := automaticMediaRecoveryEnabled(automation)
+		if !input.ConfirmOTGDisconnected && !automatic {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先物理拔掉车机或电脑的 OTG 线，再确认修复快照空间"})
+			return
+		}
+		operationCtx, cancelOperation := mediaMaintenanceOperationContext(r.Context(), automatic)
+		defer cancelOperation()
+		if automatic {
+			if err := beginAutomaticMaintenance(operationCtx, gadget); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "无法自动断开 USB Gadget；请手工拔掉 OTG 后重试"})
+				return
+			}
+		}
+		result, repairErr := repairAdmin.RepairSnapshotReserve(operationCtx)
+		if repairErr != nil {
+			logger.Warn("定量修复快照空间失败", "error", repairErr, "reclaimed_bytes", result.ReclaimedBytes)
+			writeMediaAssetError(w, repairErr)
+			return
+		}
+		if automatic && result.RuntimeReady {
+			if recoveryErr := finishAutomaticMaintenance(operationCtx, gadget, power); recoveryErr != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "空间已修复，但自动温重启恢复提交失败；请手工恢复"})
+				return
+			}
+		}
+		logger.Info("快照空间定量修复结束", "state", result.State, "target_bytes", result.TargetBytes, "reclaimed_bytes", result.ReclaimedBytes)
+		writeJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("GET /api/v1/storage/snapshot-reserve", func(w http.ResponseWriter, _ *http.Request) {
+		repairAdmin, ok := admin.(SnapshotReserveRepairAdmin)
+		if !ok {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "当前版本不支持快照空间状态"})
+			return
+		}
+		result, err := repairAdmin.SnapshotReserveRepairStatus()
+		if err != nil {
+			writeMediaAssetError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("POST /api/v1/storage/snapshot-reserve/cancel", func(w http.ResponseWriter, r *http.Request) {
+		repairAdmin, ok := admin.(SnapshotReserveRepairAdmin)
+		if !ok {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "当前版本不支持放弃快照空间修复"})
+			return
+		}
+		var input struct {
+			ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if !input.ConfirmOTGDisconnected {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请保持 OTG 物理断开，再确认放弃修复"})
+			return
+		}
+		result, err := repairAdmin.CancelSnapshotReserveRepair(r.Context())
+		if err != nil {
+			writeMediaAssetError(w, err)
+			return
+		}
 		writeJSON(w, http.StatusOK, result)
 	})
 	mux.HandleFunc("POST /api/v1/media-assets/apply", func(w http.ResponseWriter, r *http.Request) {

@@ -117,6 +117,23 @@ type fakeVideoScanner struct {
 	root   string
 }
 
+type orderingMaintenanceLocker struct {
+	manager  *Manager
+	calls    int
+	released bool
+	ordered  bool
+}
+
+func (l *orderingMaintenanceLocker) Acquire(context.Context) (func(), error) {
+	l.calls++
+	if l.manager.refreshMu.TryLock() {
+		l.manager.refreshMu.Unlock()
+	} else {
+		l.ordered = true
+	}
+	return func() { l.released = true }, nil
+}
+
 func (s *fakeVideoScanner) Scan(root string) ([]teslacam.Video, error) {
 	s.root = root
 	return s.videos, s.err
@@ -566,6 +583,26 @@ func TestManagerBeginMediaMaintenanceKeepsDataDriveMounted(t *testing.T) {
 		t.Fatalf("state = %#v, unmount calls = %d, stop calls = %d", state, mounter.unmountCalls, lifecycle.stopCalls)
 	}
 	release()
+}
+
+func TestManagerMaintenanceUsesConsistentLockOrder(t *testing.T) {
+	locker := &orderingMaintenanceLocker{}
+	manager := NewManager(
+		config.Config{}, fakeDetector{}, fakeInspector{}, fakeProber{}, &fakeMounter{}, &fakeLifecycle{},
+		&fakeSnapshotter{}, &fakeVideoScanner{}, slog.New(slog.NewTextHandler(io.Discard, nil)), locker,
+	)
+	locker.manager = manager
+	release, err := manager.BeginMediaMaintenance(t.Context())
+	if err != nil {
+		t.Fatalf("BeginMediaMaintenance() error = %v", err)
+	}
+	if locker.calls != 1 || !locker.ordered {
+		t.Fatalf("locker calls = %d, refresh lock acquired first = %t", locker.calls, locker.ordered)
+	}
+	release()
+	if !locker.released {
+		t.Fatal("cross-process lock was not released")
+	}
 }
 
 func TestManagerStopsUnconfiguredBootAttemptAndDoesNotRetry(t *testing.T) {

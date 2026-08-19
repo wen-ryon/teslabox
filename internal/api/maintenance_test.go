@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/maintenanceguard"
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/service"
@@ -37,6 +38,9 @@ type fakeMediaAssetsAdmin struct {
 	recordingDeleteReleased func() bool
 	reclaimCalls            int
 	reclaimResult           mediaassets.SpaceReclaimResult
+	repairCalls             int
+	cancelRepairCalls       int
+	repairResult            mediaassets.SpaceReclaimResult
 }
 
 func (a *fakeMediaAssetsAdmin) Status(context.Context) (mediaassets.Status, error) {
@@ -73,6 +77,20 @@ func (a *fakeMediaAssetsAdmin) DeleteRecordingsAndReclaim(_ context.Context, req
 func (a *fakeMediaAssetsAdmin) ReclaimSpace(context.Context) (mediaassets.SpaceReclaimResult, error) {
 	a.reclaimCalls++
 	return a.reclaimResult, nil
+}
+
+func (a *fakeMediaAssetsAdmin) RepairSnapshotReserve(context.Context) (mediaassets.SpaceReclaimResult, error) {
+	a.repairCalls++
+	return a.repairResult, nil
+}
+
+func (a *fakeMediaAssetsAdmin) CancelSnapshotReserveRepair(context.Context) (mediaassets.SpaceReclaimResult, error) {
+	a.cancelRepairCalls++
+	return a.repairResult, nil
+}
+
+func (a *fakeMediaAssetsAdmin) SnapshotReserveRepairStatus() (mediaassets.SpaceReclaimResult, error) {
+	return a.repairResult, nil
 }
 
 func (a *fakeMediaAssetsAdmin) Apply(context.Context) (mediaassets.Status, error) {
@@ -274,6 +292,57 @@ func TestSpaceReclaimRequiresConfirmationAndSupportsAutomaticRecovery(t *testing
 		gadget.pauseCalls != 1 || gadget.resumeCalls != 1 || power.powerAction != "reboot" {
 		t.Fatalf("automatic reclaim = %d, calls = reclaim:%d pause:%d resume:%d power:%q body=%s",
 			response.Code, assets.reclaimCalls, gadget.pauseCalls, gadget.resumeCalls, power.powerAction, response.Body.String())
+	}
+}
+
+func TestSnapshotReserveRepairOnlyRecoversGadgetWhenRuntimeSafe(t *testing.T) {
+	previousDelay := automaticMaintenanceDisconnectDelay
+	automaticMaintenanceDisconnectDelay = 0
+	t.Cleanup(func() { automaticMaintenanceDisconnectDelay = previousDelay })
+	tests := []struct {
+		name       string
+		ready      bool
+		wantReboot bool
+	}{
+		{name: "safe repair schedules recovery", ready: true, wantReboot: true},
+		{name: "unsafe repair keeps gadget paused"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assets := &fakeMediaAssetsAdmin{repairResult: mediaassets.SpaceReclaimResult{RuntimeReady: test.ready, State: maintenanceguard.StateCompleted}}
+			gadget := &fakeGadgetAdmin{}
+			power := &fakeDeviceAdmin{}
+			handler := NewHandler(
+				fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)),
+				WithMediaAssetsAdmin(assets), WithGadgetAdmin(gadget), WithDeviceAdmin(power),
+				WithMaintenanceAutomation(&fakeMaintenanceAutomation{settings: maintenancemode.Settings{AutoRecovery: true}}),
+			)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/storage/snapshot-reserve/repair", strings.NewReader(`{}`)))
+			if response.Code != http.StatusOK || assets.repairCalls != 1 {
+				t.Fatalf("repair = %d, calls = %d, body = %s", response.Code, assets.repairCalls, response.Body.String())
+			}
+			if (power.powerAction == "reboot") != test.wantReboot {
+				t.Fatalf("power action = %q, want reboot = %t", power.powerAction, test.wantReboot)
+			}
+		})
+	}
+}
+
+func TestCancelSnapshotReserveRepairRequiresPhysicalDisconnect(t *testing.T) {
+	assets := &fakeMediaAssetsAdmin{repairResult: mediaassets.SpaceReclaimResult{RuntimeReady: false, State: maintenanceguard.StateCancelledUnsafe}}
+	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithMediaAssetsAdmin(assets))
+
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodPost, "/api/v1/storage/snapshot-reserve/cancel", strings.NewReader(`{}`)))
+	if missing.Code != http.StatusBadRequest || assets.cancelRepairCalls != 0 {
+		t.Fatalf("unconfirmed cancel = %d, calls = %d", missing.Code, assets.cancelRepairCalls)
+	}
+
+	confirmed := httptest.NewRecorder()
+	handler.ServeHTTP(confirmed, httptest.NewRequest(http.MethodPost, "/api/v1/storage/snapshot-reserve/cancel", strings.NewReader(`{"confirm_otg_disconnected":true}`)))
+	if confirmed.Code != http.StatusOK || assets.cancelRepairCalls != 1 || !strings.Contains(confirmed.Body.String(), "cancelled_unsafe") {
+		t.Fatalf("confirmed cancel = %d, calls = %d, body = %s", confirmed.Code, assets.cancelRepairCalls, confirmed.Body.String())
 	}
 }
 

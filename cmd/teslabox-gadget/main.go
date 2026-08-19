@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/wen-ryon/teslabox/internal/gadget"
+	"github.com/wen-ryon/teslabox/internal/maintenanceguard"
 )
 
 func main() {
@@ -18,6 +20,10 @@ func main() {
 	imagePath := flag.String("image", "/var/lib/teslabox/images/teslacam.img", "TeslaCam 整盘镜像")
 	serial := flag.String("serial", "TESLABOX-071C4AAFBA8BEB80", "对主机暴露的 USB 序列号")
 	releaseGadget := flag.String("release-gadget", "", "允许在 start 时只解绑的固定冲突 Gadget 名称")
+	maintenanceLock := flag.String("maintenance-lock", "/run/teslabox/storage-maintenance.lock", "跨进程存储维护锁")
+	maintenanceState := flag.String("maintenance-state", "/var/lib/teslabox-system/storage-maintenance.json", "持久化存储维护状态")
+	gadgetPauseState := flag.String("gadget-pause-state", "/var/lib/teslabox-system/gadget-paused", "Gadget 启动保护状态")
+	bootIDPath := flag.String("boot-id-path", "/proc/sys/kernel/random/boot_id", "系统 boot_id 路径")
 	flag.Parse()
 
 	if *action != "status" && *action != "start" && *action != "stop" {
@@ -38,6 +44,11 @@ func main() {
 		SerialNumber:  *serial,
 		ReleaseGadget: *releaseGadget,
 	})
+	guard, err := maintenanceguard.New(*maintenanceLock, *maintenanceState, *gadgetPauseState, *bootIDPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Gadget 操作失败: %v\n", err)
+		os.Exit(1)
+	}
 	status, err := manager.Inspect()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Gadget 操作失败: %v\n", err)
@@ -58,7 +69,13 @@ func main() {
 	if *execute {
 		switch *action {
 		case "start":
+			release, guardErr := guard.AcquireGadgetStart(context.Background())
+			if guardErr != nil {
+				err = guardErr
+				break
+			}
 			status, err = manager.Start()
+			release()
 		case "stop":
 			status, err = manager.Stop()
 		}

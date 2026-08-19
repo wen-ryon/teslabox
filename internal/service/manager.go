@@ -85,6 +85,11 @@ type VideoScanner interface {
 	Scan(root string) ([]teslacam.Video, error)
 }
 
+// MaintenanceLocker 防止独立 Gadget 命令与主服务维护窗口跨进程并发。
+type MaintenanceLocker interface {
+	Acquire(context.Context) (func(), error)
+}
+
 // Snapshot 是数据盘、backing store、Gadget 和媒体索引的一致性只读视图。
 type Snapshot struct {
 	Phase               Phase                     `json:"phase"`
@@ -109,15 +114,16 @@ type Snapshot struct {
 
 // Manager 串行化 udev、轮询和 API 刷新，防止未来生命周期操作并发执行。
 type Manager struct {
-	cfg         config.Config
-	detector    storage.Detector
-	inspector   BackingInspector
-	prober      GadgetProber
-	mounter     DataMounter
-	lifecycle   GadgetLifecycle
-	snapshotter SnapshotLifecycle
-	scanner     VideoScanner
-	logger      *slog.Logger
+	cfg               config.Config
+	detector          storage.Detector
+	inspector         BackingInspector
+	prober            GadgetProber
+	mounter           DataMounter
+	lifecycle         GadgetLifecycle
+	snapshotter       SnapshotLifecycle
+	scanner           VideoScanner
+	logger            *slog.Logger
+	maintenanceLocker MaintenanceLocker
 
 	refreshMu           sync.Mutex
 	stateMu             sync.RWMutex
@@ -157,6 +163,7 @@ func NewManager(
 	snapshotter SnapshotLifecycle,
 	scanner VideoScanner,
 	logger *slog.Logger,
+	maintenanceLockers ...MaintenanceLocker,
 ) *Manager {
 	bootID, bootErr := readBootID(cfg.BootIDPath)
 	bootUptime, bindWindowEnforced, uptimeErr := readBootUptime(cfg.BootUptimePath)
@@ -203,6 +210,9 @@ func NewManager(
 	}
 	manager.waitForEnumeration = manager.pollGadgetEnumeration
 	manager.waitForDriveConfirm = waitForDataDriveConfirmation
+	if len(maintenanceLockers) == 1 {
+		manager.maintenanceLocker = maintenanceLockers[0]
+	}
 	return manager
 }
 
@@ -353,7 +363,21 @@ func (m *Manager) BeginMediaMaintenance(ctx context.Context) (func(), error) {
 
 func (m *Manager) beginMaintenance(ctx context.Context, unmountDataDrive bool) (func(), error) {
 	m.refreshMu.Lock()
-	release := sync.OnceFunc(func() { m.refreshMu.Unlock() })
+	var releaseCrossProcess func()
+	if m.maintenanceLocker != nil {
+		var err error
+		releaseCrossProcess, err = m.maintenanceLocker.Acquire(ctx)
+		if err != nil {
+			m.refreshMu.Unlock()
+			return nil, fmt.Errorf("取得跨进程维护锁: %w", err)
+		}
+	}
+	release := sync.OnceFunc(func() {
+		if releaseCrossProcess != nil {
+			releaseCrossProcess()
+		}
+		m.refreshMu.Unlock()
+	})
 	if err := ctx.Err(); err != nil {
 		release()
 		return nil, err

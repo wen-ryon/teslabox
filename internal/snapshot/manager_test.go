@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -28,6 +29,11 @@ type fakeRunner struct {
 	mountFailures   int
 	notMounted      bool
 	loopList        string
+}
+
+func testSnapshotPolicy(t *testing.T) storagepolicy.SnapshotReservePolicy {
+	t.Helper()
+	return storagepolicy.DefaultSnapshotReservePolicy()
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -86,9 +92,13 @@ func TestManagerCreateStopsBeforeCopyWhenSpaceIsLow(t *testing.T) {
 	}
 
 	runner := &fakeRunner{}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, MinFreeBytes: 20, MinFreePercent: 10})
+	policy, err := storagepolicy.NewSnapshotReservePolicy(20, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: policy})
 	manager.space = func(string) (uint64, uint64, error) { return 100, 5, nil }
-	_, err := manager.Create(t.Context())
+	_, err = manager.Create(t.Context())
 	if !errors.Is(err, ErrInsufficientSpace) {
 		t.Fatalf("Create() error = %v, want insufficient space", err)
 	}
@@ -122,7 +132,7 @@ func TestManagerRecoverOnlyRemovesManagedResources(t *testing.T) {
 	}
 
 	runner := &fakeRunner{notMounted: true, loopList: "/dev/loop7 " + imagePath + "\n/dev/loop8 /var/lib/other.img\n"}
-	manager := New(runner, Config{SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	if err := manager.Recover(t.Context()); err != nil {
 		t.Fatalf("Recover() error = %v", err)
 	}
@@ -167,7 +177,7 @@ func TestManagerRemoveDetachesLoopWhenFUSEAlreadyUnmounted(t *testing.T) {
 	}
 
 	runner := &fakeRunner{notMounted: true}
-	manager := New(runner, Config{SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	err := manager.Remove(t.Context(), View{ID: "test", ImagePath: imagePath, MountPath: mountPath, LoopDevice: "/dev/loop7"})
 	if err != nil {
 		t.Fatalf("Remove() error = %v", err)
@@ -194,7 +204,7 @@ func TestManagerCreateFallsBackToExFATFUSE(t *testing.T) {
 	}
 
 	runner := &fakeRunner{failKernelMount: true}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	if _, err := manager.Create(t.Context()); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -224,7 +234,7 @@ func TestManagerCreateAcceptsRepairedFilesystem(t *testing.T) {
 		failErr:       &system.CommandError{Name: "fsck.exfat", Code: 1, Internal: errors.New("已修复")},
 		mountFailures: 1,
 	}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	view, err := manager.Create(t.Context())
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -254,7 +264,7 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	}
 
 	runner := &fakeRunner{}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	manager.now = func() time.Time { return time.Date(2026, 7, 16, 8, 9, 10, 123, time.UTC) }
 	view, err := manager.Create(t.Context())
 	if err != nil {
@@ -308,7 +318,7 @@ func TestManagerCreateAppliesCOWExtentHintOnlyOnce(t *testing.T) {
 	}
 
 	runner := &fakeRunner{}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	manager.now = func() time.Time { return time.Date(2026, 8, 12, 8, 9, 10, 123, time.UTC) }
 	first, err := manager.Create(t.Context())
 	if err != nil {
@@ -354,7 +364,7 @@ func TestManagerCreateStopsBeforeCopyWhenCOWExtentHintFails(t *testing.T) {
 	}
 
 	runner := &fakeRunner{failName: "/usr/sbin/xfs_io"}
-	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(runner, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	_, err := manager.Create(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "COW extent 保护") {
 		t.Fatalf("Create() error = %v", err)
@@ -380,7 +390,7 @@ func TestManagerCreateFailureDoesNotPublishSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := New(&fakeRunner{failName: "fsck.exfat", mountFailures: 1}, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot})
+	manager := New(&fakeRunner{failName: "fsck.exfat", mountFailures: 1}, Config{ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot, Policy: testSnapshotPolicy(t)})
 	if _, err := manager.Create(t.Context()); err == nil {
 		t.Fatal("Create() error = nil, want fsck error")
 	}
@@ -399,6 +409,7 @@ func TestManagerRemoveRejectsPathsOutsideManagedRoots(t *testing.T) {
 	manager := New(&fakeRunner{}, Config{
 		SnapshotPath: filepath.Join(root, "snapshots"),
 		MountRoot:    filepath.Join(root, "mounts"),
+		Policy:       testSnapshotPolicy(t),
 	})
 	err := manager.Remove(t.Context(), View{ID: "unsafe", ImagePath: filepath.Join(root, "outside.img"), MountPath: filepath.Join(root, "outside"), LoopDevice: "/dev/loop7"})
 	if err == nil {

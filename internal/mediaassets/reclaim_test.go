@@ -7,6 +7,29 @@ import (
 	"testing"
 )
 
+func TestBoundedReclaimLength(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		extent    uint64
+		cluster   uint64
+		remaining uint64
+		want      uint64
+	}{
+		{name: "whole extent below target", extent: 4096, cluster: 4096, remaining: 8192, want: 4096},
+		{name: "rounds down to cluster", extent: 16384, cluster: 4096, remaining: 9000, want: 8192},
+		{name: "one cluster minimum", extent: 16384, cluster: 4096, remaining: 1, want: 4096},
+		{name: "target reached", extent: 16384, cluster: 4096, remaining: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := boundedReclaimLength(test.extent, test.cluster, test.remaining); got != test.want {
+				t.Fatalf("boundedReclaimLength() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestScanExFATFreeSpaceUsesAllocationBitmap(t *testing.T) {
 	t.Parallel()
 	image := testExFATImage()

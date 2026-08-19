@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,18 +22,19 @@ import (
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storage"
 	"github.com/wen-ryon/teslabox/internal/storagebench"
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
 const (
-	minimumDeviceSize       = 32 * 1000 * 1000 * 1000
-	minimumReservedBytes    = 10 * 1000 * 1000 * 1000
-	maximumMBRImageSize     = 2 * 1000 * 1000 * 1000 * 1000
-	reservedCapacityDivisor = 20
-	defaultTeslaCamPercent  = 80
-	minimumDefragmentFree   = 8 * 1024 * 1024 * 1024
-	minimumDefragmentPct    = 5
-	capacityLayoutTolerance = 8 * 1024 * 1024
+	minimumDeviceSize          = 32 * 1000 * 1000 * 1000
+	minimumReservedBytes       = 10 * 1000 * 1000 * 1000
+	maximumSupportedDeviceSize = 2 * 1000 * 1000 * 1000 * 1000
+	reservedCapacityDivisor    = 20
+	defaultTeslaCamPercent     = 80
+	minimumDefragmentFree      = 8 * 1024 * 1024 * 1024
+	minimumDefragmentPct       = 5
+	capacityLayoutTolerance    = 8 * 1024 * 1024
 )
 
 var (
@@ -157,6 +159,12 @@ type Config struct {
 	ImagePath  string
 	DataLabel  string
 	ImageLabel string
+	Policy     storagepolicy.SnapshotReservePolicy
+}
+
+type fileSystemSpace struct {
+	TotalBytes uint64
+	FreeBytes  uint64
 }
 
 // Manager 串行化存储初始化，避免两个浏览器同时操作同一块盘。
@@ -177,6 +185,9 @@ type Manager struct {
 
 // New 创建显式依赖的存储管理器，构造过程不会访问或修改块设备。
 func New(config Config, runner system.Runner, registry *storage.FileRegistry, lister DeviceLister, driveInitializer DriveInitializer, imageInitializer ImageInitializer, controller Controller, benchmarks ...StorageBenchmark) *Manager {
+	if config.Policy.MinFreeBytes() == 0 {
+		config.Policy = storagepolicy.DefaultSnapshotReservePolicy()
+	}
 	manager := &Manager{
 		config: config, runner: runner, registry: registry, lister: lister,
 		driveInit: driveInitializer, imageInit: imageInitializer, controller: controller,
@@ -213,7 +224,7 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 		status.Benchmark = benchmark
 	}
 	for _, device := range devices {
-		status.Devices = append(status.Devices, classify(device, records, active, hasActive, m.config.DataRoot, m.config.DataLabel))
+		status.Devices = append(status.Devices, classify(device, records, active, hasActive, m.config.DataRoot, m.config.DataLabel, m.config.Policy))
 	}
 	for _, record := range records {
 		if record.Status == "ready" || recordAttached(record, devices) {
@@ -547,6 +558,9 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 	if candidate.Serial == "" || candidate.Serial != request.ConfirmSerial {
 		return Candidate{}, &InputError{Message: "输入的设备序列号不匹配"}
 	}
+	if err := validateSupportedDeviceSize(candidate.SizeBytes); err != nil {
+		return Candidate{}, &InputError{Message: err.Error()}
+	}
 	if candidate.Initialized && !request.Reinitialize && !candidate.CanResume {
 		return Candidate{}, &InputError{Message: "目标设备已经完成初始化"}
 	}
@@ -646,6 +660,13 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 				return Candidate{}, fmt.Errorf("同步存储性能体检清理结果: %w", benchmarkErr)
 			}
 		}
+		writableBytes, err = m.planWritableImageSize(ctx, candidate.SizeBytes)
+		if err != nil {
+			return Candidate{}, err
+		}
+		if _, err := imageinit.PlanLayout(writableBytes, request.MusicEnabled, teslaCamPercent); err != nil {
+			return Candidate{}, &InputError{Message: err.Error()}
+		}
 		_, err = m.imageInit.Run(ctx, imageinit.Options{
 			DataRoot: m.config.DataRoot, ImagePath: m.config.ImagePath,
 			SizeBytes: advertisedBytes, WritableBytes: writableBytes, Label: m.config.ImageLabel,
@@ -655,6 +676,9 @@ func (m *Manager) Initialize(ctx context.Context, request InitializeRequest) (re
 		if err != nil {
 			return Candidate{}, fmt.Errorf("创建 TeslaCam 虚拟磁盘: %w", err)
 		}
+	}
+	if err := m.verifySnapshotReserve(ctx); err != nil {
+		return Candidate{}, err
 	}
 	if err := writeDeviceMarker(filepath.Join(m.config.DataRoot, "state", "device.json"), record); err != nil {
 		return Candidate{}, err
@@ -811,14 +835,14 @@ func (m *Manager) verifyExistingImage(ctx context.Context) (resultErr error) {
 }
 
 func chooseImageSize(deviceSize int64) (int64, error) {
+	if err := validateSupportedDeviceSize(deviceSize); err != nil {
+		return 0, err
+	}
 	reserve := deviceSize / reservedCapacityDivisor
 	if reserve < minimumReservedBytes {
 		reserve = minimumReservedBytes
 	}
 	available := deviceSize - reserve
-	if available > maximumMBRImageSize {
-		available = maximumMBRImageSize
-	}
 	available = available / 1_000_000_000 * 1_000_000_000
 	if available < minimumDeviceSize {
 		return 0, errors.New("设备容量不足以同时保存 TeslaCam 镜像和快照预留空间")
@@ -826,21 +850,104 @@ func chooseImageSize(deviceSize int64) (int64, error) {
 	return available, nil
 }
 
+func (m *Manager) planWritableImageSize(ctx context.Context, deviceSize int64) (int64, error) {
+	planned, err := chooseImageSize(deviceSize)
+	if err != nil {
+		return 0, err
+	}
+	space, err := m.readFileSystemSpace(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("读取初始化后数据盘空间: %w", err)
+	}
+	evaluation, err := m.config.Policy.EvaluateInitialization(space.TotalBytes, space.FreeBytes)
+	if err != nil {
+		return 0, &InputError{Message: fmt.Sprintf("空间策略不可用：%v", err)}
+	}
+	if evaluation.ReasonCode == storagepolicy.ReasonPolicyUnreachable {
+		return 0, &InputError{Message: fmt.Sprintf("policy_unreachable：数据盘总容量 %d 字节无法满足当前快照保留策略", space.TotalBytes)}
+	}
+	required := evaluation.RequiredBytes
+	if space.FreeBytes <= required {
+		return 0, fmt.Errorf("初始化后数据盘空间不足：可用 %d 字节，快照和初始化余量至少需要 %d 字节", space.FreeBytes, required)
+	}
+	available := space.FreeBytes - required
+	if available > uint64(math.MaxInt64) {
+		available = uint64(math.MaxInt64)
+	}
+	actual := int64(available) / 1_000_000_000 * 1_000_000_000
+	if actual > planned {
+		actual = planned
+	}
+	if actual < minimumDeviceSize {
+		return 0, errors.New("设备容量不足以同时创建 TeslaCam 镜像并保留快照安全空间")
+	}
+	return actual, nil
+}
+
+func (m *Manager) verifySnapshotReserve(ctx context.Context) error {
+	space, err := m.readFileSystemSpace(ctx)
+	if err != nil {
+		return fmt.Errorf("校验初始化后快照空间: %w", err)
+	}
+	evaluation, err := m.config.Policy.EvaluateInitialization(space.TotalBytes, space.FreeBytes)
+	if err != nil {
+		return fmt.Errorf("校验初始化空间策略: %w", err)
+	}
+	if !evaluation.Ready {
+		return fmt.Errorf("初始化后快照空间不足：可用 %d 字节，至少需要 %d 字节", space.FreeBytes, evaluation.RequiredBytes)
+	}
+	return nil
+}
+
+func (m *Manager) readFileSystemSpace(ctx context.Context) (fileSystemSpace, error) {
+	output, err := m.runner.Run(ctx, "stat", "--file-system", "--format=%S:%b:%a", m.config.DataRoot)
+	if err != nil {
+		return fileSystemSpace{}, err
+	}
+	parts := strings.Split(strings.TrimSpace(string(output)), ":")
+	if len(parts) != 3 {
+		return fileSystemSpace{}, fmt.Errorf("解析文件系统空间: %q", strings.TrimSpace(string(output)))
+	}
+	values := make([]uint64, 3)
+	for index, part := range parts {
+		value, parseErr := strconv.ParseUint(part, 10, 64)
+		if parseErr != nil {
+			return fileSystemSpace{}, fmt.Errorf("解析文件系统空间字段 %q: %w", part, parseErr)
+		}
+		values[index] = value
+	}
+	if values[0] == 0 || values[1] > math.MaxUint64/values[0] || values[2] > math.MaxUint64/values[0] {
+		return fileSystemSpace{}, errors.New("文件系统空间统计超出有效范围")
+	}
+	return fileSystemSpace{TotalBytes: values[0] * values[1], FreeBytes: values[0] * values[2]}, nil
+}
+
 func chooseAdvertisedSize(deviceSize int64) (int64, error) {
+	if err := validateSupportedDeviceSize(deviceSize); err != nil {
+		return 0, err
+	}
 	if deviceSize < minimumDeviceSize {
 		return 0, errors.New("设备容量不足以创建 TeslaCam 虚拟整盘")
 	}
-	advertised := deviceSize / 512 * 512
-	if advertised > maximumMBRImageSize {
-		advertised = maximumMBRImageSize
-	}
-	return advertised, nil
+	return deviceSize / 512 * 512, nil
 }
 
-func classify(device driveinit.Device, records []storage.DeviceRecord, active storage.DeviceRecord, hasActive bool, dataRoot, dataLabel string) Candidate {
+func validateSupportedDeviceSize(deviceSize int64) error {
+	if deviceSize > maximumSupportedDeviceSize {
+		return errors.New("设备容量超过 2TB，当前版本不支持大于 2TB 的存储设备")
+	}
+	return nil
+}
+
+func classify(device driveinit.Device, records []storage.DeviceRecord, active storage.DeviceRecord, hasActive bool, dataRoot, dataLabel string, policy storagepolicy.SnapshotReservePolicy) Candidate {
 	candidate := Candidate{
 		StablePath: device.RequestedPath, DevicePath: device.ResolvedPath, Model: device.Model,
 		Serial: device.Serial, SizeBytes: device.Size, Transport: device.Transport, State: "uninitialized",
+	}
+	if err := validateSupportedDeviceSize(device.Size); err != nil {
+		candidate.State = "unsupported"
+		candidate.Reason = err.Error()
+		return candidate
 	}
 	if writable, err := chooseImageSize(device.Size); err == nil {
 		candidate.PlannedWritableBytes = writable
@@ -869,9 +976,10 @@ func classify(device driveinit.Device, records []storage.DeviceRecord, active st
 		candidate.Reason = "设备没有稳定序列号，无法防止误认盘"
 		return candidate
 	}
-	if device.Size < minimumDeviceSize+minimumReservedBytes {
+	required, policyErr := policy.InitializationRequiredBytes(uint64(max(device.Size, 0)))
+	if policyErr != nil || device.Size <= 0 || required >= uint64(device.Size) || uint64(device.Size)-required < uint64(minimumDeviceSize) {
 		candidate.State = "unsupported"
-		candidate.Reason = "设备容量不足 42GB，无法同时保留录像镜像和快照空间"
+		candidate.Reason = "设备容量不足以同时保留最低录像镜像、快照空间和初始化余量"
 		return candidate
 	}
 	if !safeForErase(device) {

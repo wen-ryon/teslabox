@@ -19,6 +19,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storage"
 	"github.com/wen-ryon/teslabox/internal/storagebench"
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 )
 
 type fakeLister struct{ devices []driveinit.Device }
@@ -43,6 +44,7 @@ func (f *fakeDriveInitializer) Run(_ context.Context, _ driveinit.Options) (driv
 type fakeImageInitializer struct {
 	calls   int
 	options imageinit.Options
+	onRun   func(imageinit.Options)
 }
 
 type fakeStorageBenchmark struct{ calls int }
@@ -55,6 +57,9 @@ func (f *fakeStorageBenchmark) Run(context.Context, string) (storagebench.Report
 func (f *fakeImageInitializer) Run(_ context.Context, options imageinit.Options) (imageinit.Result, error) {
 	f.calls++
 	f.options = options
+	if f.onRun != nil {
+		f.onRun(options)
+	}
 	if err := os.WriteFile(options.ImagePath, []byte("image"), 0o640); err != nil {
 		return imageinit.Result{}, err
 	}
@@ -85,13 +90,45 @@ func (f *fakeController) BeginMediaMaintenance(context.Context) (func(), error) 
 	return func() {}, nil
 }
 
-type fakeRunner struct{}
+type fakeRunner struct {
+	statOutput string
+}
 
-func (fakeRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
+func (f fakeRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
 	if name == "blkid" {
 		return []byte("new-uuid\n"), nil
 	}
+	if name == "stat" {
+		if f.statOutput != "" {
+			return []byte(f.statOutput), nil
+		}
+		// 初始化单元测试默认模拟一个空间充足的数据盘；容量边界由专门的表驱动用例覆盖。
+		return []byte("4096:488281250:488281250\n"), nil
+	}
 	return nil, nil
+}
+
+type simulatedInitializationRunner struct {
+	totalBytes     uint64
+	initialFree    uint64
+	allocatedBytes uint64
+}
+
+func (r *simulatedInitializationRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
+	switch name {
+	case "blkid":
+		return []byte("simulated-uuid\n"), nil
+	case "stat":
+		free := r.initialFree
+		if r.allocatedBytes < free {
+			free -= r.allocatedBytes
+		} else {
+			free = 0
+		}
+		return []byte(fmt.Sprintf("1:%d:%d\n", r.totalBytes, free)), nil
+	default:
+		return nil, nil
+	}
 }
 
 type defragmentRunner struct {
@@ -459,6 +496,151 @@ func TestManagerInitializeUsesFullCapacityAndMusicLayout(t *testing.T) {
 	}
 }
 
+func TestManagerInitializePreservesSnapshotSpaceAcrossDriveSizes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		deviceBytes int64
+		xfsTotal    uint64
+		xfsFree     uint64
+	}{
+		{
+			name:        "512 GB drive",
+			deviceBytes: 512_110_190_592,
+			xfsTotal:    512_000_000_000,
+			xfsFree:     508_419_558_400,
+		},
+		{
+			name:        "1 TB drive",
+			deviceBytes: 1_000_204_886_016,
+			xfsTotal:    1_000_000_000_000,
+			xfsFree:     995_000_000_000,
+		},
+		{
+			name:        "2 TB drive",
+			deviceBytes: maximumSupportedDeviceSize,
+			xfsTotal:    2_000_000_000_000,
+			xfsFree:     1_992_000_000_000,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			device := driveinit.Device{
+				RequestedPath: "/dev/disk/by-id/usb-simulated", ResolvedPath: "/dev/sda", Type: "disk",
+				Transport: "usb", Model: test.name, Serial: "SIMULATED", Size: test.deviceBytes,
+			}
+			runner := &simulatedInitializationRunner{totalBytes: test.xfsTotal, initialFree: test.xfsFree}
+			imageInitializer := &fakeImageInitializer{}
+			imageInitializer.onRun = func(options imageinit.Options) {
+				runner.allocatedBytes = uint64(options.WritableBytes)
+			}
+			policy := storagepolicy.DefaultSnapshotReservePolicy()
+			manager := New(Config{
+				DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+				DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+				Policy: policy,
+			}, runner, storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json")), fakeLister{devices: []driveinit.Device{device}}, &fakeDriveInitializer{root: root}, imageInitializer, &fakeController{})
+
+			result, err := manager.Initialize(t.Context(), InitializeRequest{
+				StablePath: device.RequestedPath, ConfirmSerial: device.Serial,
+				ConfirmErase: true, ConfirmOTGDisconnected: true,
+			})
+			if err != nil {
+				t.Fatalf("Initialize() error = %v", err)
+			}
+			remaining := runner.initialFree - runner.allocatedBytes
+			required, requiredErr := policy.InitializationRequiredBytes(runner.totalBytes)
+			if requiredErr != nil {
+				t.Fatal(requiredErr)
+			}
+			if remaining < required {
+				t.Fatalf("remaining bytes = %d, want at least %d", remaining, required)
+			}
+			legacyWritable, legacyErr := chooseImageSize(device.Size)
+			if legacyErr != nil {
+				t.Fatal(legacyErr)
+			}
+			legacyRemaining := runner.initialFree - uint64(legacyWritable)
+			snapshotMinimum, minimumErr := policy.RuntimeRequiredBytes(runner.totalBytes)
+			if minimumErr != nil {
+				t.Fatal(minimumErr)
+			}
+			if legacyRemaining >= snapshotMinimum {
+				t.Fatalf("simulation no longer reproduces old failure: legacy remaining %d, minimum %d", legacyRemaining, snapshotMinimum)
+			}
+			if result.PlannedWritableBytes != imageInitializer.options.WritableBytes || result.PlannedWritableBytes <= 0 {
+				t.Fatalf("planned writable bytes = %d, image options = %d", result.PlannedWritableBytes, imageInitializer.options.WritableBytes)
+			}
+			if result.PlannedImageSizeBytes > maximumSupportedDeviceSize {
+				t.Fatalf("advertised bytes = %d, exceeds MBR limit", result.PlannedImageSizeBytes)
+			}
+			t.Logf("advertised=%d writable=%d remaining=%d required=%d", result.PlannedImageSizeBytes, result.PlannedWritableBytes, remaining, required)
+		})
+	}
+}
+
+func TestManagerInitializeRejectsSpaceThatCannotPreserveSnapshotReserve(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-small-free", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Model: "Space constrained", Serial: "SMALL-FREE", Size: 128_000_000_000,
+	}
+	runner := &simulatedInitializationRunner{totalBytes: 128_000_000_000, initialFree: 44_000_000_000}
+	imageInitializer := &fakeImageInitializer{}
+	manager := New(Config{
+		DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+		DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+	}, runner, storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json")), fakeLister{devices: []driveinit.Device{device}}, &fakeDriveInitializer{root: root}, imageInitializer, &fakeController{})
+
+	_, err := manager.Initialize(t.Context(), InitializeRequest{
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial,
+		ConfirmErase: true, ConfirmOTGDisconnected: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "保留快照安全空间") {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if imageInitializer.calls != 0 {
+		t.Fatalf("image initializer calls = %d, want 0", imageInitializer.calls)
+	}
+}
+
+func TestManagerInitializeRejectsPostAllocationSnapshotSpaceRegression(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-overallocated", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Model: "Overallocated", Serial: "OVERALLOCATED", Size: 512_110_190_592,
+	}
+	runner := &simulatedInitializationRunner{totalBytes: 512_000_000_000, initialFree: 508_419_558_400}
+	imageInitializer := &fakeImageInitializer{}
+	imageInitializer.onRun = func(options imageinit.Options) {
+		// 模拟底层分配结果额外消耗安全余量，确保后置校验阻止错误登记为初始化完成。
+		runner.allocatedBytes = uint64(options.WritableBytes) + storagepolicy.DefaultInitializationHeadroomBytes
+	}
+	registry := storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json"))
+	manager := New(Config{
+		DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+		DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+	}, runner, registry, fakeLister{devices: []driveinit.Device{device}}, &fakeDriveInitializer{root: root}, imageInitializer, &fakeController{})
+
+	_, err := manager.Initialize(t.Context(), InitializeRequest{
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial,
+		ConfirmErase: true, ConfirmOTGDisconnected: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "初始化后快照空间不足") {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if imageInitializer.calls != 1 {
+		t.Fatalf("image initializer calls = %d, want 1", imageInitializer.calls)
+	}
+	if _, exists, activeErr := registry.Active(); activeErr != nil || exists {
+		t.Fatalf("registry active exists = %t, error = %v", exists, activeErr)
+	}
+}
+
 func TestManagerInitializeAcceptsNVMeCandidate(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -492,7 +674,7 @@ func TestClassifyReadyManagedDeviceAllowsReinitialize(t *testing.T) {
 		Children: []driveinit.Device{{ResolvedPath: "/dev/sda1", FileSystem: "xfs", UUID: "ready-uuid", Label: "TESLABOX", MountPoint: "/var/lib/teslabox"}},
 	}
 	record := storage.DeviceRecord{StablePath: device.RequestedPath, Serial: device.Serial, SizeBytes: device.Size, UUID: "ready-uuid", Status: "ready"}
-	candidate := classify(device, []storage.DeviceRecord{record}, record, true, "/var/lib/teslabox", "TESLABOX")
+	candidate := classify(device, []storage.DeviceRecord{record}, record, true, "/var/lib/teslabox", "TESLABOX", storagepolicy.DefaultSnapshotReservePolicy())
 	if !candidate.Initialized || !candidate.Active || !candidate.CanReinitialize || candidate.PlannedImageSizeBytes != 500_000_000_000 || candidate.PlannedWritableBytes != 475_000_000_000 {
 		t.Fatalf("candidate = %#v", candidate)
 	}
@@ -545,7 +727,10 @@ func TestChooseImageSize(t *testing.T) {
 		{name: "128 GB uses remaining capacity", deviceSize: 128_000_000_000, want: 118_000_000_000},
 		{name: "500 GB keeps five percent reserve", deviceSize: 500_000_000_000, want: 475_000_000_000},
 		{name: "64 GB reserve", deviceSize: 64_000_000_000, want: 54_000_000_000},
-		{name: "too small", deviceSize: 40_000_000_000, wantErr: true},
+		{name: "exactly 2 TB remains supported", deviceSize: maximumSupportedDeviceSize, want: 1_900_000_000_000},
+		{name: "one byte above 2 TB is rejected", deviceSize: maximumSupportedDeviceSize + 1, wantErr: true},
+		{name: "40 GB is below usable layout", deviceSize: 40_000_000_000, wantErr: true},
+		{name: "32 GB minimum cannot preserve writable layout", deviceSize: 32_000_000_000, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -557,18 +742,110 @@ func TestChooseImageSize(t *testing.T) {
 	}
 }
 
+func TestClassifyUsesSharedPolicyForSmallDrivePrecheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		size          int64
+		wantSupported bool
+	}{
+		{name: "40 GB rejected before erase", size: 40_000_000_000},
+		{name: "64 GB remains engineering compatible", size: 64_000_000_000, wantSupported: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			device := driveinit.Device{RequestedPath: "/dev/disk/by-id/usb-test", ResolvedPath: "/dev/sda", Type: "disk", Transport: "usb", Serial: "SERIAL", Size: test.size}
+			candidate := classify(device, nil, storage.DeviceRecord{}, false, "/var/lib/teslabox", "TESLABOX", storagepolicy.DefaultSnapshotReservePolicy())
+			if candidate.CanInitialize != test.wantSupported {
+				t.Fatalf("candidate = %+v, want supported = %t", candidate, test.wantSupported)
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsDrivesAboveTwoTB(t *testing.T) {
+	t.Parallel()
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-4tb", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Serial: "SERIAL-4TB", Size: 4_000_000_000_000,
+	}
+	tests := []struct {
+		name    string
+		records []storage.DeviceRecord
+		active  storage.DeviceRecord
+	}{
+		{name: "new device"},
+		{
+			name: "previously registered device",
+			records: []storage.DeviceRecord{{
+				StablePath: device.RequestedPath, Serial: device.Serial, SizeBytes: device.Size, Status: "ready",
+			}},
+			active: storage.DeviceRecord{StablePath: device.RequestedPath, Serial: device.Serial, SizeBytes: device.Size, Status: "ready"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := classify(device, test.records, test.active, len(test.records) > 0, "/var/lib/teslabox", "TESLABOX", storagepolicy.DefaultSnapshotReservePolicy())
+			if candidate.State != "unsupported" || candidate.CanInitialize || candidate.CanReinitialize || candidate.CanResume {
+				t.Fatalf("candidate = %+v", candidate)
+			}
+			if !strings.Contains(candidate.Reason, "大于 2TB") {
+				t.Fatalf("reason = %q", candidate.Reason)
+			}
+		})
+	}
+}
+
+func TestManagerInitializeRejectsDriveAboveTwoTBBeforeMaintenance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	device := driveinit.Device{
+		RequestedPath: "/dev/disk/by-id/usb-4tb", ResolvedPath: "/dev/sda", Type: "disk",
+		Transport: "usb", Serial: "SERIAL-4TB", Size: 4_000_000_000_000,
+	}
+	driveInitializer := &fakeDriveInitializer{root: root}
+	imageInitializer := &fakeImageInitializer{}
+	controller := &fakeController{}
+	manager := New(Config{
+		DataRoot: root, ImagePath: filepath.Join(root, "images", "teslacam.img"),
+		DataLabel: "TESLABOX", ImageLabel: "TESLACAM",
+	}, fakeRunner{}, storage.NewFileRegistry(filepath.Join(t.TempDir(), "registry.json")), fakeLister{devices: []driveinit.Device{device}}, driveInitializer, imageInitializer, controller)
+
+	_, err := manager.Initialize(t.Context(), InitializeRequest{
+		StablePath: device.RequestedPath, ConfirmSerial: device.Serial,
+		ConfirmErase: true, ConfirmOTGDisconnected: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "大于 2TB") {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if driveInitializer.calls != 0 || imageInitializer.calls != 0 || controller.maintenanceCalls != 0 {
+		t.Fatalf("destructive calls: drive=%d image=%d maintenance=%d", driveInitializer.calls, imageInitializer.calls, controller.maintenanceCalls)
+	}
+}
+
 func TestChooseAdvertisedSizeUsesRealSectorAlignedCapacity(t *testing.T) {
 	t.Parallel()
-	got, err := chooseAdvertisedSize(123_924_905_999)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name       string
+		deviceSize int64
+		want       int64
+		wantErr    bool
+	}{
+		{name: "sector aligned real capacity", deviceSize: 123_924_905_999, want: 123_924_905_984},
+		{name: "exactly 2 TB remains supported", deviceSize: maximumSupportedDeviceSize, want: maximumSupportedDeviceSize},
+		{name: "one byte above 2 TB is rejected", deviceSize: maximumSupportedDeviceSize + 1, wantErr: true},
+		{name: "4 TB is rejected instead of truncated", deviceSize: 4_000_000_000_000, wantErr: true},
 	}
-	if got != 123_924_905_984 || got%512 != 0 {
-		t.Fatalf("advertised size = %d", got)
-	}
-	capped, err := chooseAdvertisedSize(4_000_000_000_000)
-	if err != nil || capped != maximumMBRImageSize {
-		t.Fatalf("capped size = %d, error = %v", capped, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := chooseAdvertisedSize(test.deviceSize)
+			if (err != nil) != test.wantErr || got != test.want {
+				t.Fatalf("chooseAdvertisedSize() = %d, %v", got, err)
+			}
+			if err == nil && got%512 != 0 {
+				t.Fatalf("advertised size %d is not sector aligned", got)
+			}
+		})
 	}
 }
 

@@ -23,7 +23,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/wen-ryon/teslabox/internal/maintenanceguard"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
+	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -56,10 +58,12 @@ const (
 
 // Config 固定原始虚拟盘、状态目录和临时挂载点，避免把用户输入解释为文件系统路径。
 type Config struct {
-	ImagePath   string
-	StatePath   string
-	StagingPath string
-	MountPath   string
+	ImagePath      string
+	StatePath      string
+	StagingPath    string
+	MountPath      string
+	Policy         storagepolicy.SnapshotReservePolicy
+	OperationGuard *maintenanceguard.Guard
 }
 
 // Maintenance 在写入虚拟盘前独占 Gadget 和录像快照，避免 Linux 与车机同时写入同一文件系统。
@@ -127,12 +131,23 @@ type RecordingDeleteResult struct {
 
 // SpaceReclaimResult 区分 exFAT 可回收候选空间与外层 XFS 实际减少的物理占用。
 type SpaceReclaimResult struct {
-	CandidateBytes  uint64 `json:"candidate_bytes"`
-	ReclaimedBytes  uint64 `json:"reclaimed_bytes"`
-	FreeClusters    uint64 `json:"free_clusters"`
-	ClusterSize     uint64 `json:"cluster_size"`
-	RangeCount      int    `json:"range_count"`
-	ProcessedRanges int    `json:"processed_ranges"`
+	CandidateBytes      uint64                          `json:"candidate_bytes"`
+	ReclaimedBytes      uint64                          `json:"reclaimed_bytes"`
+	FreeClusters        uint64                          `json:"free_clusters"`
+	ClusterSize         uint64                          `json:"cluster_size"`
+	RangeCount          int                             `json:"range_count"`
+	ProcessedRanges     int                             `json:"processed_ranges"`
+	TargetBytes         uint64                          `json:"target_bytes,omitempty"`
+	OuterTotalBytes     uint64                          `json:"outer_total_bytes,omitempty"`
+	OuterFreeBytes      uint64                          `json:"outer_free_bytes,omitempty"`
+	RequiredBytes       uint64                          `json:"required_bytes,omitempty"`
+	DeficitBytes        uint64                          `json:"deficit_bytes,omitempty"`
+	RuntimeReady        bool                            `json:"runtime_ready"`
+	InitializationReady bool                            `json:"initialization_ready"`
+	State               maintenanceguard.OperationState `json:"state,omitempty"`
+	ReasonCode          string                          `json:"reason_code,omitempty"`
+	Message             string                          `json:"message,omitempty"`
+	Phase               string                          `json:"phase,omitempty"`
 }
 
 type manifest struct {
@@ -146,7 +161,8 @@ type Manager struct {
 	runner      system.Runner
 	maintenance Maintenance
 	snapshots   SnapshotSource
-	reclaim     func(context.Context, string) (SpaceReclaimResult, error)
+	reclaim     func(context.Context, string, uint64) (SpaceReclaimResult, error)
+	outerSpace  func(string) (uint64, uint64, error)
 	now         func() time.Time
 	mu          sync.Mutex
 }
@@ -184,7 +200,7 @@ func New(cfg Config, runner system.Runner, maintenance Maintenance, snapshots ..
 	}
 	manager := &Manager{
 		cfg: cfg, runner: runner, maintenance: maintenance,
-		reclaim: platformReclaimSpace, now: time.Now,
+		reclaim: platformReclaimSpace, outerSpace: platformOuterSpace, now: time.Now,
 	}
 	if len(snapshots) == 1 {
 		manager.snapshots = snapshots[0]
@@ -696,7 +712,7 @@ func (m *Manager) DeleteRecordingsAndReclaim(ctx context.Context, request Record
 	if err != nil {
 		return result, err
 	}
-	reclaim, reclaimErr := m.reclaimSpaceLocked(ctx)
+	reclaim, reclaimErr := m.reclaimSpaceLocked(ctx, 0)
 	result.SpaceReclaim = reclaim
 	if reclaimErr != nil {
 		// 删除已经同步落盘，不能把部分成功伪装成整体失败，否则用户可能重复删除。
@@ -771,10 +787,10 @@ func (m *Manager) ReclaimSpace(ctx context.Context) (result SpaceReclaimResult, 
 		return SpaceReclaimResult{}, fmt.Errorf("准备空间回收维护窗口: %w", err)
 	}
 	defer release()
-	return m.reclaimSpaceLocked(ctx)
+	return m.reclaimSpaceLocked(ctx, 0)
 }
 
-func (m *Manager) reclaimSpaceLocked(ctx context.Context) (result SpaceReclaimResult, resultErr error) {
+func (m *Manager) reclaimSpaceLocked(ctx context.Context, targetBytes uint64) (result SpaceReclaimResult, resultErr error) {
 	loopDevice, err := m.attachLoop(ctx)
 	if err != nil {
 		return SpaceReclaimResult{}, err
@@ -803,11 +819,256 @@ func (m *Manager) reclaimSpaceLocked(ctx context.Context) (result SpaceReclaimRe
 	if err := ctx.Err(); err != nil {
 		return SpaceReclaimResult{}, err
 	}
-	result, err = m.reclaim(ctx, m.cfg.ImagePath)
+	result, err = m.reclaim(ctx, m.cfg.ImagePath, targetBytes)
 	if err != nil {
 		return result, fmt.Errorf("回收 TeslaCam 虚拟盘外层空间: %w", err)
 	}
 	return result, nil
+}
+
+// RepairSnapshotReserve 只打洞补足策略缺口，避免旧版“回收全部空闲簇”破坏预分配效果。
+func (m *Manager) RepairSnapshotReserve(ctx context.Context) (result SpaceReclaimResult, resultErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !regularFile(m.cfg.ImagePath) {
+		return result, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	if m.cfg.Policy.MinFreeBytes() == 0 || m.cfg.OperationGuard == nil {
+		return result, errors.New("快照空间修复策略未初始化")
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return result, fmt.Errorf("准备快照空间修复维护窗口: %w", err)
+	}
+	defer release()
+
+	now := m.now().UTC()
+	state := maintenanceguard.State{Operation: "snapshot_reserve_repair", State: maintenanceguard.StateRunning, StartedAt: now}
+	if err := m.cfg.OperationGuard.Save(state); err != nil {
+		return result, err
+	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		state.State = maintenanceguard.StateFailed
+		if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+			state.State = maintenanceguard.StateInterrupted
+		}
+		state.ReclaimedBytes = result.ReclaimedBytes
+		state.LastError = resultErr.Error()
+		_ = m.cfg.OperationGuard.Save(state)
+	}()
+
+	total, free, err := m.outerSpace(filepath.Dir(m.cfg.ImagePath))
+	if err != nil {
+		return result, err
+	}
+	initialization, err := m.cfg.Policy.EvaluateInitialization(total, free)
+	if err != nil {
+		return result, err
+	}
+	result.OuterTotalBytes = total
+	result.OuterFreeBytes = free
+	result.RequiredBytes = initialization.RequiredBytes
+	result.DeficitBytes = initialization.DeficitBytes
+	result.TargetBytes = initialization.DeficitBytes
+	state.TargetBytes = result.TargetBytes
+	if initialization.Ready {
+		result.RuntimeReady = true
+		result.InitializationReady = true
+		result.State = maintenanceguard.StateCompleted
+		result.Phase = "completed"
+		result.Message = "快照空间已经满足初始化安全目标"
+		state.State = result.State
+		return result, m.cfg.OperationGuard.Save(state)
+	}
+
+	result, err = m.reclaimSpaceLocked(ctx, initialization.DeficitBytes)
+	result.TargetBytes = initialization.DeficitBytes
+	result.RequiredBytes = initialization.RequiredBytes
+	if err != nil {
+		return result, err
+	}
+	total, free, err = m.outerSpace(filepath.Dir(m.cfg.ImagePath))
+	if err != nil {
+		return result, err
+	}
+	runtimeStatus, err := m.cfg.Policy.EvaluateRuntime(total, free)
+	if err != nil {
+		return result, err
+	}
+	initialization, err = m.cfg.Policy.EvaluateInitialization(total, free)
+	if err != nil {
+		return result, err
+	}
+	result.OuterTotalBytes = total
+	result.OuterFreeBytes = free
+	result.RequiredBytes = initialization.RequiredBytes
+	result.DeficitBytes = initialization.DeficitBytes
+	result.RuntimeReady = runtimeStatus.Ready
+	result.InitializationReady = initialization.Ready
+	switch {
+	case initialization.Ready:
+		result.State = maintenanceguard.StateCompleted
+		result.Phase = "completed"
+		result.Message = "已定量补足快照安全空间"
+	case runtimeStatus.Ready:
+		result.State = maintenanceguard.StateCancelledSafe
+		result.Phase = "completed"
+		result.ReasonCode = "insufficient_exfat_free"
+		result.Message = "未达到初始化余量，但已经满足运行期快照安全门槛"
+	default:
+		result.State = maintenanceguard.StateCancelledUnsafe
+		result.Phase = "no_reclaimable_space"
+		result.ReasonCode = "insufficient_exfat_free"
+		result.Message = "exFAT 空闲簇不足，当前仍不能安全恢复 Gadget"
+	}
+	state.State = result.State
+	state.ReclaimedBytes = result.ReclaimedBytes
+	state.LastError = result.Message
+	if err := m.cfg.OperationGuard.Save(state); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// CancelSnapshotReserveRepair 停止继续回收，并以运行期门槛决定是否允许冷启动恢复。
+func (m *Manager) CancelSnapshotReserveRepair(ctx context.Context) (result SpaceReclaimResult, resultErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !regularFile(m.cfg.ImagePath) {
+		return result, errors.New("TeslaCam 虚拟盘尚未初始化")
+	}
+	if m.cfg.Policy.MinFreeBytes() == 0 || m.cfg.OperationGuard == nil {
+		return result, errors.New("快照空间修复策略未初始化")
+	}
+	release, err := m.maintenance.BeginMediaMaintenance(ctx)
+	if err != nil {
+		return result, fmt.Errorf("准备放弃快照空间修复: %w", err)
+	}
+	defer release()
+	if err := m.validateExFATLocked(ctx); err != nil {
+		state := maintenanceguard.State{Operation: "snapshot_reserve_repair", State: maintenanceguard.StateFailed, LastError: err.Error()}
+		_ = m.cfg.OperationGuard.Save(state)
+		return result, err
+	}
+	total, free, err := m.outerSpace(filepath.Dir(m.cfg.ImagePath))
+	if err != nil {
+		return result, err
+	}
+	runtimeStatus, err := m.cfg.Policy.EvaluateRuntime(total, free)
+	if err != nil {
+		return result, err
+	}
+	initialization, err := m.cfg.Policy.EvaluateInitialization(total, free)
+	if err != nil {
+		return result, err
+	}
+	result.OuterTotalBytes = total
+	result.OuterFreeBytes = free
+	result.RequiredBytes = runtimeStatus.RequiredBytes
+	result.DeficitBytes = runtimeStatus.DeficitBytes
+	result.RuntimeReady = runtimeStatus.Ready
+	result.InitializationReady = initialization.Ready
+	if runtimeStatus.Ready {
+		result.State = maintenanceguard.StateCancelledSafe
+		result.Phase = "completed"
+		result.Message = "已停止修复；当前满足运行期门槛，可在冷启动后恢复 Gadget"
+	} else {
+		result.State = maintenanceguard.StateCancelledUnsafe
+		result.Phase = "no_reclaimable_space"
+		result.ReasonCode = "insufficient_exfat_free"
+		result.Message = "已停止修复，但空间仍低于运行期门槛，禁止恢复 Gadget"
+	}
+	state := maintenanceguard.State{Operation: "snapshot_reserve_repair", State: result.State, LastError: result.Message}
+	if err := m.cfg.OperationGuard.Save(state); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// SnapshotReserveRepairStatus 只读外层空间和持久化状态，不在线扫描可能由车机写入的 exFAT 位图。
+func (m *Manager) SnapshotReserveRepairStatus() (result SpaceReclaimResult, resultErr error) {
+	if m.cfg.Policy.MinFreeBytes() == 0 || m.cfg.OperationGuard == nil {
+		return result, errors.New("快照空间修复策略未初始化")
+	}
+	state, exists, err := m.cfg.OperationGuard.Load()
+	if err != nil {
+		return result, err
+	}
+	if exists {
+		result.State = state.State
+		result.TargetBytes = state.TargetBytes
+		result.ReclaimedBytes = state.ReclaimedBytes
+		result.Message = state.LastError
+	} else {
+		result.State = maintenanceguard.StateIdle
+	}
+	if !regularFile(m.cfg.ImagePath) {
+		result.Message = "TeslaCam 虚拟盘尚未初始化"
+		return result, nil
+	}
+	total, free, err := m.outerSpace(filepath.Dir(m.cfg.ImagePath))
+	if err != nil {
+		return result, err
+	}
+	runtimeStatus, err := m.cfg.Policy.EvaluateRuntime(total, free)
+	if err != nil {
+		return result, err
+	}
+	initialization, err := m.cfg.Policy.EvaluateInitialization(total, free)
+	if err != nil {
+		return result, err
+	}
+	result.OuterTotalBytes = total
+	result.OuterFreeBytes = free
+	result.RequiredBytes = runtimeStatus.RequiredBytes
+	result.DeficitBytes = runtimeStatus.DeficitBytes
+	result.RuntimeReady = runtimeStatus.Ready
+	result.InitializationReady = initialization.Ready
+	if !runtimeStatus.Ready {
+		result.ReasonCode = "needs_maintenance_diagnosis"
+		result.Phase = "pending"
+		if result.Message == "" {
+			result.Message = "外层空间低于运行期门槛，需要在维护窗口诊断 exFAT 可回收空间"
+		}
+	}
+	switch result.State {
+	case maintenanceguard.StateRunning:
+		result.Phase = "repairing"
+	case maintenanceguard.StateInterrupted, maintenanceguard.StateFailed:
+		result.Phase = "interrupted"
+	case maintenanceguard.StateCompleted, maintenanceguard.StateCancelledSafe:
+		if runtimeStatus.Ready {
+			result.Phase = "completed"
+		}
+	case maintenanceguard.StateCancelledUnsafe:
+		result.Phase = "no_reclaimable_space"
+	}
+	return result, nil
+}
+
+func (m *Manager) validateExFATLocked(ctx context.Context) (resultErr error) {
+	loopDevice, err := m.attachLoop(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := m.detachLoop(context.WithoutCancel(ctx), loopDevice); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
+		return fmt.Errorf("等待放弃修复分区设备: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
+		var commandErr *system.CommandError
+		if !errors.As(err, &commandErr) || commandErr.Code != 1 {
+			return fmt.Errorf("检查放弃修复后的 exFAT 分区: %w", err)
+		}
+	}
+	return nil
 }
 
 // Apply 在安全维护窗口内把所有待应用变更写入对应分区，并保持 Gadget 暂停等待温重启恢复。
