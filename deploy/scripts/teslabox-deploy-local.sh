@@ -5,6 +5,8 @@ set -eu
 installer=/usr/local/sbin/teslabox-deploy-local
 current=/usr/local/bin/teslabox
 service=teslabox.service
+backup_dir=/var/lib/teslabox-system/update-backups
+backup="$backup_dir/teslabox.previous.backup"
 
 usage() {
   echo "用法：$0 --install" >&2
@@ -65,7 +67,6 @@ echo "[TeslaBox] 正在请求 sudo 授权…"
 sudo -v
 
 stamp=$(date +%Y%m%d-%H%M%S)
-backup="/usr/local/bin/teslabox.backup-$stamp"
 staged="/usr/local/bin/.teslabox-deploy-$stamp.new"
 
 rollback() {
@@ -77,7 +78,9 @@ rollback() {
   exit 1
 }
 
-sudo cp -a "$current" "$backup"
+# 手工测试部署与网页更新共用一个规范回滚文件，避免每次部署遗留一份带时间戳的旧程序。
+sudo install -d -o root -g root -m 0700 "$backup_dir"
+sudo install -o root -g root -m 0700 "$current" "$backup"
 sudo install -o root -g root -m 0755 "$candidate" "$staged"
 sudo mv -f "$staged" "$current"
 

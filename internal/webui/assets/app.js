@@ -24,6 +24,116 @@ const state = {
 };
 const $ = (id) => document.getElementById(id);
 
+function appendReleaseNoteInline(parent, source) {
+  const pattern = /\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let offset = 0;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    if (match.index > offset) parent.append(document.createTextNode(source.slice(offset, match.index)));
+    if (match[1] !== undefined) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[1];
+      parent.append(strong);
+    } else if (match[2] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = match[2];
+      parent.append(code);
+    } else {
+      const link = document.createElement("a");
+      link.textContent = match[3];
+      link.href = match[4];
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      parent.append(link);
+    }
+    offset = match.index + match[0].length;
+  }
+  if (offset < source.length) parent.append(document.createTextNode(source.slice(offset)));
+}
+
+function isReleaseNoteBlockStart(line) {
+  return /^(#{1,6})\s+/.test(line) || /^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)
+    || /^\s*>\s?/.test(line) || /^\s*```/.test(line) || /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line);
+}
+
+function renderReleaseNotes(container, markdown) {
+  container.replaceChildren();
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index++;
+      continue;
+    }
+    const fence = line.match(/^\s*```\s*([^\s`]*)\s*$/);
+    if (fence) {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      const content = [];
+      index++;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) content.push(lines[index++]);
+      if (index < lines.length) index++;
+      code.textContent = content.join("\n");
+      if (fence[1]) code.dataset.language = fence[1];
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const title = document.createElement(`h${heading[1].length}`);
+      appendReleaseNoteInline(title, heading[2]);
+      container.append(title);
+      index++;
+      continue;
+    }
+    if (/^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)) {
+      container.append(document.createElement("hr"));
+      index++;
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const list = document.createElement(unordered ? "ul" : "ol");
+      const itemPattern = unordered ? /^\s*[-*+]\s+(.+)$/ : /^\s*\d+[.)]\s+(.+)$/;
+      while (index < lines.length) {
+        const item = lines[index].match(itemPattern);
+        if (!item) break;
+        const listItem = document.createElement("li");
+        appendReleaseNoteInline(listItem, item[1]);
+        list.append(listItem);
+        index++;
+      }
+      container.append(list);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const content = [];
+      while (index < lines.length) {
+        const part = lines[index].match(/^\s*>\s?(.*)$/);
+        if (!part) break;
+        content.push(part[1]);
+        index++;
+      }
+      appendReleaseNoteInline(quote, content.join(" "));
+      container.append(quote);
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    const content = [line.trim()];
+    index++;
+    while (index < lines.length && lines[index].trim() && !isReleaseNoteBlockStart(lines[index])) {
+      content.push(lines[index].trim());
+      index++;
+    }
+    appendReleaseNoteInline(paragraph, content.join(" "));
+    container.append(paragraph);
+  }
+}
+
 const loginView = $("login-view");
 const appView = $("app-view");
 const loginForm = $("login-form");
@@ -233,7 +343,11 @@ async function request(path, options = {}) {
   const response = await requestResponse(path, options);
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）`;
-    try { message = (await response.json()).error || message; } catch (_) { /* 保留通用提示 */ }
+    try {
+      const payload = await response.json();
+      message = payload.error || message;
+      if (payload.suggestion) message += `；${payload.suggestion}`;
+    } catch (_) { /* 保留通用提示 */ }
     throw new Error(message);
   }
   if (response.status === 204) return null;
@@ -384,8 +498,9 @@ $("tesla-browser-compatibility").addEventListener("change", (event) => applyTesl
 $("wifi-scan").addEventListener("click", scanWiFi);
 $("saved-network-toggle").addEventListener("click", () => toggleNetworkPanel("saved-network-panel", "saved-network-toggle"));
 $("available-network-toggle").addEventListener("click", () => toggleNetworkPanel("available-network-panel", "available-network-toggle"));
-$("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0));
+$("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0, state.ap?.allowed_channels));
 $("ap-form").addEventListener("submit", saveAPSettings);
+$("ap-repair-interface").addEventListener("click", repairAPInterface);
 $("export-settings-save").addEventListener("click", saveExportSettings);
 $("export-history-refresh").addEventListener("click", loadExportSettings);
 $("export-delete-after-download").addEventListener("change", renderExportRetentionControls);
@@ -1466,7 +1581,7 @@ function renderUpdate(update) {
   const installDetail = update.install_result === "success" ? "上次更新已成功安装。" : "";
   $("update-version-detail").textContent = update.error || installDetail || detail;
   $("update-release-notes").hidden = !update.release_notes;
-  $("update-release-notes").textContent = update.release_notes || "";
+  renderReleaseNotes($("update-release-notes"), update.release_notes);
   const downloading = update.state === "downloading";
   $("update-progress-wrap").hidden = !downloading;
   $("update-progress").value = Number(update.progress_percent || 0);
@@ -1569,8 +1684,9 @@ function renderUpdateHistory(history) {
     metadata.textContent = `${release.action === "rollback" ? "可回退" : "可安装"}${release.published_at ? ` · 发布于 ${formatDate(release.published_at)}` : ""}`;
     copy.append(title, metadata);
     if (release.release_notes) {
-      const notes = document.createElement("p");
-      notes.textContent = release.release_notes;
+      const notes = document.createElement("div");
+      notes.className = "update-history-notes update-release-markdown";
+      renderReleaseNotes(notes, release.release_notes);
       copy.append(notes);
     }
     const button = document.createElement("button");
@@ -1986,17 +2102,34 @@ async function forgetWiFi(network) {
 
 function renderAPSettings(ap) {
   const available = Boolean(ap.available);
-  $("ap-status").textContent = !available ? "不可用" : ap.enabled ? "运行中" : "已停用";
-  $("ap-status").className = `hardware-value${ap.enabled ? " ok" : " error"}`;
+  const labels = {disabled:"已停用", starting:"正在启动", running:"运行中", degraded:"启动异常", blocked:"受限", failed:"启动失败", recovering:"正在恢复"};
+  const operationalState = !available ? "unavailable" : (ap.state || (ap.enabled ? "running" : "disabled"));
+  $("ap-status").textContent = !available ? "不可用" : (labels[operationalState] || "状态未知");
+  $("ap-status").className = `hardware-value${operationalState === "running" ? " ok" : operationalState === "starting" || operationalState === "recovering" ? "" : " error"}`;
   $("ap-interface").textContent = ap.interface || "—";
+  $("ap-interface-role").textContent = ap.interface_role || "—";
   $("ap-mac-address").textContent = ap.mac_address || "—";
+  $("ap-active-band").textContent = ap.active_band === "a" ? "5 GHz" : ap.active_band === "bg" ? "2.4 GHz" : operationalState === "running" ? "读取中" : "未运行";
+  $("ap-active-channel").textContent = ap.active_channel ? String(ap.active_channel) : operationalState === "running" ? "读取中" : "未运行";
   $("ap-ssid").value = ap.ssid || "";
   $("ap-band").value = ap.band || "a";
-  populateAPChannels($("ap-band").value, Number(ap.channel || 0));
-  $("ap-enabled").checked = Boolean(ap.enabled);
+  populateAPChannels($("ap-band").value, Number(ap.channel || 0), ap.allowed_channels);
+  $("ap-enabled").checked = Boolean(ap.desired_enabled ?? ap.enabled);
   $("ap-autoconnect").checked = Boolean(ap.auto_connect);
   $("ap-address").textContent = ap.address || "—";
   $("ap-sharing").textContent = ap.sharing ? "已开启" : "未开启";
+  const notices = [];
+  if (operationalState !== "running" && ap.status_message) notices.push(ap.status_message);
+  if (ap.suggested_action) notices.push(ap.suggested_action);
+  if (ap.capability_notice) notices.push(ap.capability_notice);
+  $("ap-capability-notice").hidden = notices.length === 0;
+  $("ap-capability-notice").textContent = notices.join(" ");
+  $("ap-repair-interface").hidden = !Array.isArray(ap.conflicting_profiles) || ap.conflicting_profiles.length === 0;
+  const preferredBand = ap.band === "bg" ? "2.4 GHz" : "5 GHz";
+  const preferredChannel = ap.channel ? `信道 ${ap.channel}` : "自动信道";
+  $("ap-channel-detail").textContent = ["same_channel", "unknown"].includes(ap.concurrency_mode)
+    ? `首选配置为 ${preferredBand} / ${preferredChannel}；连接上游 WiFi 时，热点会切换到上游的实际频段和信道。`
+    : `首选配置为 ${preferredBand} / ${preferredChannel}；当前无线能力允许时，热点会保持该配置。`;
   $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = !available; });
 }
 
@@ -2004,19 +2137,48 @@ function renderAPUnavailable(message) {
   $("ap-status").textContent = "不可用";
   $("ap-status").className = "hardware-value error";
   $("ap-interface").textContent = "—";
+  $("ap-interface-role").textContent = "—";
   $("ap-mac-address").textContent = "—";
+  $("ap-active-band").textContent = "—";
+  $("ap-active-channel").textContent = "—";
   $("ap-address").textContent = message;
+  $("ap-capability-notice").hidden = false;
+  $("ap-capability-notice").textContent = message;
+  $("ap-repair-interface").hidden = true;
+  $("ap-channel-detail").textContent = "无法读取热点能力和当前工作信道。";
   $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = true; });
 }
 
-function populateAPChannels(band, selected) {
+async function repairAPInterface() {
+  const confirmed = await askConfirmation(
+    "修复 AP 接口",
+    "系统将断开占用 AP 接口的普通 WiFi 配置，关闭它们的自动连接并解除接口绑定；不会删除已保存的 WiFi。请优先通过网线访问此页面。",
+    "确认修复",
+    true,
+  );
+  if (!confirmed) return;
+  setSettingsNotice("正在提交 AP 接口修复…", false);
+  try {
+    await postJSON("/api/v1/network/ap/repair", {});
+    setSettingsNotice("修复已提交，AP 接口将在 1 秒后释放，请稍后重新开启热点", false);
+    window.setTimeout(() => loadSettings(), 2500);
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+function populateAPChannels(band, selected, allowedChannels = []) {
   const select = $("ap-channel");
-  const channels = band === "bg" ? [0,1,2,3,4,5,6,7,8,9,10,11,12,13] : [0,36,40,44,48,149,153,157,161,165];
+  const supported = new Set((allowedChannels || []).map(Number).filter((channel) => channel > 0));
+  const candidates = band === "bg" ? [0,1,2,3,4,5,6,7,8,9,10,11,12,13] : [0,36,40,44,48,149,153,157,161,165];
+  const channels = candidates.filter((channel) => channel === 0 || supported.size === 0 || supported.has(channel) || channel === selected);
   select.replaceChildren();
   channels.forEach((channel) => {
     const option = document.createElement("option");
     option.value = String(channel);
-    option.textContent = channel === 0 ? "自动" : String(channel);
+    const restricted = channel > 0 && supported.size > 0 && !supported.has(channel);
+    option.textContent = channel === 0 ? "自动（按网卡能力选择）" : `${channel}${restricted ? "（当前受限）" : ""}`;
+    option.disabled = restricted;
     option.selected = channel === selected;
     select.append(option);
   });
@@ -3644,8 +3806,9 @@ function advanceToNextSegment() {
 }
 
 function updatePlayButton() {
-  $("play-toggle").textContent = sessionVideo.paused ? "▶" : "Ⅱ";
-  $("play-toggle").setAttribute("aria-label", sessionVideo.paused ? "播放" : "暂停");
+  const paused = sessionVideo.paused;
+  $("play-toggle").dataset.state = paused ? "paused" : "playing";
+  $("play-toggle").setAttribute("aria-label", paused ? "播放" : "暂停");
 }
 
 function currentSessionPosition() {

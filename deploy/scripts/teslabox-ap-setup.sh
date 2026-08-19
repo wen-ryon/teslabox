@@ -119,17 +119,27 @@ supports_ap_mode() {
 		'
 }
 
-supports_ap_sta_concurrency() {
+ap_sta_channel_limit() {
 	printf '%s\n' "$WIFI_PHY_INFO" |
 		awk '
-			function combination_supported(value) {
-				return value ~ /managed/ &&
-					value ~ /(^|[[:space:],{}])AP([[:space:],{}]|$)/ &&
-					value ~ /total[[:space:]]*<=[[:space:]]*[2-9]/
+			function combination_supported(value, total) {
+				if (value !~ /managed/ || value !~ /(^|[[:space:],{}])AP([[:space:],{}]|$)/ ||
+					value !~ /total[[:space:]]*<=[[:space:]]*[0-9]+/) return 0
+				total = value
+				sub(/^.*total[[:space:]]*<=[[:space:]]*/, "", total)
+				sub(/[^0-9].*$/, "", total)
+				return total + 0 >= 2
+			}
+			function record_combination(value, limit) {
+				if (!combination_supported(value) || value !~ /#channels[[:space:]]*<=[[:space:]]*[0-9]+/) return
+				sub(/^.*#channels[[:space:]]*<=[[:space:]]*/, "", value)
+				sub(/[^0-9].*$/, "", value)
+				limit = value + 0
+				if (limit > max_channels) max_channels = limit
 			}
 			/^[[:space:]]*valid interface combinations:/ { in_combinations = 1; next }
 			in_combinations && /^[[:space:]]*\*/ {
-				if (combination_supported(combination)) found = 1
+				record_combination(combination)
 				combination = $0
 				next
 			}
@@ -138,8 +148,9 @@ supports_ap_sta_concurrency() {
 				next
 			}
 			END {
-				if (combination_supported(combination)) found = 1
-				exit found ? 0 : 1
+				record_combination(combination)
+				if (max_channels > 0) print max_channels
+				exit max_channels > 0 ? 0 : 1
 			}
 		'
 }
@@ -161,16 +172,25 @@ if ! supports_ap_mode; then
 	exit 0
 fi
 
+AP_STA_CHANNEL_LIMIT=$(ap_sta_channel_limit || true)
+case "$AP_STA_CHANNEL_LIMIT" in
+	''|*[!0-9]*) AP_STA_CHANNEL_LIMIT=0 ;;
+esac
+
 CONCURRENT_MODE=false
-if [ "$SEPARATE_AP_RADIO" = "true" ] || supports_ap_sta_concurrency; then
+CHANNEL_COUPLED=false
+if [ "$SEPARATE_AP_RADIO" = "true" ] || [ "$AP_STA_CHANNEL_LIMIT" -gt 0 ]; then
 	CONCURRENT_MODE=true
+fi
+if [ "$SEPARATE_AP_RADIO" != "true" ] && [ "$AP_STA_CHANNEL_LIMIT" -eq 1 ]; then
+	CHANNEL_COUPLED=true
 fi
 
 channel_supported() {
 	channel="$1"
 	printf '%s\n' "$AP_PHY_INFO" |
 		awk -v marker="[${channel}]" '
-			index($0, marker) > 0 && $0 !~ /\(disabled\)/ && $0 !~ /\(no IR\)/ { found = 1 }
+			index($0, marker) > 0 && $0 !~ /\(disabled\)/ && $0 !~ /\(no IR\)/ && tolower($0) !~ /radar/ { found = 1 }
 			END { exit found ? 0 : 1 }
 		'
 }
@@ -233,10 +253,16 @@ if [ "$CONCURRENT_MODE" = "true" ] && [ "$SEPARATE_AP_RADIO" != "true" ]; then
 fi
 
 /usr/bin/nmcli device set "$AP_INTERFACE" managed yes
-/usr/bin/nmcli connection modify id "$AP_CONNECTION_NAME" connection.interface-name "$AP_INTERFACE"
+/usr/bin/nmcli connection modify id "$AP_CONNECTION_NAME" \
+	connection.interface-name "$AP_INTERFACE" \
+	connection.autoconnect-retries 1
 
-if [ -n "$UPSTREAM_CHANNEL" ] && [ "$SEPARATE_AP_RADIO" != "true" ]; then
-	# 单射频 AP+STA 必须共用信道；先跟随已经连接的上游，避免热点首次启动直接失败。
+if [ -n "$UPSTREAM_CHANNEL" ] && [ "$CHANNEL_COUPLED" = "true" ]; then
+	# 驱动只允许一个活动信道时先跟随已经连接的上游，避免热点首次启动直接失败。
+	if ! channel_supported "$UPSTREAM_CHANNEL"; then
+		echo "teslabox-ap-setup: 上游信道 $UPSTREAM_CHANNEL 当前被 disabled/no IR/RADAR 限制，不能在同信道创建热点" >&2
+		exit 0
+	fi
 	/usr/bin/nmcli connection modify id "$AP_CONNECTION_NAME" \
 		802-11-wireless.band "$(band_for_channel "$UPSTREAM_CHANNEL")" \
 		802-11-wireless.channel "$UPSTREAM_CHANNEL"

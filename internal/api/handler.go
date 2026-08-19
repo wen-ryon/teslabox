@@ -51,6 +51,7 @@ type DeviceAdmin interface {
 	Forget(context.Context, string) error
 	APSettings(context.Context) (deviceadmin.APSettings, error)
 	UpdateAP(context.Context, deviceadmin.APUpdate) error
+	RepairAPInterface(context.Context) error
 	SchedulePower(string) error
 }
 
@@ -1673,6 +1674,13 @@ func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *sl
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
 	})
+	mux.HandleFunc("POST /api/v1/network/ap/repair", func(w http.ResponseWriter, r *http.Request) {
+		if err := admin.RepairAPInterface(r.Context()); err != nil {
+			writeDeviceAdminError(w, logger, "修复 AP 接口失败", err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+	})
 	mux.HandleFunc("POST /api/v1/system/power", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			Action string `json:"action"`
@@ -1719,6 +1727,14 @@ func writeDeviceAdminError(w http.ResponseWriter, logger *slog.Logger, message s
 	var inputError *deviceadmin.InputError
 	if errors.As(err, &inputError) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
+		return
+	}
+	var operationError *deviceadmin.APOperationError
+	if errors.As(err, &operationError) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": operationError.Error(), "reason_code": operationError.Code,
+			"suggestion": operationError.Suggestion,
+		})
 		return
 	}
 	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "设备网络管理暂不可用"})

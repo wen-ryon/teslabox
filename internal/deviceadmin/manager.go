@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,18 +86,19 @@ type AccessPoint struct {
 
 // WiFiStatus 描述客户端 WiFi 页面需要的当前状态。
 type WiFiStatus struct {
-	Available         bool           `json:"available"`
-	Interface         string         `json:"interface"`
-	MACAddress        string         `json:"mac_address,omitempty"`
-	IPAddress         string         `json:"ip_address,omitempty"`
-	CurrentConnection string         `json:"current_connection,omitempty"`
-	APActive          bool           `json:"ap_active"`
-	ConcurrentMode    bool           `json:"concurrent_mode"`
-	ChannelCoupled    bool           `json:"channel_coupled"`
-	SingleRadioNotice string         `json:"single_radio_notice,omitempty"`
-	SavedNetworks     []SavedNetwork `json:"saved_networks"`
-	AvailableNetworks []AccessPoint  `json:"available_networks"`
-	Recovery          RecoveryStatus `json:"recovery"`
+	Available             bool   `json:"available"`
+	Interface             string `json:"interface"`
+	MACAddress            string `json:"mac_address,omitempty"`
+	IPAddress             string `json:"ip_address,omitempty"`
+	CurrentConnection     string `json:"current_connection,omitempty"`
+	currentConnectionUUID string
+	APActive              bool           `json:"ap_active"`
+	ConcurrentMode        bool           `json:"concurrent_mode"`
+	ChannelCoupled        bool           `json:"channel_coupled"`
+	SingleRadioNotice     string         `json:"single_radio_notice,omitempty"`
+	SavedNetworks         []SavedNetwork `json:"saved_networks"`
+	AvailableNetworks     []AccessPoint  `json:"available_networks"`
+	Recovery              RecoveryStatus `json:"recovery"`
 }
 
 // RecoveryStatus 描述运行期上游 WiFi 自愈的最近结果。
@@ -112,20 +114,52 @@ type RecoveryStatus struct {
 
 // APSettings 描述热点配置；密码永远不会通过读取接口返回。
 type APSettings struct {
-	Available      bool   `json:"available"`
-	Enabled        bool   `json:"enabled"`
-	Interface      string `json:"interface,omitempty"`
-	MACAddress     string `json:"mac_address,omitempty"`
-	ConnectionName string `json:"connection_name,omitempty"`
-	UUID           string `json:"uuid,omitempty"`
-	SSID           string `json:"ssid,omitempty"`
-	Band           string `json:"band,omitempty"`
-	Channel        int    `json:"channel,omitempty"`
-	Security       string `json:"security,omitempty"`
-	Address        string `json:"address,omitempty"`
-	AutoConnect    bool   `json:"auto_connect"`
-	Sharing        bool   `json:"sharing"`
+	Available             bool                  `json:"available"`
+	Enabled               bool                  `json:"enabled"`
+	DesiredEnabled        bool                  `json:"desired_enabled"`
+	State                 string                `json:"state"`
+	ReasonCode            string                `json:"reason_code,omitempty"`
+	StatusMessage         string                `json:"status_message,omitempty"`
+	SuggestedAction       string                `json:"suggested_action,omitempty"`
+	Interface             string                `json:"interface,omitempty"`
+	InterfaceRole         string                `json:"interface_role,omitempty"`
+	MACAddress            string                `json:"mac_address,omitempty"`
+	ConnectionName        string                `json:"connection_name,omitempty"`
+	UUID                  string                `json:"uuid,omitempty"`
+	SSID                  string                `json:"ssid,omitempty"`
+	Band                  string                `json:"band,omitempty"`
+	Channel               int                   `json:"channel,omitempty"`
+	ActiveBand            string                `json:"active_band,omitempty"`
+	ActiveChannel         int                   `json:"active_channel,omitempty"`
+	ConcurrencyMode       string                `json:"concurrency_mode,omitempty"`
+	MaxConcurrentChannels int                   `json:"max_concurrent_channels,omitempty"`
+	CapabilityNotice      string                `json:"capability_notice,omitempty"`
+	AllowedChannels       []int                 `json:"allowed_channels,omitempty"`
+	Security              string                `json:"security,omitempty"`
+	Address               string                `json:"address,omitempty"`
+	AutoConnect           bool                  `json:"auto_connect"`
+	Sharing               bool                  `json:"sharing"`
+	ConflictingProfiles   []APInterfaceConflict `json:"conflicting_profiles,omitempty"`
 }
+
+// APInterfaceConflict 描述抢占预留 AP 接口的普通 WiFi 配置，不包含密码等敏感字段。
+type APInterfaceConflict struct {
+	Name        string `json:"name"`
+	UUID        string `json:"uuid"`
+	SSID        string `json:"ssid,omitempty"`
+	Active      bool   `json:"active"`
+	AutoConnect bool   `json:"auto_connect"`
+}
+
+// APOperationError 是可以安全展示给管理页面的热点启动失败。
+type APOperationError struct {
+	Code       string
+	Message    string
+	Suggestion string
+}
+
+// Error 返回面向用户的简体中文错误说明。
+func (e *APOperationError) Error() string { return e.Message }
 
 // ConnectRequest 描述连接已保存网络或新网络的请求。
 type ConnectRequest struct {
@@ -179,6 +213,7 @@ type Manager struct {
 	monitoredWiFiInterface  string
 	watchNetworkEvents      networkEventWatch
 	sameWirelessPHY         func(string, string) (bool, bool)
+	wirelessPHYInfo         func(context.Context, string) (string, error)
 }
 
 // NetworkConfig 允许管理员固定无线接口；客户端接口留空时会根据 NetworkManager 自动发现。
@@ -199,7 +234,7 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 			networkConfig.APInterface = defaultAPInterface
 		}
 	}
-	return &Manager{
+	manager := &Manager{
 		runner: runner, logger: logger,
 		configuredWiFiInterface: strings.TrimSpace(networkConfig.WiFiInterface),
 		configuredAPInterface:   strings.TrimSpace(networkConfig.APInterface),
@@ -208,6 +243,8 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 		watchNetworkEvents:      watchNetworkManagerEvents,
 		sameWirelessPHY:         wirelessInterfacesSharePHY,
 	}
+	manager.wirelessPHYInfo = manager.readWirelessPHYInfo
+	return manager
 }
 
 // Run 订阅 NetworkManager 事件，并只在上游 WiFi 状态、BSSID 或信道实际变化时恢复 AP+STA。
@@ -257,6 +294,13 @@ func (m *Manager) Run(ctx context.Context) {
 			resetTimer(watcherRetryTimer, networkWatcherRetry)
 			resetTimer(fallbackTimer, networkFallbackInterval)
 		case <-watcherRetryTimer.C:
+			// 设备清单变化后旧接口名可能已经失效。事件合并与监听重试由两个计时器驱动，
+			// 不能依赖它们恰好按某个顺序触发；重建监听前必须主动刷新目标接口。
+			refreshCtx, cancel := context.WithTimeout(ctx, recoveryTimeout)
+			if err := m.refreshMonitoredInterface(refreshCtx); err != nil {
+				m.logger.Warn("重新识别 NetworkManager 无线接口失败", "error", err)
+			}
+			cancel()
 			watcherOnline = m.startNetworkWatcher(ctx, events, watchErrors)
 			if watcherOnline {
 				stopTimer(fallbackTimer)
@@ -371,6 +415,17 @@ func (m *Manager) monitoredInterface() string {
 	return m.monitoredWiFiInterface
 }
 
+func (m *Manager) refreshMonitoredInterface(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status, err := m.WiFiStatus(ctx)
+	if err != nil {
+		return err
+	}
+	m.monitoredWiFiInterface = status.Interface
+	return nil
+}
+
 func stoppedTimer() *time.Timer {
 	timer := time.NewTimer(time.Hour)
 	stopTimer(timer)
@@ -411,9 +466,9 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 			concurrent := wifiAvailable && profile.Active && profile.Device == apInterface && apInterface != wifiInterface
 			status.ConcurrentMode = status.ConcurrentMode || concurrent
 			if concurrent {
-				samePHY, known := m.sameWirelessPHY(wifiInterface, apInterface)
-				// 无法读取 sysfs 拓扑时按共用射频处理，宁可多做一次信道对齐，也不能让单射频并发随机失败。
-				status.ChannelCoupled = status.ChannelCoupled || !known || samePHY
+				channelCoupled, known := m.wirelessInterfacesChannelCoupled(ctx, wifiInterface, apInterface)
+				// 无法读取拓扑或驱动能力时按单信道处理，避免未知网卡在跨信道并发时反复启动失败。
+				status.ChannelCoupled = status.ChannelCoupled || !known || channelCoupled
 			}
 			continue
 		}
@@ -421,6 +476,7 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 			// NetworkManager 的连接配置名称可以由程序或用户任意命名，不能当作实际 SSID 展示。
 			// 例如 TeslaBox 管理的配置名可能是 TeslaBox-Upstream，但真实接入点仍是家庭 WiFi。
 			status.CurrentConnection = profile.SSID
+			status.currentConnectionUUID = profile.UUID
 		}
 		status.SavedNetworks = append(status.SavedNetworks, SavedNetwork{
 			Name: profile.Name, UUID: profile.UUID, SSID: profile.SSID,
@@ -433,7 +489,7 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 			if status.ChannelCoupled {
 				status.SingleRadioNotice = "AP+STA 并发模式已启用；连接不同信道的上游 WiFi 时，热点会短暂切换到相同信道。"
 			} else {
-				status.SingleRadioNotice = "热点和上游 WiFi 使用独立无线设备，可以分别使用不同信道。"
+				status.SingleRadioNotice = "当前无线能力允许热点和上游 WiFi 保持各自信道。"
 			}
 		} else {
 			status.SingleRadioNotice = fmt.Sprintf("热点正在占用 %s；当前系统没有可用的 AP+STA 并发接口，连接上游 WiFi 会被阻止。", wifiInterface)
@@ -504,25 +560,14 @@ func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string,
 			if settingsErr != nil {
 				return false, current.SSID, settingsErr
 			}
-			if !status.APActive || !settings.Enabled || !status.ChannelCoupled || settings.Channel == target.Channel {
+			if !settings.DesiredEnabled || !apRequiresSameChannel(settings.ConcurrencyMode) {
 				return false, "", nil
 			}
-			if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
-				return false, current.SSID, fmt.Errorf("跟随上游 WiFi 信道: %w", err)
+			if settings.State == "running" && settings.ActiveChannel == target.Channel {
+				return false, "", nil
 			}
-			if _, err := m.run(
-				ctx,
-				"nmcli", "--wait", "15", "connection", "up", "uuid", current.UUID,
-				"ifname", status.Interface, "ap", target.BSSID,
-			); err != nil {
-				activated, pending := m.activationStateAfterWaitTimeout(ctx, status.Interface, err)
-				if activated {
-					return true, current.SSID, nil
-				}
-				if pending {
-					return false, "", nil
-				}
-				return false, current.SSID, fmt.Errorf("恢复 %s: %w", current.SSID, err)
+			if err := m.ensureAPAfterUpstream(ctx, status, target.Channel); err != nil {
+				return false, current.SSID, fmt.Errorf("验证上游信道上的热点: %w", err)
 			}
 			return true, current.SSID, nil
 		}
@@ -628,12 +673,18 @@ func (m *Manager) activationStateAfterWaitTimeout(ctx context.Context, interface
 }
 
 func currentAutoConnectNetwork(status WiFiStatus) (SavedNetwork, bool) {
-	for _, network := range status.SavedNetworks {
-		if network.Name == status.CurrentConnection && network.AutoConnect {
-			return network, true
-		}
+	network, found := currentSavedNetwork(status)
+	if !found || !network.AutoConnect {
+		return SavedNetwork{}, false
 	}
-	return SavedNetwork{}, false
+	return network, true
+}
+
+func currentSavedNetwork(status WiFiStatus) (SavedNetwork, bool) {
+	if status.currentConnectionUUID == "" {
+		return SavedNetwork{}, false
+	}
+	return findSavedNetwork(status.SavedNetworks, status.currentConnectionUUID)
 }
 
 type autoConnectCandidate struct {
@@ -812,6 +863,9 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 		if err != nil {
 			return fmt.Errorf("连接已保存网络: %w", err)
 		}
+		if err := m.ensureAPAfterUpstream(ctx, status, target.Channel); err != nil {
+			return fmt.Errorf("连接上游后恢复热点: %w", err)
+		}
 		if request.AutoConnect != nil {
 			return m.setAutoConnect(ctx, request.UUID, *request.AutoConnect)
 		}
@@ -838,6 +892,9 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	}
 	if _, err := m.run(ctx, "nmcli", args...); err != nil {
 		return fmt.Errorf("连接无线网络: %w", err)
+	}
+	if err := m.ensureAPAfterUpstream(ctx, status, target.Channel); err != nil {
+		return fmt.Errorf("连接上游后恢复热点: %w", err)
 	}
 	autoConnect := true
 	if request.AutoConnect != nil {
@@ -1016,32 +1073,145 @@ func (m *Manager) Forget(ctx context.Context, uuid string) error {
 	return nil
 }
 
+// RepairAPInterface 停用并解绑抢占预留 AP 接口的普通 WiFi 配置，但不会删除用户保存的网络。
+func (m *Manager) RepairAPInterface(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	profiles, err := m.wirelessProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	wifiInterface, apInterface, _, apAvailable := m.networkInterfaces(ctx, profiles)
+	if !apAvailable || apInterface == "" {
+		return invalidInput("未找到可修复的 AP 接口")
+	}
+	conflicts := apInterfaceConflicts(profiles, wifiInterface, apInterface)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	apUUID := ""
+	for _, item := range profiles {
+		if item.Mode == "ap" {
+			apUUID = item.UUID
+			break
+		}
+	}
+	if !validUUID(apUUID) {
+		return invalidInput("未找到可管理的 AP 配置")
+	}
+	m.schedule(apDisableDelay, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		operationCtx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+		defer cancel()
+		if _, disconnectErr := m.runner.Run(operationCtx, "nmcli", "device", "disconnect", apInterface); disconnectErr != nil && !isNMDeviceInactive(disconnectErr) {
+			m.logger.Warn("断开被抢占的 AP 接口失败", "interface", apInterface, "error", disconnectErr)
+		}
+		for _, conflict := range conflicts {
+			if _, modifyErr := m.runner.Run(
+				operationCtx, "nmcli", "connection", "modify", "uuid", conflict.UUID,
+				"connection.autoconnect", "no", "connection.interface-name", "",
+			); modifyErr != nil {
+				m.logger.Warn("停用 AP 接口冲突配置失败", "uuid", conflict.UUID, "error", modifyErr)
+			}
+		}
+		if _, bindErr := m.runner.Run(
+			operationCtx, "nmcli", "connection", "modify", "uuid", apUUID,
+			"connection.interface-name", apInterface,
+		); bindErr != nil {
+			m.logger.Error("恢复 AP 配置接口绑定失败", "uuid", apUUID, "interface", apInterface, "error", bindErr)
+		}
+	})
+	return nil
+}
+
 // APSettings 返回当前热点配置并隐藏密码。
 func (m *Manager) APSettings(ctx context.Context) (APSettings, error) {
 	profiles, err := m.wirelessProfiles(ctx)
 	if err != nil {
 		return APSettings{}, err
 	}
-	_, apInterface, _, apAvailable := m.networkInterfaces(ctx, profiles)
+	wifiInterface, apInterface, wifiAvailable, apAvailable := m.networkInterfaces(ctx, profiles)
+	capability := m.apConcurrencyCapability(ctx, wifiInterface, apInterface, wifiAvailable, apAvailable)
+	reportedAPInterface := ""
+	if apAvailable {
+		reportedAPInterface = apInterface
+	}
 	for _, profile := range profiles {
 		if profile.Mode != "ap" {
 			continue
 		}
 		settings := APSettings{
-			Available: apAvailable, Enabled: profile.Active, ConnectionName: profile.Name, UUID: profile.UUID,
+			Available: apAvailable, DesiredEnabled: profile.Active || profile.AutoConnect,
+			State: "disabled", StatusMessage: "热点已停用", Interface: reportedAPInterface,
+			InterfaceRole: capability.InterfaceRole, ConcurrencyMode: capability.Mode,
+			MaxConcurrentChannels: capability.MaxChannels, CapabilityNotice: capability.Notice,
+			ConnectionName: profile.Name, UUID: profile.UUID,
 			SSID: profile.SSID, Band: profile.Band, Channel: profile.Channel,
 			Security: profile.Security, AutoConnect: profile.AutoConnect,
 		}
+		capabilityInterface := apInterface
+		if capabilityInterface == "" {
+			capabilityInterface = wifiInterface
+		}
+		settings.AllowedChannels = m.allowedAPChannels(ctx, capabilityInterface)
+		settings.ConflictingProfiles = apInterfaceConflicts(profiles, wifiInterface, apInterface)
+		if len(settings.ConflictingProfiles) > 0 {
+			settings.State = "blocked"
+			settings.ReasonCode = "ap_interface_conflict"
+			settings.StatusMessage = fmt.Sprintf("检测到 %d 个普通 WiFi 配置正在占用或绑定 AP 接口 %s", len(settings.ConflictingProfiles), apInterface)
+			settings.SuggestedAction = "请使用“修复 AP 接口”停用冲突配置，再重新开启热点。"
+		}
 		if !profile.Active {
 			// 预配置接口可能同时正在承载上游 WiFi；热点未激活时不能把该接口的运行态误报为 AP 信息。
+			if settings.State != "blocked" && profile.AutoConnect {
+				settings.State = "failed"
+				settings.ReasonCode = "ap_not_active"
+				settings.StatusMessage = "热点计划自动启动，但当前未运行"
+				settings.SuggestedAction = "请重新应用热点设置；若仍失败，页面会显示具体受限原因。"
+			}
+			m.applyAPChannelRestriction(ctx, &settings, wifiInterface, apInterface, profile.Channel)
 			return settings, nil
 		}
 		settings.Interface = apInterface
 		settings.Address = profile.Address
 		settings.Sharing = profile.IPv4Method == "shared"
+		runtime := m.activeAPRuntime(ctx, apInterface)
+		settings.ActiveBand, settings.ActiveChannel = runtime.Band, runtime.Channel
+		if runtime.Type == "AP" && runtime.SSID == profile.SSID && runtime.Channel > 0 {
+			settings.Enabled = true
+			settings.State = "running"
+			settings.StatusMessage = "热点正在正常广播"
+		} else if settings.State != "blocked" {
+			settings.State = "degraded"
+			settings.ReasonCode = "ap_not_broadcasting"
+			settings.StatusMessage = "NetworkManager 已激活热点配置，但无线接口没有正常广播 SSID"
+			settings.SuggestedAction = "请重新应用热点设置；系统会在启动前检查接口、信道和监管域限制。"
+			m.applyAPChannelRestriction(ctx, &settings, wifiInterface, apInterface, profile.Channel)
+		}
 		return settings.withInterfaceDetails(m.interfaceDetails(ctx, apInterface)), nil
 	}
-	return APSettings{Available: false}, nil
+	return APSettings{
+		Available: false, InterfaceRole: capability.InterfaceRole,
+		ConcurrencyMode: capability.Mode, CapabilityNotice: capability.Notice,
+	}, nil
+}
+
+func apInterfaceConflicts(profiles []profile, wifiInterface, apInterface string) []APInterfaceConflict {
+	if apInterface == "" || apInterface == wifiInterface {
+		return nil
+	}
+	conflicts := make([]APInterfaceConflict, 0)
+	for _, item := range profiles {
+		if item.Mode == "ap" || (item.Device != apInterface && item.ConfiguredDevice != apInterface) {
+			continue
+		}
+		conflicts = append(conflicts, APInterfaceConflict{
+			Name: item.Name, UUID: item.UUID, SSID: item.SSID,
+			Active: item.Active, AutoConnect: item.AutoConnect,
+		})
+	}
+	return conflicts
 }
 
 func (s APSettings) withInterfaceDetails(macAddress, ipAddress string) APSettings {
@@ -1087,8 +1257,15 @@ func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (st
 	activeClientInterface := ""
 	for _, item := range profiles {
 		if item.Mode != "ap" && item.Active && item.Device != "" {
-			activeClientInterface = item.Device
-			break
+			// 多接口网卡上，桌面网络面板可能把预留 AP 接口临时激活为客户端。
+			// 优先选择另一个活动接口作为上游，避免配置排列顺序掩盖 AP 接口冲突。
+			if item.Device != apInterface {
+				activeClientInterface = item.Device
+				break
+			}
+			if activeClientInterface == "" {
+				activeClientInterface = item.Device
+			}
 		}
 	}
 	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "DEVICE,TYPE,STATE", "device", "status")
@@ -1117,7 +1294,7 @@ func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (st
 		available := deviceExists(m.configuredWiFiInterface) || activeClientInterface == m.configuredWiFiInterface
 		return m.configuredWiFiInterface, apInterface, available, apAvailable
 	}
-	if activeClientInterface != "" {
+	if activeClientInterface != "" && activeClientInterface != apInterface {
 		return activeClientInterface, apInterface, true, apAvailable
 	}
 	for _, item := range devices {
@@ -1129,6 +1306,9 @@ func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (st
 		if item.Name != apInterface {
 			return item.Name, apInterface, true, apAvailable
 		}
+	}
+	if activeClientInterface != "" {
+		return activeClientInterface, apInterface, true, apAvailable
 	}
 	// 单网卡热点模式下，AP 配置占用的仍是真实无线设备。
 	// 保留它用于展示，并由上层在连接前要求用户确认关闭热点。
@@ -1191,6 +1371,384 @@ func wirelessInterfacesSharePHY(left, right string) (bool, bool) {
 	return filepath.Clean(leftPHY) == filepath.Clean(rightPHY), true
 }
 
+type apConcurrencyCapability struct {
+	Mode          string
+	MaxChannels   int
+	InterfaceRole string
+	Notice        string
+}
+
+func (m *Manager) apConcurrencyCapability(ctx context.Context, wifiInterface, apInterface string, wifiAvailable, apAvailable bool) apConcurrencyCapability {
+	if !apAvailable {
+		return apConcurrencyCapability{
+			Mode: "unavailable", InterfaceRole: "预留 AP 接口",
+			Notice: "当前没有可用的 AP 接口；热点设置不可用，上游 WiFi 和其他功能不受影响。",
+		}
+	}
+	if !wifiAvailable || wifiInterface == "" || apInterface == "" {
+		return apConcurrencyCapability{
+			Mode: "unknown", InterfaceRole: "AP 接口",
+			Notice: "暂时无法确认 AP+STA 并发能力；系统会按同信道安全模式处理。",
+		}
+	}
+	if wifiInterface == apInterface {
+		return apConcurrencyCapability{
+			Mode: "exclusive", InterfaceRole: "共享物理接口",
+			Notice: "当前网卡不能同时运行热点和上游 WiFi；启用其中一个会断开另一个。",
+		}
+	}
+	samePHY, known := m.sameWirelessPHY(wifiInterface, apInterface)
+	if !known {
+		return apConcurrencyCapability{
+			Mode: "unknown", InterfaceRole: "AP 接口",
+			Notice: "暂时无法确认 AP 接口的无线拓扑；系统会按同信道安全模式处理。",
+		}
+	}
+	if !samePHY {
+		return apConcurrencyCapability{
+			Mode: "independent_radio", InterfaceRole: "独立 AP 网卡",
+			Notice: "热点使用独立无线设备，可以与上游 WiFi 保持不同频段和信道。",
+		}
+	}
+	phyInfo, err := m.wirelessPHYInfo(ctx, wifiInterface)
+	if err != nil {
+		return apConcurrencyCapability{
+			Mode: "unknown", InterfaceRole: "AP 虚拟接口",
+			Notice: "无法读取网卡的 AP+STA 信道能力；系统会按同信道安全模式处理。",
+		}
+	}
+	channelLimit, found := parseAPSTAChannelLimit(phyInfo)
+	if !found {
+		return apConcurrencyCapability{
+			Mode: "unknown", InterfaceRole: "AP 虚拟接口",
+			Notice: "驱动没有报告可识别的 AP+STA 信道组合；系统会按同信道安全模式处理。",
+		}
+	}
+	if channelLimit <= 1 {
+		return apConcurrencyCapability{
+			Mode: "same_channel", MaxChannels: channelLimit, InterfaceRole: "AP 虚拟接口",
+			Notice: "当前网卡支持 AP+STA，但热点必须与上游 WiFi 使用同一频段、同一信道。",
+		}
+	}
+	return apConcurrencyCapability{
+		Mode: "multi_channel", MaxChannels: channelLimit, InterfaceRole: "AP 虚拟接口",
+		Notice: fmt.Sprintf("当前网卡支持 AP+STA，并允许最多 %d 个活动信道。", channelLimit),
+	}
+}
+
+func (m *Manager) readWirelessPHYInfo(ctx context.Context, interfaceName string) (string, error) {
+	phyPath, err := filepath.EvalSymlinks(filepath.Join("/sys/class/net", interfaceName, "phy80211"))
+	if err != nil {
+		return "", err
+	}
+	phyName := filepath.Base(filepath.Clean(phyPath))
+	if phyName == "" || phyName == "." || phyName == string(filepath.Separator) {
+		return "", fmt.Errorf("无线接口 %s 没有关联有效 PHY", interfaceName)
+	}
+	output, err := m.run(ctx, "/usr/sbin/iw", "phy", phyName, "info")
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func (m *Manager) wirelessInterfacesChannelCoupled(ctx context.Context, wifiInterface, apInterface string) (bool, bool) {
+	samePHY, known := m.sameWirelessPHY(wifiInterface, apInterface)
+	if !known || !samePHY {
+		return samePHY, known
+	}
+	phyInfo, err := m.wirelessPHYInfo(ctx, wifiInterface)
+	if err != nil {
+		return true, false
+	}
+	channelLimit, found := parseAPSTAChannelLimit(phyInfo)
+	if !found {
+		return true, false
+	}
+	return channelLimit <= 1, true
+}
+
+func (m *Manager) activeWirelessChannel(ctx context.Context, interfaceName string) (string, int) {
+	if interfaceName == "" {
+		return "", 0
+	}
+	output, err := m.run(ctx, "/usr/sbin/iw", "dev", interfaceName, "info")
+	if err != nil {
+		return "", 0
+	}
+	return parseIWInterfaceChannel(string(output))
+}
+
+type apRuntime struct {
+	Type    string
+	SSID    string
+	Band    string
+	Channel int
+}
+
+func (m *Manager) activeAPRuntime(ctx context.Context, interfaceName string) apRuntime {
+	if interfaceName == "" {
+		return apRuntime{}
+	}
+	output, err := m.run(ctx, "/usr/sbin/iw", "dev", interfaceName, "info")
+	if err != nil {
+		return apRuntime{}
+	}
+	return parseIWAPRuntime(string(output))
+}
+
+func parseIWAPRuntime(output string) apRuntime {
+	runtime := apRuntime{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "type":
+			runtime.Type = fields[1]
+		case "ssid":
+			runtime.SSID = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "ssid"))
+		case "channel":
+			channel, err := strconv.Atoi(fields[1])
+			if err != nil || channel <= 0 {
+				continue
+			}
+			runtime.Channel = channel
+			if channel <= 14 {
+				runtime.Band = "bg"
+			} else {
+				runtime.Band = "a"
+			}
+		}
+	}
+	return runtime
+}
+
+type apChannelCapability struct {
+	Found    bool
+	Disabled bool
+	NoIR     bool
+	Radar    bool
+}
+
+func parseAPChannelCapabilities(output string) map[int]apChannelCapability {
+	capabilities := make(map[int]apChannelCapability)
+	for _, line := range strings.Split(output, "\n") {
+		// 6 GHz 会复用 2.4/5 GHz 的信道号，例如 5785 MHz 与 6735 MHz 都是信道 157。
+		// 当前热点配置只支持 2.4/5 GHz；若仅按信道号建表，后出现的 6 GHz 禁用项会覆盖可用的 5 GHz 项。
+		mhz := strings.Index(line, " MHz")
+		if mhz < 0 {
+			continue
+		}
+		frequencyFields := strings.Fields(line[:mhz])
+		if len(frequencyFields) == 0 {
+			continue
+		}
+		frequency, err := strconv.Atoi(frequencyFields[len(frequencyFields)-1])
+		if err != nil || frequency < 2400 || frequency >= 5925 {
+			continue
+		}
+		open := strings.IndexByte(line, '[')
+		close := strings.IndexByte(line, ']')
+		if open < 0 || close <= open+1 {
+			continue
+		}
+		channel, err := strconv.Atoi(strings.TrimSpace(line[open+1 : close]))
+		if err != nil || channel <= 0 {
+			continue
+		}
+		normalized := strings.ToLower(line)
+		capabilities[channel] = apChannelCapability{
+			Found: true, Disabled: strings.Contains(normalized, "disabled"),
+			NoIR:  strings.Contains(normalized, "no ir") || strings.Contains(normalized, "no-ir"),
+			Radar: strings.Contains(normalized, "radar"),
+		}
+	}
+	return capabilities
+}
+
+func apChannelOperationError(channel int, capability apChannelCapability) *APOperationError {
+	switch {
+	case !capability.Found:
+		return &APOperationError{
+			Code: "channel_unknown", Message: fmt.Sprintf("网卡没有报告热点信道 %d", channel),
+			Suggestion: "请选择网卡明确支持且允许创建 AP 的信道。",
+		}
+	case capability.Disabled:
+		return &APOperationError{
+			Code: "channel_disabled", Message: fmt.Sprintf("热点信道 %d 已被当前网卡或监管域禁用", channel),
+			Suggestion: "请选择其他允许的信道。",
+		}
+	case capability.NoIR:
+		return &APOperationError{
+			Code: "channel_no_ir", Message: fmt.Sprintf("热点信道 %d 禁止主动发射无线信号", channel),
+			Suggestion: "请选择没有 no IR 限制的信道。",
+		}
+	case capability.Radar:
+		return &APOperationError{
+			Code: "channel_requires_dfs", Message: fmt.Sprintf("热点信道 %d 被当前监管域标记为 RADAR，当前驱动链无法在该信道创建 AP", channel),
+			Suggestion: "请更新无线监管数据库，或把上游和热点调整到 149、153、157、161 等允许信道。",
+		}
+	default:
+		return nil
+	}
+}
+
+func selectAllowedAPChannel(capabilities map[int]apChannelCapability, band string) (int, bool) {
+	preferred := []int{161, 157, 153, 149, 165, 48, 44, 40, 36}
+	if band == "bg" {
+		preferred = []int{11, 6, 1, 13, 12, 10, 9, 8, 7, 5, 4, 3, 2}
+	}
+	for _, channel := range preferred {
+		capability := capabilities[channel]
+		if capability.Found && apChannelOperationError(channel, capability) == nil {
+			return channel, true
+		}
+	}
+	return 0, false
+}
+
+func (m *Manager) allowedAPChannels(ctx context.Context, interfaceName string) []int {
+	if interfaceName == "" {
+		return nil
+	}
+	phyInfo, err := m.wirelessPHYInfo(ctx, interfaceName)
+	if err != nil {
+		return nil
+	}
+	capabilities := parseAPChannelCapabilities(phyInfo)
+	channels := make([]int, 0, len(capabilities))
+	for channel, capability := range capabilities {
+		if apChannelOperationError(channel, capability) == nil {
+			channels = append(channels, channel)
+		}
+	}
+	sort.Ints(channels)
+	return channels
+}
+
+func (m *Manager) apChannelPreflight(ctx context.Context, interfaceName string, channel int) error {
+	if channel <= 0 {
+		return nil
+	}
+	phyInfo, err := m.wirelessPHYInfo(ctx, interfaceName)
+	if err != nil {
+		return &APOperationError{
+			Code: "capability_unavailable", Message: "无法读取无线网卡的热点信道能力",
+			Suggestion: "请检查无线网卡、驱动和 iw 工具是否正常。",
+		}
+	}
+	if operationError := apChannelOperationError(channel, parseAPChannelCapabilities(phyInfo)[channel]); operationError != nil {
+		return operationError
+	}
+	return nil
+}
+
+func apRequiresSameChannel(mode string) bool {
+	return mode == "same_channel" || mode == "unknown"
+}
+
+func (m *Manager) applyAPChannelRestriction(ctx context.Context, settings *APSettings, wifiInterface, apInterface string, configuredChannel int) {
+	channel := configuredChannel
+	interfaceName := apInterface
+	if interfaceName == "" {
+		interfaceName = wifiInterface
+	}
+	if apRequiresSameChannel(settings.ConcurrencyMode) && wifiInterface != "" {
+		_, activeChannel := m.activeWirelessChannel(ctx, wifiInterface)
+		if activeChannel > 0 {
+			channel = activeChannel
+		}
+	}
+	if channel <= 0 || interfaceName == "" {
+		return
+	}
+	err := m.apChannelPreflight(ctx, interfaceName, channel)
+	var operationError *APOperationError
+	if !errors.As(err, &operationError) || operationError == nil {
+		return
+	}
+	settings.State = "blocked"
+	settings.ReasonCode = operationError.Code
+	settings.StatusMessage = operationError.Message
+	settings.SuggestedAction = operationError.Suggestion
+}
+
+func parseIWInterfaceChannel(output string) (string, int) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "channel" {
+			continue
+		}
+		channel, err := strconv.Atoi(fields[1])
+		if err != nil || channel <= 0 {
+			return "", 0
+		}
+		if channel <= 14 {
+			return "bg", channel
+		}
+		return "a", channel
+	}
+	return "", 0
+}
+
+func parseAPSTAChannelLimit(output string) (int, bool) {
+	const sectionHeader = "valid interface combinations:"
+	inCombinations := false
+	combination := ""
+	maxChannels := 0
+	flush := func() {
+		if !strings.Contains(combination, "#{ managed }") || !strings.Contains(combination, "#{ AP }") {
+			return
+		}
+		total, totalFound := parseCombinationLimit(combination, "total <=")
+		channelLimit, channelLimitFound := parseCombinationLimit(combination, "#channels <=")
+		if !totalFound || total < 2 || !channelLimitFound {
+			return
+		}
+		if channelLimit > maxChannels {
+			maxChannels = channelLimit
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !inCombinations {
+			if trimmed == sectionHeader {
+				inCombinations = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "*") {
+			flush()
+			combination = trimmed
+			continue
+		}
+		if combination != "" && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			combination += " " + trimmed
+			continue
+		}
+		if combination != "" {
+			break
+		}
+	}
+	flush()
+	return maxChannels, maxChannels > 0
+}
+
+func parseCombinationLimit(combination, marker string) (int, bool) {
+	markerIndex := strings.Index(combination, marker)
+	if markerIndex < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(combination[markerIndex+len(marker):])
+	if len(fields) == 0 {
+		return 0, false
+	}
+	limit, err := strconv.Atoi(strings.TrimRight(fields[0], ","))
+	return limit, err == nil
+}
+
 // UpdateAP 校验并更新现有热点；空密码表示保留原密码。
 func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	m.mu.Lock()
@@ -1218,18 +1776,64 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	if !settings.Available || !validUUID(settings.UUID) {
 		return invalidInput("未找到可管理的 AP 配置")
 	}
+	if update.Enabled && len(settings.ConflictingProfiles) > 0 {
+		return &APOperationError{
+			Code:       "ap_interface_conflict",
+			Message:    fmt.Sprintf("检测到普通 WiFi 配置正在占用或绑定 AP 接口 %s", settings.Interface),
+			Suggestion: "请先使用“修复 AP 接口”，再重新开启热点。",
+		}
+	}
+	wifiStatus := WiFiStatus{}
+	effectiveChannel := update.Channel
+	if update.Enabled {
+		wifiStatus, err = m.WiFiStatus(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if update.Enabled && apRequiresSameChannel(settings.ConcurrencyMode) && wifiStatus.Interface != "" {
+		_, upstreamChannel := m.activeWirelessChannel(ctx, wifiStatus.Interface)
+		if upstreamChannel > 0 {
+			effectiveChannel = upstreamChannel
+		}
+	}
+	if update.Enabled {
+		capabilityInterface := settings.Interface
+		if capabilityInterface == "" {
+			capabilityInterface = wifiStatus.Interface
+		}
+		if effectiveChannel == 0 {
+			phyInfo, readErr := m.wirelessPHYInfo(ctx, capabilityInterface)
+			if readErr != nil {
+				return &APOperationError{Code: "capability_unavailable", Message: "无法读取无线网卡的热点信道能力", Suggestion: "请检查无线网卡、驱动和 iw 工具是否正常。"}
+			}
+			var found bool
+			effectiveChannel, found = selectAllowedAPChannel(parseAPChannelCapabilities(phyInfo), update.Band)
+			if !found {
+				return &APOperationError{Code: "no_allowed_channel", Message: "当前频段没有允许创建热点的信道", Suggestion: "请切换频段、更新无线监管数据库或检查网卡驱动。"}
+			}
+		}
+		if err := m.apChannelPreflight(ctx, capabilityInterface, effectiveChannel); err != nil {
+			return err
+		}
+	}
 	autoConnect := update.Enabled && update.AutoConnect
 	channelValue := ""
-	if update.Channel != 0 {
-		channelValue = strconv.Itoa(update.Channel)
+	if effectiveChannel != 0 {
+		channelValue = strconv.Itoa(effectiveChannel)
+	}
+	bandValue := update.Band
+	if effectiveChannel > 0 {
+		bandValue, _ = concurrentBand(effectiveChannel)
 	}
 	args := []string{"connection", "modify", "uuid", settings.UUID,
 		"802-11-wireless.ssid", update.SSID,
-		"802-11-wireless.band", update.Band,
+		"802-11-wireless.band", bandValue,
 		// NetworkManager 用空属性表示自动选信道，数值 0 会被 nmcli 判定为非法信道。
 		"802-11-wireless.channel", channelValue,
 		// 关闭热点必须同时禁止开机自动连接，否则旧连接会在重启后重新激活，表现为无法永久关闭。
 		"connection.autoconnect", yesNo(autoConnect),
+		"connection.autoconnect-retries", "1",
 		"ipv4.method", "shared",
 	}
 	if update.Password != "" {
@@ -1240,7 +1844,7 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	}
 	m.apUpdateGeneration++
 	generation := m.apUpdateGeneration
-	if !update.Enabled && !settings.Enabled {
+	if !update.Enabled && !settings.DesiredEnabled {
 		return nil
 	}
 	if !update.Enabled {
@@ -1255,7 +1859,7 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 			}
 			operationCtx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 			defer cancel()
-			if _, err := m.runner.Run(operationCtx, "nmcli", "--wait", "15", "connection", "down", "uuid", settings.UUID); err != nil {
+			if _, err := m.runner.Run(operationCtx, "nmcli", "--wait", "15", "connection", "down", "uuid", settings.UUID); err != nil && !isNMDeviceInactive(err) {
 				m.logger.Error("关闭无线热点失败", "uuid", settings.UUID, "error", err)
 			}
 		})
@@ -1267,6 +1871,14 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	}
 	if _, err := m.run(ctx, "nmcli", operationArgs...); err != nil {
 		return fmt.Errorf("应用热点配置: %w", err)
+	}
+	runtime := m.activeAPRuntime(ctx, settings.Interface)
+	if runtime.Type != "AP" || runtime.SSID != update.SSID || runtime.Channel != effectiveChannel {
+		return &APOperationError{
+			Code:       "ap_not_broadcasting",
+			Message:    "NetworkManager 已接受热点配置，但无线接口没有正常广播 SSID",
+			Suggestion: "请检查页面显示的能力限制；系统不会把该状态误报为运行中。",
+		}
 	}
 	return nil
 }
@@ -1317,9 +1929,7 @@ func (m *Manager) wirelessProfiles(ctx context.Context) ([]profile, error) {
 		if err != nil {
 			return nil, err
 		}
-		if item.Mode == "ap" {
-			item.ConfiguredDevice = m.profileInterface(ctx, item.UUID)
-		}
+		item.ConfiguredDevice = m.profileInterface(ctx, item.UUID)
 		profiles = append(profiles, item)
 	}
 	return profiles, nil
@@ -1474,15 +2084,22 @@ func (m *Manager) alignAPChannel(ctx context.Context, status WiFiStatus, channel
 	if err != nil {
 		return err
 	}
-	if !settings.Available || !settings.Enabled || settings.Channel == channel {
+	if !settings.Available || !settings.DesiredEnabled {
+		return nil
+	}
+	capabilityInterface := settings.Interface
+	if capabilityInterface == "" {
+		capabilityInterface = status.Interface
+	}
+	if err := m.apChannelPreflight(ctx, capabilityInterface, channel); err != nil {
+		return err
+	}
+	if settings.State == "running" && settings.ActiveChannel == channel {
 		return nil
 	}
 	upstreamUUID := ""
-	for _, network := range status.SavedNetworks {
-		if network.Name == status.CurrentConnection {
-			upstreamUUID = network.UUID
-			break
-		}
+	if network, found := currentSavedNetwork(status); found {
+		upstreamUUID = network.UUID
 	}
 	restoreUpstream := func(cause error) error {
 		if upstreamUUID == "" {
@@ -1523,6 +2140,58 @@ func (m *Manager) alignAPChannel(ctx context.Context, status WiFiStatus, channel
 			cause = errors.Join(cause, fmt.Errorf("恢复热点原信道: %w", restoreErr))
 		}
 		return restoreUpstream(cause)
+	}
+	runtime := m.activeAPRuntime(ctx, settings.Interface)
+	if runtime.Type != "AP" || runtime.SSID != settings.SSID || runtime.Channel != channel {
+		return restoreUpstream(&APOperationError{
+			Code:       "ap_not_broadcasting",
+			Message:    "热点配置已激活，但无线接口没有正常广播 SSID",
+			Suggestion: "请检查网卡驱动状态，或改用页面提示的允许信道。",
+		})
+	}
+	return nil
+}
+
+func (m *Manager) ensureAPAfterUpstream(ctx context.Context, status WiFiStatus, channel int) error {
+	settings, err := m.APSettings(ctx)
+	if err != nil {
+		return err
+	}
+	if !settings.Available || !settings.DesiredEnabled || !apRequiresSameChannel(settings.ConcurrencyMode) {
+		return nil
+	}
+	band, ok := concurrentBand(channel)
+	if !ok {
+		return invalidInput("上游 WiFi 信道不支持 AP+STA 并发")
+	}
+	capabilityInterface := settings.Interface
+	if capabilityInterface == "" {
+		capabilityInterface = status.Interface
+	}
+	if err := m.apChannelPreflight(ctx, capabilityInterface, channel); err != nil {
+		return err
+	}
+	if settings.State == "running" && settings.ActiveChannel == channel {
+		return nil
+	}
+	if _, err := m.run(
+		ctx, "nmcli", "connection", "modify", "uuid", settings.UUID,
+		"802-11-wireless.band", band,
+		"802-11-wireless.channel", strconv.Itoa(channel),
+		"connection.autoconnect-retries", "1",
+	); err != nil {
+		return fmt.Errorf("同步热点信道: %w", err)
+	}
+	if _, err := m.run(ctx, "nmcli", "--wait", "20", "connection", "up", "uuid", settings.UUID, "ifname", settings.Interface); err != nil {
+		return fmt.Errorf("在上游 WiFi 稳定后启动热点: %w", err)
+	}
+	runtime := m.activeAPRuntime(ctx, settings.Interface)
+	if runtime.Type != "AP" || runtime.SSID != settings.SSID || runtime.Channel != channel {
+		return &APOperationError{
+			Code:       "ap_not_broadcasting",
+			Message:    "热点配置已激活，但无线接口没有正常广播 SSID",
+			Suggestion: "请检查网卡驱动状态，或改用页面提示的允许信道。",
+		}
 	}
 	return nil
 }

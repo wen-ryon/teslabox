@@ -6,8 +6,8 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20260812-9">
-  <script src="/app.js?v=20260812-7" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260819-1">
+  <script src="/app.js?v=20260819-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -246,17 +246,23 @@
         <div class="hardware-overview" aria-label="AP 热点硬件信息">
           <div><span>开启状态</span><strong id="ap-status">读取中</strong></div>
           <div><span>网络接口</span><strong id="ap-interface">—</strong></div>
+          <div><span>接口角色</span><strong id="ap-interface-role">—</strong></div>
           <div><span>MAC 地址</span><strong id="ap-mac-address">—</strong></div>
           <div><span>热点地址</span><strong id="ap-address">—</strong></div>
           <div><span>互联网共享</span><strong id="ap-sharing">—</strong></div>
+          <div><span>当前频段</span><strong id="ap-active-band">—</strong></div>
+          <div><span>当前信道</span><strong id="ap-active-channel">—</strong></div>
         </div>
+        <div id="ap-capability-notice" class="settings-warning" role="status" hidden></div>
+        <div class="power-actions"><button id="ap-repair-interface" class="secondary compact" type="button" hidden>修复 AP 接口</button></div>
         <form id="ap-form" class="settings-card settings-form">
           <div class="form-grid">
             <label>热点名称（SSID）<input id="ap-ssid" maxlength="32" required></label>
             <label>设置新密码<input id="ap-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="留空表示不修改"></label>
-            <label>频段<select id="ap-band"><option value="a">5 GHz</option><option value="bg">2.4 GHz</option></select></label>
-            <label>信道<select id="ap-channel"></select></label>
+            <label>首选频段<select id="ap-band"><option value="a">5 GHz</option><option value="bg">2.4 GHz</option></select></label>
+            <label>首选信道<select id="ap-channel"></select></label>
           </div>
+          <p id="ap-channel-detail" class="muted">首选配置用于热点独立运行；受网卡并发能力约束时，当前工作信道可能跟随上游 WiFi。</p>
           <div class="toggle-row"><label><input id="ap-enabled" type="checkbox"> 启用热点</label><label><input id="ap-autoconnect" type="checkbox"> 开机自动启动</label></div>
           <div class="form-actions"><p class="muted">应用后手机可能需要使用新的名称或密码重新连接。</p><button class="primary" type="submit">保存并应用</button></div>
         </form>
@@ -315,7 +321,7 @@
             <div class="update-versions"><span>当前版本<strong id="update-current-version">—</strong></span><span id="update-target-label">最新版本<strong id="update-latest-version">—</strong></span></div>
           </div>
           <div id="update-progress-wrap" class="update-progress" hidden><progress id="update-progress" max="100" value="0"></progress><span id="update-progress-detail">0%</span></div>
-          <p id="update-release-notes" class="update-release-notes muted" hidden></p>
+          <div id="update-release-notes" class="update-release-notes update-release-markdown" hidden></div>
           <p id="update-notice" class="notice" role="status" aria-live="polite" hidden></p>
           <div class="power-actions"><button id="update-check" class="secondary" type="button">检查更新</button><button id="update-download" class="secondary" type="button" hidden>下载更新</button><button id="update-install" class="primary" type="button" hidden>安装并重启</button></div>
           <section id="update-history-section" class="update-history" hidden>
@@ -515,7 +521,10 @@
         <div class="main-video-frame"><div id="composite-grid" class="composite-grid" hidden></div><video id="session-video" playsinline preload="metadata" hidden></video><span id="active-camera-label" class="active-camera-label" hidden>前视</span><div id="player-loading" class="player-loading" role="status" aria-live="polite" aria-atomic="true" hidden><i class="loading-spinner large" aria-hidden="true"></i><span id="player-loading-message">正在加载视频…</span></div><p id="player-message" class="player-message" hidden></p></div>
         <div id="camera-switcher" class="camera-switcher" aria-label="摄像头视角"></div>
         <div class="unified-controls">
-          <button id="play-toggle" class="primary play-toggle" type="button" aria-label="播放">▶</button>
+          <button id="play-toggle" class="primary play-toggle" type="button" aria-label="播放" data-state="paused">
+            <svg class="play-icon play-icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.7a1 1 0 0 1 1.52-.85l10 6.3a1 1 0 0 1 0 1.7l-10 6.3A1 1 0 0 1 8 18.3z"></path></svg>
+            <svg class="play-icon play-icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6.5" y="5" width="4" height="14" rx="1"></rect><rect x="13.5" y="5" width="4" height="14" rx="1"></rect></svg>
+          </button>
           <span id="current-time">00:00</span>
           <div class="timeline-control"><input id="session-timeline" type="range" min="0" max="60" step="0.1" value="0" aria-label="录像时间轴"><div id="segment-markers" class="segment-markers" aria-hidden="true"></div><div id="event-marker-layer" class="event-marker-layer"></div></div>
           <span id="total-time">00:00</span>

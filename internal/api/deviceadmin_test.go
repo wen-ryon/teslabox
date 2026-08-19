@@ -17,6 +17,7 @@ type fakeDeviceAdmin struct {
 	scanErr           error
 	autoConnectUpdate deviceadmin.AutoConnectUpdate
 	ipv4Update        deviceadmin.IPv4Update
+	repairRequested   bool
 	powerAction       string
 }
 
@@ -37,9 +38,18 @@ func (a *fakeDeviceAdmin) UpdateIPv4(_ context.Context, update deviceadmin.IPv4U
 }
 func (a *fakeDeviceAdmin) Forget(context.Context, string) error { return nil }
 func (a *fakeDeviceAdmin) APSettings(context.Context) (deviceadmin.APSettings, error) {
-	return deviceadmin.APSettings{Available: true, Interface: "ap0", MACAddress: "AA:BB:CC:DD:EE:20", SSID: "TeslaBox-5G", Address: "192.168.88.1/24"}, nil
+	return deviceadmin.APSettings{
+		Available: true, Interface: "ap0", InterfaceRole: "AP 虚拟接口", MACAddress: "AA:BB:CC:DD:EE:20",
+		SSID: "TeslaBox-5G", Address: "192.168.88.1/24", ActiveBand: "bg", ActiveChannel: 1,
+		ConcurrencyMode: "same_channel", MaxConcurrentChannels: 1, CapabilityNotice: "热点必须与上游 WiFi 使用同一信道。",
+		AllowedChannels: []int{1, 6, 11, 149, 161},
+	}, nil
 }
 func (a *fakeDeviceAdmin) UpdateAP(context.Context, deviceadmin.APUpdate) error { return nil }
+func (a *fakeDeviceAdmin) RepairAPInterface(context.Context) error {
+	a.repairRequested = true
+	return nil
+}
 func (a *fakeDeviceAdmin) SchedulePower(action string) error {
 	a.powerAction = action
 	return nil
@@ -58,8 +68,19 @@ func TestDeviceAdminRoutes(t *testing.T) {
 
 	ap := httptest.NewRecorder()
 	handler.ServeHTTP(ap, httptest.NewRequest(http.MethodGet, "/api/v1/network/ap", nil))
-	if ap.Code != http.StatusOK || !strings.Contains(ap.Body.String(), `"interface":"ap0"`) || !strings.Contains(ap.Body.String(), `"mac_address":"AA:BB:CC:DD:EE:20"`) {
+	if ap.Code != http.StatusOK || !strings.Contains(ap.Body.String(), `"interface":"ap0"`) ||
+		!strings.Contains(ap.Body.String(), `"interface_role":"AP 虚拟接口"`) ||
+		!strings.Contains(ap.Body.String(), `"active_channel":1`) ||
+		!strings.Contains(ap.Body.String(), `"allowed_channels":[1,6,11,149,161]`) ||
+		!strings.Contains(ap.Body.String(), `"concurrency_mode":"same_channel"`) ||
+		!strings.Contains(ap.Body.String(), `"max_concurrent_channels":1`) {
 		t.Fatalf("ap status = %d, body = %s", ap.Code, ap.Body.String())
+	}
+
+	repair := httptest.NewRecorder()
+	handler.ServeHTTP(repair, httptest.NewRequest(http.MethodPost, "/api/v1/network/ap/repair", nil))
+	if repair.Code != http.StatusAccepted || !admin.repairRequested {
+		t.Fatalf("repair status = %d, requested = %t", repair.Code, admin.repairRequested)
 	}
 
 	autoConnect := httptest.NewRecorder()
@@ -89,6 +110,19 @@ func TestDeviceAdminRoutes(t *testing.T) {
 	handler.ServeHTTP(power, request)
 	if power.Code != http.StatusAccepted || admin.powerAction != "reboot" {
 		t.Fatalf("power status = %d, action = %q", power.Code, admin.powerAction)
+	}
+}
+
+func TestWriteDeviceAdminErrorReturnsStructuredAPReason(t *testing.T) {
+	t.Parallel()
+	recorder := httptest.NewRecorder()
+	writeDeviceAdminError(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)), "开启热点失败", &deviceadmin.APOperationError{
+		Code: "channel_requires_dfs", Message: "热点信道 44 当前不可用", Suggestion: "请选择 149 或 161 信道。",
+	})
+	if recorder.Code != http.StatusConflict ||
+		!strings.Contains(recorder.Body.String(), `"reason_code":"channel_requires_dfs"`) ||
+		!strings.Contains(recorder.Body.String(), `"suggestion":"请选择 149 或 161 信道。"`) {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
