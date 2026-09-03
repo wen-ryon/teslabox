@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestValidateFsckVersionResultAcceptsExfatprogsVersionExit(t *testing.T) {
+	if err := validateFsckVersionResult("exfatprogs version : 1.2.0\n", 16); err != nil {
+		t.Fatalf("validateFsckVersionResult() error = %v", err)
+	}
+}
+
+func TestValidateFsckVersionResultRejectsUnexpectedExit(t *testing.T) {
+	if err := validateFsckVersionResult("exfatprogs version : 1.2.0\n", 1); err == nil {
+		t.Fatal("validateFsckVersionResult() 未拒绝异常退出码")
+	}
+}
+
+func TestValidateFsckVersionResultRejectsWrongVersion(t *testing.T) {
+	if err := validateFsckVersionResult("exfatprogs version : 1.1.0\n", 16); err == nil {
+		t.Fatal("validateFsckVersionResult() 未拒绝错误版本")
+	}
+}
+
 func TestExtractArchiveRejectsPathEscape(t *testing.T) {
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)

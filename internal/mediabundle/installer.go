@@ -209,11 +209,16 @@ func validateRuntime(ctx context.Context, root string) error {
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	fsckVersionOutput, err := exec.CommandContext(probeCtx, fsckExFAT, "-V").CombinedOutput()
+	fsckExitCode := 0
 	if err != nil {
-		return fmt.Errorf("检查 TeslaBox 专用 fsck.exfat 版本: %w", err)
+		var exitError *exec.ExitError
+		if !errors.As(err, &exitError) {
+			return fmt.Errorf("检查 TeslaBox 专用 fsck.exfat 版本: %w", err)
+		}
+		fsckExitCode = exitError.ExitCode()
 	}
-	if !strings.Contains(string(fsckVersionOutput), fsckVersion) {
-		return fmt.Errorf("TeslaBox 专用 fsck.exfat 版本不匹配：需要 %s", fsckVersion)
+	if err := validateFsckVersionResult(string(fsckVersionOutput), fsckExitCode); err != nil {
+		return err
 	}
 	checks := []struct {
 		args     []string
@@ -235,6 +240,18 @@ func validateRuntime(ctx context.Context, root string) error {
 				return fmt.Errorf("FFmpeg 缺少必需能力 %s", required)
 			}
 		}
+	}
+	return nil
+}
+
+func validateFsckVersionResult(output string, exitCode int) error {
+	if !strings.Contains(output, fsckVersion) {
+		return fmt.Errorf("TeslaBox 专用 fsck.exfat 版本不匹配：需要 %s", fsckVersion)
+	}
+	// exfatprogs 1.2.0 的 fsck.exfat 在 -V 输出版本后按 fsck 约定返回语法状态 16。
+	// 这里只接受成功或该已知状态，避免把真实执行故障误认为有效版本。
+	if exitCode != 0 && exitCode != 16 {
+		return fmt.Errorf("检查 TeslaBox 专用 fsck.exfat 版本失败：退出码 %d", exitCode)
 	}
 	return nil
 }
