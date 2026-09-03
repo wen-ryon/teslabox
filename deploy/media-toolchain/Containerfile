@@ -7,6 +7,7 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         cmake \
+        curl \
         fonts-noto-cjk \
         git \
         libass-dev \

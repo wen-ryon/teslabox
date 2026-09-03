@@ -185,7 +185,17 @@ func TestManagerBundleIncludesStateLogsAndRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(bundle.Content)
-	for _, expected := range []string{"TeslaBox 诊断报告", "TeslaBox 服务状态", "当前启动日志: media", "上一次启动关键故障日志", "[已脱敏]"} {
+	for _, expected := range []string{
+		"TeslaBox 诊断报告",
+		"TeslaBox 服务状态",
+		"当前启动日志: media",
+		"上一次启动关键故障日志",
+		"Gadget 总线挂起状态",
+		"DWC3 中断计数",
+		"TeslaCam 镜像活动时间",
+		"Mass Storage STALL 策略",
+		"[已脱敏]",
+	} {
 		if !strings.Contains(content, expected) {
 			t.Fatalf("bundle missing %q:\n%s", expected, content)
 		}

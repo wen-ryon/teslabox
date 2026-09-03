@@ -32,8 +32,8 @@ const (
 	maximumSupportedDeviceSize = 2 * 1000 * 1000 * 1000 * 1000
 	reservedCapacityDivisor    = 20
 	defaultTeslaCamPercent     = 80
-	minimumDefragmentFree      = 8 * 1024 * 1024 * 1024
-	minimumDefragmentPct       = 5
+	minimumAllocationFree      = 8 * 1024 * 1024 * 1024
+	minimumAllocationPct       = 5
 	capacityLayoutTolerance    = 8 * 1024 * 1024
 )
 
@@ -47,6 +47,16 @@ type InputError struct{ Message string }
 
 // Error 返回面向用户的初始化校验说明。
 func (e *InputError) Error() string { return e.Message }
+
+type insufficientAllocationSpaceError struct {
+	free       uint64
+	required   uint64
+	minimumPct int
+}
+
+func (e *insufficientAllocationSpaceError) Error() string {
+	return fmt.Sprintf("数据盘可用空间不足以安全扩容：可用 %d 字节，至少需要 %d 字节且不低于 %d%%", e.free, e.required, e.minimumPct)
+}
 
 // Candidate 是设置页面展示的可用数据整盘状态。
 type Candidate struct {
@@ -92,22 +102,6 @@ type InitializeRequest struct {
 type CancelRequest struct {
 	StablePath    string `json:"stable_path"`
 	ConfirmSerial string `json:"confirm_serial"`
-}
-
-// DefragmentRequest 要求用户确认 OTG 已物理断开，避免把软件解绑误当成电气隔离。
-type DefragmentRequest struct {
-	ConfirmOTGDisconnected bool `json:"confirm_otg_disconnected"`
-}
-
-// DefragmentResult 保留整理前后证据和只读文件系统校验结果。
-type DefragmentResult struct {
-	Before               fragmentation.Report `json:"before"`
-	After                fragmentation.Report `json:"after"`
-	ImageSizeBytes       int64                `json:"image_size_bytes"`
-	FileSystemChecked    bool                 `json:"file_system_checked"`
-	COWExtentHintApplied bool                 `json:"cow_extent_hint_applied"`
-	Changed              bool                 `json:"changed"`
-	RequiresColdBoot     bool                 `json:"requires_cold_boot"`
 }
 
 // CapacityMigrationRequest 保护已有镜像的整盘容量迁移，分区和文件系统本身不会扩容。
@@ -159,6 +153,7 @@ type Config struct {
 	ImagePath  string
 	DataLabel  string
 	ImageLabel string
+	FSCKPath   string
 	Policy     storagepolicy.SnapshotReservePolicy
 }
 
@@ -187,6 +182,9 @@ type Manager struct {
 func New(config Config, runner system.Runner, registry *storage.FileRegistry, lister DeviceLister, driveInitializer DriveInitializer, imageInitializer ImageInitializer, controller Controller, benchmarks ...StorageBenchmark) *Manager {
 	if config.Policy.MinFreeBytes() == 0 {
 		config.Policy = storagepolicy.DefaultSnapshotReservePolicy()
+	}
+	if strings.TrimSpace(config.FSCKPath) == "" {
+		config.FSCKPath = "fsck.exfat"
 	}
 	manager := &Manager{
 		config: config, runner: runner, registry: registry, lister: lister,
@@ -247,104 +245,6 @@ func (m *Manager) Fragmentation(ctx context.Context) (fragmentation.Report, erro
 		return fragmentation.Report{}, &InputError{Message: "TeslaCam 镜像尚未就绪"}
 	}
 	return fragmentation.New(m.runner).Inspect(ctx, m.config.ImagePath)
-}
-
-// Defragment 在 Gadget 和媒体租约全部释放后在线整理外层 XFS 文件，结束后保持 Gadget 暂停等待冷启动。
-func (m *Manager) Defragment(ctx context.Context, request DefragmentRequest) (result DefragmentResult, resultErr error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	state := m.controller.Snapshot()
-	if !state.Backing.Ready {
-		return DefragmentResult{}, &InputError{Message: "TeslaCam 镜像尚未就绪"}
-	}
-	inspector := fragmentation.New(m.runner)
-	before, err := inspector.Inspect(ctx, m.config.ImagePath)
-	if err != nil {
-		return DefragmentResult{}, err
-	}
-	info, err := os.Stat(m.config.ImagePath)
-	if err != nil {
-		return DefragmentResult{}, fmt.Errorf("读取整理前镜像大小: %w", err)
-	}
-	result = DefragmentResult{Before: before, After: before, ImageSizeBytes: info.Size(), RequiresColdBoot: true}
-	writableBytes, err := m.readPartitionEnd(ctx)
-	if err != nil {
-		return result, err
-	}
-	if writableBytes > result.ImageSizeBytes {
-		return result, errors.New("现有分区边界超出镜像容量，拒绝整理")
-	}
-	allocationNeeded := max(int64(0), writableBytes-before.AllocatedBytes)
-	needsDefragment := before.Severity != fragmentation.SeverityHealthy
-	if !needsDefragment && allocationNeeded == 0 {
-		// 健康镜像不进入维护状态，避免用户误点整理后无意义地断开 Gadget。
-		result.RequiresColdBoot = false
-		return result, nil
-	}
-	if !request.ConfirmOTGDisconnected {
-		return result, &InputError{Message: "必须先物理拔掉车机或电脑 OTG 线"}
-	}
-	// COW 分配提示是元数据级保护，不需要复制镜像。必须在完整整理的空间预检前完成，
-	// 否则旧镜像会因为无法容纳 xfs_fsr 临时副本而永远得不到防碎片迁移。
-	if _, err := m.runner.Run(ctx, "/usr/sbin/xfs_io", "-c", "cowextsize 1m", m.config.ImagePath); err != nil {
-		return result, fmt.Errorf("设置镜像 COW extent 保护: %w", err)
-	}
-	result.COWExtentHintApplied = true
-	copyBytes := int64(0)
-	if needsDefragment {
-		// xfs_fsr 会在同一 XFS 上创建临时副本；预检必须覆盖预分配增量、完整副本和安全余量。
-		copyBytes = before.AllocatedBytes + allocationNeeded
-	}
-	if needsDefragment || allocationNeeded > 0 {
-		if err := m.requireDefragmentSpace(ctx, allocationNeeded, copyBytes); err != nil {
-			return result, &InputError{Message: err.Error() + "；已启用后续 COW extent 保护，现有 extent 暂不合并也可以继续使用，无需仅因此重新初始化存储设备"}
-		}
-	}
-	endMaintenance, err := m.controller.BeginMediaMaintenance(ctx)
-	if err != nil {
-		return DefragmentResult{}, errors.Join(ErrUnsafeState, err)
-	}
-	defer endMaintenance()
-
-	// 进入维护状态后复核一次，避免预检后被其他任务占用空间。
-	if err := m.requireDefragmentSpace(ctx, allocationNeeded, copyBytes); err != nil {
-		return result, fmt.Errorf("整理开始前空间复核失败: %w", err)
-	}
-	if _, err := m.runner.Run(ctx, "sync"); err != nil {
-		return result, fmt.Errorf("整理前同步数据盘: %w", err)
-	}
-	if _, err := m.runner.Run(ctx, "fallocate", "--keep-size", "--length", strconv.FormatInt(writableBytes, 10), "--", m.config.ImagePath); err != nil {
-		return result, fmt.Errorf("预分配现有镜像可写区域: %w", err)
-	}
-	if needsDefragment {
-		if _, err := m.runner.Run(ctx, "/usr/sbin/xfs_fsr", "-v", m.config.ImagePath); err != nil {
-			return result, fmt.Errorf("整理 TeslaCam 镜像: %w", err)
-		}
-	}
-	if _, err := m.runner.Run(ctx, "sync"); err != nil {
-		return result, fmt.Errorf("整理后同步数据盘: %w", err)
-	}
-	afterInfo, err := os.Stat(m.config.ImagePath)
-	if err != nil {
-		return result, fmt.Errorf("读取整理后镜像大小: %w", err)
-	}
-	if afterInfo.Size() != result.ImageSizeBytes {
-		return result, fmt.Errorf("整理后镜像大小发生变化：%d -> %d", result.ImageSizeBytes, afterInfo.Size())
-	}
-	after, err := inspector.Inspect(ctx, m.config.ImagePath)
-	if err != nil {
-		return result, err
-	}
-	result.After = after
-	result.Changed = after.ExtentCount < before.ExtentCount || after.AllocatedBytes > before.AllocatedBytes
-	if needsDefragment && after.ExtentCount >= before.ExtentCount {
-		return result, errors.New("XFS 整理未减少镜像 extent，已停止且不会自动重试")
-	}
-	if err := m.verifyImageReadOnly(ctx); err != nil {
-		return result, err
-	}
-	result.FileSystemChecked = true
-	return result, nil
 }
 
 // MigrateAdvertisedCapacity 检查现有卷是否具备完整容量和安全保留区；旧卷不能无损原地扩容。
@@ -420,8 +320,8 @@ func (m *Manager) MigrateAdvertisedCapacity(ctx context.Context, request Capacit
 		return result, nil
 	}
 	expansionBytes := targetWritable - currentWritable
-	if err := m.requireDefragmentSpace(ctx, expansionBytes, 0); err != nil {
-		return result, &InputError{Message: strings.Replace(err.Error(), "安全整理", "安全扩容", 1)}
+	if err := m.requireAllocationSpace(ctx, expansionBytes); err != nil {
+		return result, &InputError{Message: err.Error()}
 	}
 	if _, err := m.runner.Run(ctx, "fallocate", "--keep-size", "--length", strconv.FormatInt(targetWritable, 10), "--", m.config.ImagePath); err != nil {
 		return result, fmt.Errorf("预分配新增 TeslaCam 可写空间: %w", err)
@@ -476,34 +376,40 @@ func (m *Manager) readPartitionEnd(ctx context.Context) (int64, error) {
 	return maximum, nil
 }
 
-func (m *Manager) requireDefragmentSpace(ctx context.Context, allocationNeeded, copyBytes int64) error {
+func (m *Manager) readDataRootSpace(ctx context.Context) (total, free uint64, resultErr error) {
 	output, err := m.runner.Run(ctx, "stat", "--file-system", "--format=%S:%b:%a", m.config.DataRoot)
 	if err != nil {
-		return fmt.Errorf("读取整理可用空间: %w", err)
+		return 0, 0, fmt.Errorf("读取数据盘可用空间: %w", err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(output)), ":")
 	if len(parts) != 3 {
-		return fmt.Errorf("解析整理可用空间: %q", strings.TrimSpace(string(output)))
+		return 0, 0, fmt.Errorf("解析数据盘可用空间: %q", strings.TrimSpace(string(output)))
 	}
 	values := make([]uint64, 3)
 	for index, part := range parts {
 		value, parseErr := strconv.ParseUint(part, 10, 64)
 		if parseErr != nil || value == 0 {
-			return fmt.Errorf("解析整理空间数值 %q", part)
+			return 0, 0, fmt.Errorf("解析数据盘空间数值 %q", part)
 		}
 		values[index] = value
 	}
-	total := values[0] * values[1]
-	free := values[0] * values[2]
-	required := uint64(minimumDefragmentFree)
-	if allocationNeeded > 0 {
-		required += uint64(allocationNeeded)
+	if values[1] > math.MaxUint64/values[0] || values[2] > math.MaxUint64/values[0] {
+		return 0, 0, errors.New("数据盘空间统计超出有效范围")
 	}
-	if copyBytes > 0 {
-		required += uint64(copyBytes)
+	return values[0] * values[1], values[0] * values[2], nil
+}
+
+func (m *Manager) requireAllocationSpace(ctx context.Context, allocationBytes int64) error {
+	total, free, err := m.readDataRootSpace(ctx)
+	if err != nil {
+		return err
 	}
-	if free < required || total == 0 || free*100/total < minimumDefragmentPct {
-		return fmt.Errorf("数据盘可用空间不足以安全整理：可用 %d 字节，至少需要 %d 字节且不低于 %d%%", free, required, minimumDefragmentPct)
+	required := uint64(minimumAllocationFree)
+	if allocationBytes > 0 {
+		required += uint64(allocationBytes)
+	}
+	if free < required || total == 0 || free*100/total < minimumAllocationPct {
+		return &insufficientAllocationSpaceError{free: free, required: required, minimumPct: minimumAllocationPct}
 	}
 	return nil
 }
@@ -528,7 +434,7 @@ func (m *Manager) verifyImageReadOnly(ctx context.Context) (resultErr error) {
 	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
 		return fmt.Errorf("等待整理校验分区设备: %w", err)
 	}
-	if _, err := m.runner.Run(ctx, "fsck.exfat", "-n", loopDevice+"p1"); err != nil {
+	if _, err := m.runner.Run(ctx, m.config.FSCKPath, "-n", loopDevice+"p1"); err != nil {
 		return fmt.Errorf("只读检查 TeslaCam 文件系统: %w", err)
 	}
 	return nil
@@ -828,7 +734,7 @@ func (m *Manager) verifyExistingImage(ctx context.Context) (resultErr error) {
 	if err != nil || !strings.EqualFold(strings.TrimSpace(string(typeOutput)), "exfat") {
 		return errors.New("已有 TeslaCam 镜像没有有效的 exFAT 分区")
 	}
-	if _, err := m.runner.Run(ctx, "fsck.exfat", "-n", partition); err != nil {
+	if _, err := m.runner.Run(ctx, m.config.FSCKPath, "-n", partition); err != nil {
 		return fmt.Errorf("只读检查已有 TeslaCam 镜像: %w", err)
 	}
 	return nil

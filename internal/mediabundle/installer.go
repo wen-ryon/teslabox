@@ -22,6 +22,7 @@ const (
 	defaultParent = "/opt/teslabox"
 	mediaPrefix   = "opt/teslabox/media/"
 	markerName    = ".teslabox-bundle-sha256"
+	fsckVersion   = "1.2.0"
 	maximumFiles  = 4096
 	maximumBytes  = 512 * 1024 * 1024
 )
@@ -194,15 +195,26 @@ func extractArchive(source io.Reader, staging string) error {
 func validateRuntime(ctx context.Context, root string) error {
 	ffmpeg := filepath.Join(root, "bin", "ffmpeg")
 	ffprobe := filepath.Join(root, "bin", "ffprobe")
+	fsckExFAT := filepath.Join(root, "bin", "teslabox-fsck.exfat")
 	font := filepath.Join(root, "share", "fonts", "NotoSansCJK-Regular.ttc")
-	for _, path := range []string{ffmpeg, ffprobe, font} {
+	for _, path := range []string{ffmpeg, ffprobe, fsckExFAT, font} {
 		info, err := os.Stat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			return fmt.Errorf("缺少媒体运行时文件 %s", path)
 		}
 	}
+	if info, err := os.Stat(fsckExFAT); err != nil || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("TeslaBox 专用 fsck.exfat 不可执行 %s", fsckExFAT)
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	fsckVersionOutput, err := exec.CommandContext(probeCtx, fsckExFAT, "-V").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("检查 TeslaBox 专用 fsck.exfat 版本: %w", err)
+	}
+	if !strings.Contains(string(fsckVersionOutput), fsckVersion) {
+		return fmt.Errorf("TeslaBox 专用 fsck.exfat 版本不匹配：需要 %s", fsckVersion)
+	}
 	checks := []struct {
 		args     []string
 		required []string

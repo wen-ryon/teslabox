@@ -56,7 +56,7 @@ func (e *Exporter) runClipJob(ctx context.Context, task ExportTask, job exportJo
 		if segment.request.BurnTimestamp || segment.request.BurnSEI {
 			subtitlePath = e.segmentSubtitlePath(task.ID, segment.index)
 			artifacts = append(artifacts, subtitlePath)
-			hasOverlay, err := writeOverlaySubtitles(subtitlePath, segment.request, segment.source.OverlayCues)
+			hasOverlay, err := writeOverlaySubtitles(subtitlePath, segment.request, segment.source.OverlayCues, segment.source)
 			if err != nil {
 				return err
 			}
@@ -240,7 +240,12 @@ func planClipExport(request ExportRequest, source ExportSource) ([]clipExportSeg
 		segmentRequest := request
 		segmentRequest.StartSeconds = 0
 		segmentRequest.DurationSeconds = end.Sub(start).Seconds()
-		segmentSource := ExportSource{SessionStart: start, SessionEnd: end}
+		segmentSource := ExportSource{
+			SessionStart: start,
+			SessionEnd:   end,
+			CanvasWidth:  source.CanvasWidth,
+			CanvasHeight: source.CanvasHeight,
+		}
 		bestByCamera := make(map[string]ExportVideo, len(request.Cameras))
 		bestOverlapByCamera := make(map[string]time.Duration, len(request.Cameras))
 		for _, video := range source.Videos {

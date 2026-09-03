@@ -168,6 +168,8 @@ func readEventMetadata(path string, location *time.Location) (*EventMetadata, er
 func classifyEventTrigger(reason string) string {
 	normalized := strings.ToLower(strings.TrimSpace(reason))
 	switch {
+	case normalized == "vehicle_auto_emergency_braking":
+		return "vehicle_emergency_braking"
 	case strings.HasPrefix(normalized, "sentry_panic"):
 		return "sentry_alarm"
 	case strings.HasPrefix(normalized, "sentry_aware_accel"):

@@ -215,7 +215,9 @@ func (m *Manager) Start() (status Status, err error) {
 		{name: filepath.Join(configStrings, "configuration"), value: "TeslaCam Mass Storage"},
 		{name: filepath.Join(m.gadgetPath(), "configs", "c.1", "bmAttributes"), value: "0x80"},
 		{name: filepath.Join(m.gadgetPath(), "configs", "c.1", "MaxPower"), value: "250"},
-		{name: filepath.Join(functionPath, "stall"), value: "1"},
+		// ROCK 3A 的 5.10 DWC3 在主机反复断开时可能无法可靠地 halt/clear bulk-in，
+		// 最终留下假 configured 和不可枚举的 Mass Storage 会话；使用 no-stall 恢复路径规避端点卡死。
+		{name: filepath.Join(functionPath, "stall"), value: "0"},
 		{name: m.lunPath("cdrom"), value: "0"},
 		{name: m.lunPath("ro"), value: "0"},
 		{name: m.lunPath("removable"), value: "1"},

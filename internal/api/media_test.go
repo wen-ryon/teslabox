@@ -42,7 +42,30 @@ type fakeExportAdmin struct {
 	settings     media.ExportSettings
 	history      []media.ExportTask
 	consumedID   string
+	deletedID    string
 	err          error
+}
+
+type activatingController struct {
+	state          service.Snapshot
+	activatedState service.Snapshot
+	activations    int
+}
+
+func (c *activatingController) Snapshot() service.Snapshot { return c.state }
+
+func (c *activatingController) AcquireMediaSnapshot() (service.Snapshot, func()) {
+	return c.state, func() {}
+}
+
+func (c *activatingController) Refresh(context.Context) error { return nil }
+
+func (c *activatingController) Scan(context.Context) error { return nil }
+
+func (c *activatingController) ActivateMedia(context.Context) error {
+	c.activations++
+	c.state = c.activatedState
+	return nil
 }
 
 func (a *fakeExportAdmin) Create(request media.ExportRequest, source media.ExportSource, release func()) (media.ExportTask, error) {
@@ -79,6 +102,11 @@ func (a *fakeExportAdmin) History() []media.ExportTask { return a.history }
 
 func (a *fakeExportAdmin) Consume(id string) error {
 	a.consumedID = id
+	return a.err
+}
+
+func (a *fakeExportAdmin) Delete(id string) error {
+	a.deletedID = id
 	return a.err
 }
 
@@ -340,6 +368,74 @@ func TestCreateExportTransfersSnapshotLeaseAndBuildsSessionSource(t *testing.T) 
 	}
 }
 
+func TestCreateExportReactivatesMediaSnapshot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	start := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "front.mp4"))
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	videos := []teslacam.Video{{
+		ID: "front", Path: relative, ClipType: "recent", Camera: "front", RecordedAt: start, Duration: 60,
+	}}
+	sessionID := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)[0].ID
+	controller := &activatingController{activatedState: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root}, Videos: videos,
+	}}
+	admin := &fakeExportAdmin{task: media.ExportTask{ID: "task", State: media.ExportQueued}}
+	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExportAdmin(admin))
+	body := `{"session_id":"` + sessionID + `","duration_seconds":30,"layout":"single","cameras":["front"],"quality":"standard"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/exports", strings.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted || controller.activations != 1 {
+		t.Fatalf("status = %d, activations = %d, body = %s", response.Code, controller.activations, response.Body.String())
+	}
+}
+
+func TestCreateOriginalExportUsesProbedVideoCanvas(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	start := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "front.mp4"))
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	videos := []teslacam.Video{{
+		ID: "front", Path: relative, ClipType: "recent", Camera: "front", RecordedAt: start, Duration: 60,
+	}}
+	sessionID := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)[0].ID
+	controller := fakeController{state: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root}, Videos: videos,
+	}}
+	inspector := &fakeMediaInspector{metadata: media.Metadata{Streams: []media.StreamMetadata{{CodecType: "video", Width: 1448, Height: 938}}}}
+	admin := &fakeExportAdmin{task: media.ExportTask{ID: "task", State: media.ExportQueued}}
+	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)), WithMediaInspector(inspector), WithExportAdmin(admin))
+	body := `{"session_id":"` + sessionID + `","duration_seconds":30,"layout":"single","cameras":["front"],"quality":"original","burn_timestamp":true,"burn_sei":true,"overlay_mode":"top_bar"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/exports", strings.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if inspector.probePath != name || admin.source.CanvasWidth != 1448 || admin.source.CanvasHeight != 938 {
+		t.Fatalf("probe = %q, canvas = %dx%d", inspector.probePath, admin.source.CanvasWidth, admin.source.CanvasHeight)
+	}
+}
+
 func TestCreateSourceExportSelectsOnlyRequestedMinutesAndCameras(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -400,7 +496,7 @@ func TestExportDownloadUsesCompletedFile(t *testing.T) {
 	admin := &fakeExportAdmin{
 		task: media.ExportTask{
 			ID: "task", State: media.ExportCompleted, DownloadReady: true,
-			Request:      media.ExportRequest{Mode: media.ExportModeClip, Layout: "composite6"},
+			Request:      media.ExportRequest{Mode: media.ExportModeClip, Layout: "composite6", Quality: "high", BurnTimestamp: true, BurnSEI: true},
 			VideoStartAt: time.Date(2026, 7, 30, 17, 40, 30, 0, time.FixedZone("CST", 8*60*60)),
 		}, downloadPath: name,
 	}
@@ -414,7 +510,7 @@ func TestExportDownloadUsesCompletedFile(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 	}
 	_, parameters, err := mime.ParseMediaType(response.Header().Get("Content-Disposition"))
-	if err != nil || parameters["filename"] != "export-六路合成-20260730-174030.mp4" {
+	if err != nil || parameters["filename"] != "六路合成-高保真-20260730-174030-仪表+时间.mp4" {
 		t.Fatalf("content disposition = %q, parameters = %#v, error = %v", response.Header().Get("Content-Disposition"), parameters, err)
 	}
 }
@@ -463,6 +559,12 @@ func TestExportSettingsAndHistoryRoutes(t *testing.T) {
 	var history []media.ExportTask
 	if historyResponse.Code != http.StatusOK || json.Unmarshal(historyResponse.Body.Bytes(), &history) != nil || len(history) != 1 || history[0].ID != "history" {
 		t.Fatalf("history response = %d %s", historyResponse.Code, historyResponse.Body.String())
+	}
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/exports/history/file", nil)
+	deleteResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK || admin.deletedID != "file" {
+		t.Fatalf("delete response = %d %s, deleted = %q", deleteResponse.Code, deleteResponse.Body.String(), admin.deletedID)
 	}
 }
 

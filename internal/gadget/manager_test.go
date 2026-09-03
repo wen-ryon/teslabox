@@ -110,6 +110,13 @@ func TestManagerStartCreatesAndBindsMassStorage(t *testing.T) {
 	if got := strings.TrimSpace(string(nofua)); got != "1" {
 		t.Fatalf("nofua = %q, want %q", got, "1")
 	}
+	stall, err := os.ReadFile(filepath.Join(manager.gadgetPath(), "functions", "mass_storage.0", "stall"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(stall)); got != "0" {
+		t.Fatalf("stall = %q, want %q", got, "0")
+	}
 }
 
 func TestManagerRefusesGadgetWhenCapacityReserveIsInvalid(t *testing.T) {

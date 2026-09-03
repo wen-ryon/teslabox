@@ -139,8 +139,32 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 	if releases.Load() != 1 || task.ProgressPercent != 100 || !task.DownloadReady || task.OutputBytes != uint64(len("exported-video")) {
 		t.Fatalf("releases = %d, task = %+v", releases.Load(), task)
 	}
-	if got, want := ExportDownloadFilename(task), "export-前视-20260720-120000.mp4"; got != want {
+	if got, want := ExportDownloadFilename(task), "前视-标清-20260720-120000-无叠加.mp4"; got != want {
 		t.Fatalf("ExportDownloadFilename() = %q, want %q", got, want)
+	}
+}
+
+func TestExportDownloadFilenameDescribesQualityAndOverlay(t *testing.T) {
+	t.Parallel()
+	startAt := time.Date(2026, 8, 22, 16, 7, 27, 0, time.FixedZone("CST", 8*60*60))
+	tests := []struct {
+		name    string
+		request ExportRequest
+		want    string
+	}{
+		{name: "timestamp", request: ExportRequest{Layout: "single", Cameras: []string{"front"}, Quality: "original", BurnTimestamp: true}, want: "前视-原画-20260822-160727-时间.mp4"},
+		{name: "telemetry", request: ExportRequest{Layout: "composite6", Quality: "high", BurnSEI: true}, want: "六路合成-高保真-20260822-160727-仪表.mp4"},
+		{name: "both", request: ExportRequest{Layout: "composite4a", Quality: "high", BurnTimestamp: true, BurnSEI: true}, want: "四路合成A-高保真-20260822-160727-仪表+时间.mp4"},
+		{name: "none", request: ExportRequest{Layout: "single", Cameras: []string{"back"}, Quality: "standard"}, want: "后视-标清-20260822-160727-无叠加.mp4"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExportDownloadFilename(ExportTask{Request: test.request, VideoStartAt: startAt})
+			if got != test.want {
+				t.Fatalf("ExportDownloadFilename() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -196,6 +220,54 @@ func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
 	}
 }
 
+func TestExporterDeletesCompletedExportWithoutDownload(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "export-state.json")
+	exporter, err := NewExporter(&fakeExportRunner{}, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go exporter.Run(ctx)
+	task, err := exporter.Create(validExportRequest(), validExportSource(), func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for task.State != ExportCompleted {
+		if time.Now().After(deadline) {
+			t.Fatalf("task state = %s", task.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+		task, err = exporter.Task(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := exporter.Delete(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(exporter.History()) != 0 {
+		t.Fatalf("history after delete = %#v", exporter.History())
+	}
+	if _, err := os.Stat(filepath.Join(directory, task.ID+".mp4")); !os.IsNotExist(err) {
+		t.Fatalf("completed output was not removed: %v", err)
+	}
+	reloaded, err := NewExporter(&fakeExportRunner{}, ExportConfig{
+		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.History()) != 0 {
+		t.Fatalf("persisted history after delete = %#v", reloaded.History())
+	}
+}
+
 func TestExportOverlaySubtitlesAreEscapedAndMapped(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".task.tmp.ass")
@@ -248,7 +320,7 @@ func TestCompositeExportUsesSeparateInformationBarWithoutVisibleAlignmentPadding
 	if !strings.Contains(string(content), "PlayResX: 2528\nPlayResY: 1184") {
 		t.Fatalf("ASS canvas does not match aligned six-camera output: %s", content)
 	}
-	if !strings.Contains(string(content), "\\frz-1.70") || strings.Contains(string(content), "◀") || strings.Contains(string(content), "▶") {
+	if !strings.Contains(string(content), "\\frz1.70") || strings.Contains(string(content), "◀") || strings.Contains(string(content), "▶") {
 		t.Fatalf("dashboard vectors do not match online steering and blinker styles: %s", content)
 	}
 	if !strings.Contains(string(content), "Style: TimeLabel,Noto Sans CJK SC,23,") ||
@@ -278,11 +350,11 @@ func TestExportOverlayModesControlCanvasAndPadding(t *testing.T) {
 	}{
 		{
 			name: "行车记录仪时间", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original", BurnTimestamp: true, OverlayMode: ExportOverlayDashcam},
-			wantCanvas: "PlayResX: 1280\nPlayResY: 960", wantContent: "Style: DashcamTime", rejectPad: true,
+			wantCanvas: "PlayResX: 1448\nPlayResY: 938", wantContent: "Style: DashcamTime,Noto Sans CJK SC,53,", rejectPad: true,
 		},
 		{
 			name: "单路顶部时间栏", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original", BurnTimestamp: true, OverlayMode: ExportOverlayTopBar},
-			wantCanvas: "PlayResX: 1280\nPlayResY: 1024", wantContent: "录像时间", wantPad: "pad=w=iw:h=ih+64:x=0:y=64:color=black",
+			wantCanvas: "PlayResX: 1448\nPlayResY: 1024", wantContent: "录像时间", wantPad: "pad=w=iw:h=ih+86:x=0:y=86:color=black",
 		},
 		{
 			name: "悬浮仪表", request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high", BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
@@ -318,6 +390,114 @@ func TestExportOverlayModesControlCanvasAndPadding(t *testing.T) {
 	}
 }
 
+func TestOriginalExportUsesMeasuredSourceCanvasForTopBar(t *testing.T) {
+	t.Parallel()
+	request := ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+		BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayTopBar,
+	}
+	source := validExportSource()
+	source.CanvasWidth, source.CanvasHeight = 1448, 938
+	path := filepath.Join(t.TempDir(), "measured-original.ass")
+	_, err := writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+		Start: 0, End: 10 * time.Second, Timestamp: "2026-09-02 12:00:00", Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 64},
+	}}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"PlayResX: 1448\nPlayResY: 1056", "m 0 0 l 1448 0 l 1448 118 l 0 118"} {
+		if !strings.Contains(string(content), marker) {
+			t.Fatalf("原画顶部信息栏未覆盖实测画布：缺少 %q：%s", marker, content)
+		}
+	}
+	args, err := exportArgs(request, source, "/exports/original-top-bar.mp4", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "pad=w=iw:h=ih+118:x=0:y=118:color=black") {
+		t.Fatalf("原画顶部信息栏未在视频上方扩展画布：%s", joined)
+	}
+}
+
+func TestFrontOriginalSingleOverlayUsesDedicatedLargerScaleOnlyWithinScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		request     ExportRequest
+		wantMarkers []string
+	}{
+		{
+			name: "前视原画行车记录仪模式放大时间",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, OverlayMode: ExportOverlayDashcam},
+			wantMarkers: []string{"PlayResX: 1448\nPlayResY: 938", "Style: DashcamTime,Noto Sans CJK SC,53,"},
+		},
+		{
+			name: "前视原画悬浮信息栏整体放大",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+			wantMarkers: []string{
+				"PlayResX: 1448\nPlayResY: 938", "Style: DashcamTime,Noto Sans CJK SC,53,", "Style: Dashboard,Noto Sans CJK SC,33,",
+				"{\\an7\\pos(379,7)", "{\\an8\\pos(448,", "{\\an8\\pos(724,", "{\\an8\\pos(1000,",
+			},
+		},
+		{
+			name: "前视原画顶部信息栏整体放大",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayTopBar},
+			wantMarkers: []string{
+				"PlayResX: 1448\nPlayResY: 1056", "Style: TimeLabel,Noto Sans CJK SC,26,", "Style: TimeValue,Noto Sans CJK SC,38,",
+				"Style: Dashboard,Noto Sans CJK SC,33,", "m 0 0 l 1448 0 l 1448 118 l 0 118",
+			},
+		},
+		{
+			name: "前视原画纯时间顶部栏放大",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, OverlayMode: ExportOverlayTopBar},
+			wantMarkers: []string{
+				"PlayResX: 1448\nPlayResY: 1024", "Style: TimeLabel,Noto Sans CJK SC,26,", "Style: TimeValue,Noto Sans CJK SC,38,",
+				"m 0 0 l 1448 0 l 1448 86 l 0 86",
+			},
+		},
+		{
+			name: "其他视角原画保持原缩放",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"back"}, Quality: "original",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+			wantMarkers: []string{"Style: DashcamTime,Noto Sans CJK SC,40,", "Style: Dashboard,Noto Sans CJK SC,25,", "{\\an7\\pos(463,5)"},
+		},
+		{
+			name: "前视高保真保持原缩放",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+			wantMarkers: []string{"Style: DashcamTime,Noto Sans CJK SC,46,", "Style: Dashboard,Noto Sans CJK SC,29,", "{\\an7\\pos(533,6)"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "overlay.ass")
+			if _, err := writeOverlaySubtitles(path, test.request, []ExportOverlayCue{{
+				Start: 0, End: 10 * time.Second, Timestamp: "2026-09-03 12:00:00", Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 64},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			contentBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := string(contentBytes)
+			for _, marker := range test.wantMarkers {
+				if !strings.Contains(content, marker) {
+					t.Errorf("%s 缺少 %q：%s", test.name, marker, content)
+				}
+			}
+		})
+	}
+}
+
 func TestFloatingExportKeepsTimestampOutsideCompactRoundedDashboard(t *testing.T) {
 	t.Parallel()
 	request := ExportRequest{
@@ -338,9 +518,9 @@ func TestFloatingExportKeepsTimestampOutsideCompactRoundedDashboard(t *testing.T
 	}
 	content := string(contentBytes)
 	for _, marker := range []string{
-		"Style: DashcamTime,Noto Sans CJK SC,46,", "Dialogue: 2,0:00:00.00,0:00:10.00,DashcamTime", "\\1a&HA0", "{\\an7\\pos(553,6)",
-		"{\\an7\\pos(741,21)", "{\\an7\\pos(885,21)", "{\\an8\\pos(833,72)\\fs20\\1c&H00FFFFFF&\\b1}AP",
-		"{\\an8\\pos(595,67)\\fs24\\1c&H00FFFFFF&\\b1}档位", "{\\an8\\pos(991,67)\\fs24\\1c&H00FFFFFF&\\b1}刹车",
+		"Style: DashcamTime,Noto Sans CJK SC,46,", "Dialogue: 2,0:00:00.00,0:00:10.00,DashcamTime", "\\1a&HA0", "{\\an7\\pos(533,6)",
+		"{\\an7\\pos(733,21)", "{\\an7\\pos(893,21)", "{\\an8\\pos(833,72)\\fs20\\1c&H00FFFFFF&\\b1}AP",
+		"{\\an8\\pos(593,67)\\fs24\\1c&H00FFFFFF&\\b1}档位", "{\\an8\\pos(993,67)\\fs24\\1c&H00FFFFFF&\\b1}刹车",
 		"Dialogue: 3,0:00:00.00,0:00:10.00,Canvas", "\\1a&H20&\\3c&H00FFB96E&",
 	} {
 		if !strings.Contains(content, marker) {
@@ -350,8 +530,158 @@ func TestFloatingExportKeepsTimestampOutsideCompactRoundedDashboard(t *testing.T
 	if strings.Contains(content, ",TimeLabel,,") || strings.Contains(content, ",TimeValue,,") || strings.Contains(content, "录像时间") {
 		t.Fatalf("悬浮模式不应把时间放入仪表框：%s", content)
 	}
-	if strings.Contains(content, "\\1c&H00000000&\\org(") || strings.Count(content, "\\org(675,41)\\frz-1.70") != 1 {
+	if strings.Contains(content, "\\1c&H00000000&\\org(") || strings.Count(content, "\\org(673,41)\\frz1.70") != 1 {
 		t.Fatalf("方向盘必须使用单个随角度旋转的透明镂空路径：%s", content)
+	}
+}
+
+func TestSteeringWheelASSReversesAngleToMatchCSSDirection(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		angle float64
+		want  string
+	}{
+		{name: "左转", angle: -22.4, want: "\\frz22.40"},
+		{name: "右转", angle: 22.4, want: "\\frz-22.40"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lines := appendSteeringWheelASS(nil, "0:00:00.00", "0:00:01.00", 100, 20, 1, "&H00FFFFFF&", test.angle)
+			if len(lines) != 1 || !strings.Contains(lines[0], test.want) {
+				t.Fatalf("appendSteeringWheelASS(%v) = %#v, want %q", test.angle, lines, test.want)
+			}
+		})
+	}
+}
+
+func TestExportOverlayUsesStrokeFreeTimestampAndReadableInactiveTelemetry(t *testing.T) {
+	t.Parallel()
+	request := ExportRequest{
+		SessionID: "session", DurationSeconds: 10, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+		BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating,
+	}
+	path := filepath.Join(t.TempDir(), "readable-inactive.ass")
+	_, err := writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+		Start: 0, End: 10 * time.Second, Timestamp: "2026-09-02 12:00:00",
+		Telemetry: &ExportTelemetry{Gear: "P", BlinkerVisible: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(contentBytes)
+	if !strings.Contains(content, "Style: DashcamTime,Noto Sans CJK SC,46,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,0,0,7,") {
+		t.Fatalf("左上角时间仍包含描边或阴影：%s", content)
+	}
+	for _, marker := range []string{
+		"{\\an8\\pos(833,72)\\fs20\\1c&H00FFFFFF&\\b1}手动",
+		"{\\an7\\pos(733,21)\\fscx100\\fscy100\\1c&H00FFFFFF&",
+		"{\\an7\\pos(893,21)\\fscx100\\fscy100\\1c&H00FFFFFF&",
+		"{\\an7\\pos(973,21)\\fscx100\\fscy100\\1c&H00FFFFFF&",
+	} {
+		if !strings.Contains(content, marker) {
+			t.Errorf("未激活状态缺少高对比白色标记 %q：%s", marker, content)
+		}
+	}
+}
+
+func TestFloatingExportCentersCompactDashboardForEveryLayout(t *testing.T) {
+	t.Parallel()
+	for _, layout := range []string{"single", "composite6", "composite4a", "composite4b", "composite3"} {
+		t.Run(layout, func(t *testing.T) {
+			request := ExportRequest{
+				SessionID: "session", DurationSeconds: 10, Layout: layout, Cameras: []string{"front"}, Quality: "high",
+				BurnSEI: true, OverlayMode: ExportOverlayFloating,
+			}
+			width, height, _, _, err := exportOverlayCanvas(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scale := max(0.55, min(1.2, min(float64(height)/1080, float64(width)/1280)))
+			panelWidth := scaleASS(600, scale)
+			panelLeft := (width - panelWidth) / 2
+			centerX := width / 2
+			step := scaleASS(80, scale)
+			path := filepath.Join(t.TempDir(), layout+".ass")
+			_, err = writeOverlaySubtitles(path, request, []ExportOverlayCue{{
+				Start: 0, End: 10 * time.Second, Telemetry: &ExportTelemetry{Gear: "D", SteeringAngle: -22.4},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			contentBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := string(contentBytes)
+			for _, marker := range []string{
+				fmt.Sprintf("{\\an7\\pos(%d,%d)", panelLeft, max(scaleASS(6, scale), 4)),
+				fmt.Sprintf("{\\an8\\pos(%d,", centerX-3*step),
+				fmt.Sprintf("{\\an8\\pos(%d,", centerX),
+				fmt.Sprintf("{\\an8\\pos(%d,", centerX+3*step),
+				"\\frz22.40",
+			} {
+				if !strings.Contains(content, marker) {
+					t.Errorf("%s 布局未按画布中心使用紧凑等距仪表：缺少 %q", layout, marker)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteExportOverlayRenderFixtures(t *testing.T) {
+	directory := os.Getenv("TESLABOX_RENDER_FIXTURE_DIR")
+	if directory == "" {
+		t.Skip("未请求生成导出叠加层渲染样本")
+	}
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cue := ExportOverlayCue{
+		Start: 0, End: time.Second, Timestamp: "2026-08-30 12:02:13",
+		Telemetry: &ExportTelemetry{Gear: "D", SpeedKPH: 64, AcceleratorPosition: 27, SteeringAngle: 4.2, BlinkerVisible: true},
+	}
+	tests := []struct {
+		name    string
+		request ExportRequest
+		source  ExportSource
+	}{
+		{
+			name: "single-original-dashcam-1448x938.ass",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 1, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, OverlayMode: ExportOverlayDashcam},
+			source: ExportSource{CanvasWidth: 1448, CanvasHeight: 938},
+		},
+		{
+			name: "single-original-floating-1448x938.ass",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 1, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+			source: ExportSource{CanvasWidth: 1448, CanvasHeight: 938},
+		},
+		{
+			name: "single-high-floating-1666x1080.ass",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 1, Layout: "single", Cameras: []string{"front"}, Quality: "high",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+		},
+		{
+			name: "single-original-topbar-1448x1056.ass",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 1, Layout: "single", Cameras: []string{"front"}, Quality: "original",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayTopBar},
+			source: ExportSource{CanvasWidth: 1448, CanvasHeight: 938},
+		},
+		{
+			name: "composite4b-high-floating-1264x1088.ass",
+			request: ExportRequest{SessionID: "session", DurationSeconds: 1, Layout: "composite4b", Quality: "high",
+				BurnTimestamp: true, BurnSEI: true, OverlayMode: ExportOverlayFloating},
+		},
+	}
+	for _, test := range tests {
+		if _, err := writeOverlaySubtitles(filepath.Join(directory, test.name), test.request, []ExportOverlayCue{cue}, test.source); err != nil {
+			t.Fatalf("生成 %s：%v", test.name, err)
+		}
 	}
 }
 

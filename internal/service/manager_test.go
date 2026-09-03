@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -73,8 +75,10 @@ type fakeLifecycle struct {
 type fakeSnapshotter struct {
 	views        []mediasnapshot.View
 	createErr    error
+	repairErr    error
 	removeErr    error
 	createCalls  int
+	repairCalls  int
 	removed      []mediasnapshot.View
 	recoverErr   error
 	recoverCalls int
@@ -95,6 +99,7 @@ func (s *fakeSnapshotter) Space() (mediasnapshot.SpaceStatus, error) {
 }
 
 func (s *fakeSnapshotter) Create(context.Context) (mediasnapshot.View, error) {
+	index := s.createCalls + s.repairCalls
 	s.createCalls++
 	if s.createErr != nil {
 		return mediasnapshot.View{}, s.createErr
@@ -102,8 +107,23 @@ func (s *fakeSnapshotter) Create(context.Context) (mediasnapshot.View, error) {
 	if len(s.views) == 0 {
 		return mediasnapshot.View{ID: "snapshot-1", MountPath: "/run/teslabox/snapshots/snapshot-1", CreatedAt: time.Now()}, nil
 	}
-	index := min(s.createCalls-1, len(s.views)-1)
+	index = min(index, len(s.views)-1)
 	return s.views[index], nil
+}
+
+func (s *fakeSnapshotter) CreateRepaired(context.Context) (mediasnapshot.View, error) {
+	index := s.createCalls + s.repairCalls
+	s.repairCalls++
+	if s.repairErr != nil {
+		return mediasnapshot.View{}, s.repairErr
+	}
+	if len(s.views) == 0 {
+		return mediasnapshot.View{ID: "snapshot-repaired", MountPath: "/run/teslabox/snapshots/snapshot-repaired", CreatedAt: time.Now(), RepairApplied: true}, nil
+	}
+	index = min(index, len(s.views)-1)
+	view := s.views[index]
+	view.RepairApplied = true
+	return view, nil
 }
 
 func (s *fakeSnapshotter) Remove(_ context.Context, view mediasnapshot.View) error {
@@ -114,7 +134,10 @@ func (s *fakeSnapshotter) Remove(_ context.Context, view mediasnapshot.View) err
 type fakeVideoScanner struct {
 	videos []teslacam.Video
 	err    error
+	errors []error
 	root   string
+	roots  []string
+	calls  int
 }
 
 type orderingMaintenanceLocker struct {
@@ -135,7 +158,13 @@ func (l *orderingMaintenanceLocker) Acquire(context.Context) (func(), error) {
 }
 
 func (s *fakeVideoScanner) Scan(root string) ([]teslacam.Video, error) {
+	index := s.calls
+	s.calls++
 	s.root = root
+	s.roots = append(s.roots, root)
+	if len(s.errors) > 0 {
+		return s.videos, s.errors[min(index, len(s.errors)-1)]
+	}
 	return s.videos, s.err
 }
 
@@ -1204,6 +1233,89 @@ func TestManagerScanFailureKeepsLastUsableSnapshot(t *testing.T) {
 	if len(snapshotter.removed) != 1 || snapshotter.removed[0].ID != second.ID {
 		t.Fatalf("removed = %#v", snapshotter.removed)
 	}
+	if snapshotter.repairCalls != 0 {
+		t.Fatalf("repair calls = %d, want 0 for a non-I/O scan failure", snapshotter.repairCalls)
+	}
+}
+
+func TestManagerScanRepairsSnapshotCopyOnceAfterFilesystemEIO(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	first := mediasnapshot.View{ID: "snapshot-bad", MountPath: "/run/teslabox/snapshots/snapshot-bad"}
+	repaired := mediasnapshot.View{ID: "snapshot-repaired", MountPath: "/run/teslabox/snapshots/snapshot-repaired"}
+	snapshotter := &fakeSnapshotter{views: []mediasnapshot.View{first, repaired}}
+	scanner := &fakeVideoScanner{
+		videos: []teslacam.Video{{ID: "video-1"}},
+		errors: []error{
+			&os.PathError{Op: "readdirent", Path: filepath.Join(first.MountPath, "TeslaCam", "RecentClips"), Err: syscall.EIO},
+			nil,
+		},
+	}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, scanner,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Scan(t.Context()); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	state := manager.Snapshot()
+	if state.Phase != PhaseSnapshotReady || state.MediaSnapshot == nil || state.MediaSnapshot.ID != repaired.ID || !state.MediaSnapshot.RepairApplied || state.VideoCount != 1 {
+		t.Fatalf("state = %#v", state)
+	}
+	if snapshotter.createCalls != 1 || snapshotter.repairCalls != 1 || scanner.calls != 2 {
+		t.Fatalf("create calls = %d, repair calls = %d, scan calls = %d", snapshotter.createCalls, snapshotter.repairCalls, scanner.calls)
+	}
+	if len(snapshotter.removed) != 1 || snapshotter.removed[0].ID != first.ID {
+		t.Fatalf("removed = %#v", snapshotter.removed)
+	}
+	if !slices.Equal(scanner.roots, []string{first.MountPath, repaired.MountPath}) {
+		t.Fatalf("scan roots = %v", scanner.roots)
+	}
+}
+
+func TestManagerScanRepairRetryFailureKeepsLastUsableSnapshot(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	usable := mediasnapshot.View{ID: "snapshot-usable", MountPath: "/run/teslabox/snapshots/snapshot-usable"}
+	bad := mediasnapshot.View{ID: "snapshot-bad", MountPath: "/run/teslabox/snapshots/snapshot-bad"}
+	repaired := mediasnapshot.View{ID: "snapshot-repaired", MountPath: "/run/teslabox/snapshots/snapshot-repaired"}
+	snapshotter := &fakeSnapshotter{views: []mediasnapshot.View{usable, bad, repaired}}
+	eio := &os.PathError{Op: "readdirent", Path: "TeslaCam/RecentClips", Err: syscall.EIO}
+	scanner := &fakeVideoScanner{videos: []teslacam.Video{{ID: "video-1"}}, errors: []error{nil, eio, eio}}
+	manager := NewManager(
+		config.Config{},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, scanner,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Scan(t.Context()); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("second Scan() error = %v, want EIO", err)
+	}
+	state := manager.Snapshot()
+	if state.Phase != PhaseDegraded || state.MediaSnapshot == nil || state.MediaSnapshot.ID != usable.ID || state.VideoCount != 1 || state.SnapshotFailures != 1 || state.SnapshotRetryAt == nil {
+		t.Fatalf("state = %#v", state)
+	}
+	if snapshotter.createCalls != 2 || snapshotter.repairCalls != 1 || scanner.calls != 3 {
+		t.Fatalf("create calls = %d, repair calls = %d, scan calls = %d", snapshotter.createCalls, snapshotter.repairCalls, scanner.calls)
+	}
+	if len(snapshotter.removed) != 2 || snapshotter.removed[0].ID != bad.ID || snapshotter.removed[1].ID != repaired.ID {
+		t.Fatalf("removed = %#v", snapshotter.removed)
+	}
 }
 
 func TestManagerScanRecoversOrphansOnlyOnce(t *testing.T) {
@@ -1374,6 +1486,54 @@ func TestManagerAutomaticSnapshotReleasesIdleViewAndKeepsIndex(t *testing.T) {
 	}
 	if snapshotter.createCalls != 3 || manager.Snapshot().MediaSnapshot == nil {
 		t.Fatalf("reactivated snapshot = calls %d state %#v", snapshotter.createCalls, manager.Snapshot().MediaSnapshot)
+	}
+}
+
+func TestManagerAutomaticSnapshotThrottlesRepairedView(t *testing.T) {
+	t.Parallel()
+	device := storage.Device{Path: "/dev/sda1", UUID: "data-uuid", FSType: "xfs", MountPoints: []string{"/var/lib/teslabox"}}
+	bad := mediasnapshot.View{ID: "snapshot-bad", MountPath: "/run/teslabox/snapshots/snapshot-bad"}
+	repaired := mediasnapshot.View{ID: "snapshot-repaired", MountPath: "/run/teslabox/snapshots/snapshot-repaired"}
+	next := mediasnapshot.View{ID: "snapshot-next", MountPath: "/run/teslabox/snapshots/snapshot-next"}
+	snapshotter := &fakeSnapshotter{views: []mediasnapshot.View{bad, repaired, next}}
+	scanner := &fakeVideoScanner{
+		videos: []teslacam.Video{{ID: "video-1"}},
+		errors: []error{
+			&os.PathError{Op: "readdirent", Path: filepath.Join(bad.MountPath, "TeslaCam", "RecentClips"), Err: syscall.EIO},
+			nil,
+		},
+	}
+	manager := NewManager(
+		config.Config{ScanInterval: time.Minute, SnapshotActiveWindow: 10 * time.Minute, SnapshotTimeout: time.Second},
+		fakeDetector{device: device},
+		fakeInspector{status: backing.Status{State: backing.StateReady, Ready: true}},
+		fakeProber{environment: gadget.Environment{Ready: true, UDCNames: []string{"fcc00000.dwc3"}}},
+		&fakeMounter{}, &fakeLifecycle{}, snapshotter, scanner,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	now := time.Date(2026, 9, 2, 21, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	if err := manager.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ActivateMedia(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotter.createCalls != 1 || snapshotter.repairCalls != 1 || scanner.calls != 2 || !manager.Snapshot().MediaSnapshot.RepairApplied {
+		t.Fatalf("initial repaired snapshot = create %d repair %d scan %d state %#v", snapshotter.createCalls, snapshotter.repairCalls, scanner.calls, manager.Snapshot().MediaSnapshot)
+	}
+
+	for _, elapsed := range []time.Duration{time.Minute, 4 * time.Minute} {
+		now = time.Date(2026, 9, 2, 21, 0, 0, 0, time.UTC).Add(elapsed)
+		manager.snapshotWithTimeout(t.Context())
+		if snapshotter.createCalls != 1 {
+			t.Fatalf("elapsed %s create calls = %d, want repaired snapshot cooldown", elapsed, snapshotter.createCalls)
+		}
+	}
+	now = time.Date(2026, 9, 2, 21, 5, 0, 0, time.UTC)
+	manager.snapshotWithTimeout(t.Context())
+	if snapshotter.createCalls != 2 || scanner.calls != 3 || manager.Snapshot().MediaSnapshot.ID != next.ID {
+		t.Fatalf("post-cooldown snapshot = create %d scan %d state %#v", snapshotter.createCalls, scanner.calls, manager.Snapshot().MediaSnapshot)
 	}
 }
 

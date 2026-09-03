@@ -22,9 +22,6 @@ func (a *fakeStorageAdmin) Status(context.Context) (storageadmin.Status, error) 
 func (a *fakeStorageAdmin) Fragmentation(context.Context) (fragmentation.Report, error) {
 	return fragmentation.Report{ExtentCount: 7598, Severity: fragmentation.SeverityCritical}, nil
 }
-func (a *fakeStorageAdmin) Defragment(context.Context, storageadmin.DefragmentRequest) (storageadmin.DefragmentResult, error) {
-	return storageadmin.DefragmentResult{Changed: true, FileSystemChecked: true, RequiresColdBoot: true}, nil
-}
 func (a *fakeStorageAdmin) MigrateAdvertisedCapacity(context.Context, storageadmin.CapacityMigrationRequest) (storageadmin.CapacityMigrationResult, error) {
 	return storageadmin.CapacityMigrationResult{Changed: true, FileSystemChecked: true, AdvertisedBytes: 128_000_000_000}, nil
 }
@@ -52,9 +49,9 @@ func TestStorageAdminRoutes(t *testing.T) {
 	}
 
 	defragment := httptest.NewRecorder()
-	handler.ServeHTTP(defragment, httptest.NewRequest(http.MethodPost, "/api/v1/storage/defragment", strings.NewReader(`{"confirm_otg_disconnected":true}`)))
-	if defragment.Code != http.StatusOK || !strings.Contains(defragment.Body.String(), `"file_system_checked":true`) {
-		t.Fatalf("defragment status = %d, body = %s", defragment.Code, defragment.Body.String())
+	handler.ServeHTTP(defragment, httptest.NewRequest(http.MethodPost, "/api/v1/storage/defragment", nil))
+	if defragment.Code != http.StatusNotFound {
+		t.Fatalf("removed defragment route status = %d, body = %s", defragment.Code, defragment.Body.String())
 	}
 
 	migrate := httptest.NewRecorder()

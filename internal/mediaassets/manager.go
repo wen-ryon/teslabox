@@ -62,6 +62,7 @@ type Config struct {
 	StatePath      string
 	StagingPath    string
 	MountPath      string
+	FSCKPath       string
 	Policy         storagepolicy.SnapshotReservePolicy
 	OperationGuard *maintenanceguard.Guard
 }
@@ -194,6 +195,9 @@ func New(cfg Config, runner system.Runner, maintenance Maintenance, snapshots ..
 	}
 	if runner == nil || maintenance == nil {
 		return nil, errors.New("媒体资源管理器依赖不能为空")
+	}
+	if strings.TrimSpace(cfg.FSCKPath) == "" {
+		cfg.FSCKPath = "fsck.exfat"
 	}
 	if len(snapshots) > 1 {
 		return nil, errors.New("媒体快照来源不能重复配置")
@@ -806,7 +810,7 @@ func (m *Manager) reclaimSpaceLocked(ctx context.Context, targetBytes uint64) (r
 	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
 		return SpaceReclaimResult{}, fmt.Errorf("等待空间回收分区设备: %w", err)
 	}
-	if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
+	if _, err := m.runner.Run(ctx, m.cfg.FSCKPath, "-p", loopDevice+"p1"); err != nil {
 		var commandErr *system.CommandError
 		if !errors.As(err, &commandErr) || commandErr.Code != 1 {
 			return SpaceReclaimResult{}, fmt.Errorf("检查空间回收前的 exFAT 分区: %w", err)
@@ -1062,7 +1066,7 @@ func (m *Manager) validateExFATLocked(ctx context.Context) (resultErr error) {
 	if _, err := m.runner.Run(ctx, "udevadm", "settle"); err != nil {
 		return fmt.Errorf("等待放弃修复分区设备: %w", err)
 	}
-	if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
+	if _, err := m.runner.Run(ctx, m.cfg.FSCKPath, "-p", loopDevice+"p1"); err != nil {
 		var commandErr *system.CommandError
 		if !errors.As(err, &commandErr) || commandErr.Code != 1 {
 			return fmt.Errorf("检查放弃修复后的 exFAT 分区: %w", err)
@@ -1294,7 +1298,7 @@ func (m *Manager) mountPartition(ctx context.Context, device string, partition i
 		return "", fmt.Errorf("创建媒体分区挂载点: %w", err)
 	}
 	if exFAT {
-		if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", device); err != nil {
+		if _, err := m.runner.Run(ctx, m.cfg.FSCKPath, "-p", device); err != nil {
 			var commandErr *system.CommandError
 			if !errors.As(err, &commandErr) || commandErr.Code != 1 {
 				return "", fmt.Errorf("检查媒体 exFAT 分区: %w", err)

@@ -6,8 +6,8 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20260819-2">
-  <script src="/app.js?v=20260819-2" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260902-2">
+  <script src="/app.js?v=20260903-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -72,13 +72,15 @@
     </aside>
 
     <div id="dashboard-page" class="page app-page">
-      <section class="hero">
+      <section class="hero" aria-labelledby="status-title">
         <div>
-          <p class="eyebrow">TESLACAM LIBRARY</p>
-          <h1>每一段旅程，<br>一条完整时间轴。</h1>
-          <p class="hero-copy">每分钟文件自动衔接成完整录像段。六路画面同窗合成、一套播放控制，也可随时切换单视角。</p>
+          <p class="eyebrow">SYSTEM MONITOR</p>
+          <h2 id="status-title">TeslaBox 运行状态</h2>
         </div>
-        <button id="refresh-button" class="secondary" type="button">立即刷新</button>
+        <div class="hero-actions">
+          <label class="recording-refresh-control">录像自动刷新<select id="recording-refresh-interval" aria-label="录像索引自动刷新间隔"><option value="0">关</option><option value="15">15 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select></label>
+          <button id="refresh-button" class="secondary" type="button">立即刷新</button>
+        </div>
       </section>
 
       <section class="status-grid" aria-label="设备状态">
@@ -277,9 +279,8 @@
         </article>
         <article class="settings-card power-card">
           <div><h3>存储健康与兼容性</h3><p id="storage-benchmark-detail">性能体检会在首次初始化的空数据盘上模拟六路分钟文件写入。</p><p id="storage-fragmentation-detail">碎片诊断按需读取外层 XFS extent；日常打开设置页不会扫描整块镜像。</p></div>
-          <div class="power-actions"><button id="storage-fragmentation-check" class="secondary" type="button">检查碎片</button><button id="storage-capacity-migrate" class="secondary" type="button">优化保留空间</button><button id="storage-defragment" class="danger-button" type="button">离线整理</button></div>
+          <div class="power-actions"><button id="storage-fragmentation-check" class="secondary" type="button">检查碎片</button><button id="storage-capacity-migrate" class="secondary" type="button">优化保留空间</button></div>
         </article>
-        <div class="settings-warning">离线整理必须先物理拔掉 OTG，并确保没有录像播放或导出。整理结束后 Gadget 会继续保持暂停，需冷启动后才能重新连接车机。</div>
       </section>
 
       <section class="settings-section" aria-labelledby="maintenance-settings-title">

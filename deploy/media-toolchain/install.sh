@@ -25,8 +25,13 @@ sha256sum -c "$(basename "${CHECKSUM_FILE}")"
 mkdir -p "${INSTALL_PARENT}" "${STAGING}"
 tar -C "${STAGING}" --strip-components=3 -xzf "${ARCHIVE}"
 
-if [ ! -x "${STAGING}/bin/ffmpeg" ] || [ ! -x "${STAGING}/bin/ffprobe" ]; then
-    echo "构建包缺少 ffmpeg 或 ffprobe" >&2
+if [ ! -x "${STAGING}/bin/ffmpeg" ] || [ ! -x "${STAGING}/bin/ffprobe" ] || [ ! -x "${STAGING}/bin/teslabox-fsck.exfat" ]; then
+	echo "构建包缺少 ffmpeg、ffprobe 或 TeslaBox 专用 fsck.exfat" >&2
+    find "${STAGING}" -depth -delete
+    exit 1
+fi
+if ! "${STAGING}/bin/teslabox-fsck.exfat" -V 2>&1 | grep -F '1.2.0' >/dev/null; then
+    echo "TeslaBox 专用 fsck.exfat 版本不是 1.2.0，拒绝安装" >&2
     find "${STAGING}" -depth -delete
     exit 1
 fi

@@ -12,6 +12,8 @@ const savedView = readPreference("teslabox-view", "multi");
 const savedPeriod = readPreference("teslabox-period", "month");
 const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "medium"));
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
+const recordingRefreshPreferenceKey = "teslabox-recording-refresh-seconds";
+const savedRecordingRefreshSeconds = normalizeRecordingRefreshSeconds(readPreference(recordingRefreshPreferenceKey, "60"));
 const onboardingPreferenceKey = "teslabox-onboarding-complete";
 const initialPage = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
 const state = {
@@ -158,6 +160,8 @@ let archivedSessions = [];
 const selectedRecordingSessions = new Set();
 let recordingDeleteInProgress = false;
 let recordingDeleteMode = false;
+let recordingRefreshSeconds = savedRecordingRefreshSeconds;
+let recordingRefreshTimer = 0;
 let compositeTracks = new Map();
 let pendingCompositeTracks = new Map();
 let lastCompositeSync = 0;
@@ -510,7 +514,6 @@ $("wifi-ipv4-mode").addEventListener("change", renderWiFiIPv4Fields);
 $("storage-refresh").addEventListener("click", loadStorageDevices);
 $("storage-fragmentation-check").addEventListener("click", inspectStorageFragmentation);
 $("storage-capacity-migrate").addEventListener("click", migrateStorageCapacity);
-$("storage-defragment").addEventListener("click", defragmentStorageImage);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
 $("onboarding-skip").addEventListener("click", dismissOnboarding);
 $("onboarding-primary").addEventListener("click", followOnboardingPrimaryAction);
@@ -535,6 +538,14 @@ $("update-history-load").addEventListener("click", loadUpdateHistory);
 $("update-download").addEventListener("click", downloadUpdate);
 $("update-install").addEventListener("click", installUpdate);
 $("filter-form").addEventListener("submit", (event) => { event.preventDefault(); loadSessions(false); });
+$("recording-refresh-interval").value = String(recordingRefreshSeconds);
+renderCompatibilitySelect($("recording-refresh-interval"));
+$("recording-refresh-interval").addEventListener("change", (event) => {
+  recordingRefreshSeconds = normalizeRecordingRefreshSeconds(event.target.value);
+  event.target.value = String(recordingRefreshSeconds);
+  writePreference(recordingRefreshPreferenceKey, String(recordingRefreshSeconds));
+  scheduleRecordingRefresh();
+});
 $("recording-select-all").addEventListener("click", toggleAllRecordingSelections);
 $("recording-delete-selected").addEventListener("click", handleRecordingDeleteAction);
 $("play-toggle").addEventListener("click", togglePlayback);
@@ -1427,9 +1438,34 @@ function renderExportSettings() {
     download.href = `/api/v1/exports/${encodeURIComponent(task.id)}/download`;
     download.download = "";
     download.textContent = "再次下载";
-    row.append(copy, download);
+    const remove = document.createElement("button");
+    remove.className = "danger-button compact";
+    remove.type = "button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => deleteExportHistoryTask(task, remove));
+    const actions = document.createElement("div");
+    actions.className = "export-history-actions";
+    actions.append(download, remove);
+    row.append(copy, actions);
     root.append(row);
   });
+}
+
+async function deleteExportHistoryTask(task, button) {
+  const label = task.request?.mode === "source" ? "多路原画压缩包" : exportTaskLabel(task.request);
+  if (!window.confirm(`确认删除“${label}”？删除后无法再次下载。`)) return;
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    await request(`/api/v1/exports/history/${encodeURIComponent(task.id)}`, {method:"DELETE"});
+    state.exportHistory = (state.exportHistory || []).filter((item) => item.id !== task.id);
+    renderExportSettings();
+    setSettingsNotice("历史导出已删除，数据盘空间已释放", false);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "删除";
+    setSettingsNotice(`删除历史导出失败：${error.message}`, true);
+  }
 }
 
 function renderExportRetentionControls() {
@@ -2319,25 +2355,6 @@ function renderStorageFragmentation(report) {
   $("storage-fragmentation-detail").textContent = `${levels[report.severity] || "未知"} · ${formatNumber(report.extent_count || 0)} 个 extent · ${report.reason || "无诊断说明"}`;
 }
 
-async function defragmentStorageImage() {
-  const confirmed = window.confirm("请先物理拔掉车机或电脑的 OTG 线。整理期间不要关机、拔数据盘或启动录像播放/导出。确认继续吗？");
-  if (!confirmed) return;
-  const button = $("storage-defragment");
-  button.disabled = true;
-  button.textContent = "整理中，请勿断电…";
-  try {
-    const result = await postJSON("/api/v1/storage/defragment", {confirm_otg_disconnected:true});
-    renderStorageFragmentation(result.after || result.before || {});
-    const summary = result.changed ? "镜像整理并校验完成" : "镜像无需整理，文件系统校验完成";
-    setSettingsNotice(`${summary}；请关机后重新上电恢复 Gadget`, false);
-  } catch (error) {
-    setSettingsNotice(error.message, true);
-  } finally {
-    button.disabled = false;
-    button.textContent = "离线整理";
-  }
-}
-
 async function migrateStorageCapacity() {
   const confirmed = window.confirm("此操作会先预分配新增可写空间，再把固定 20GB 保留区优化为 10GB 或物理容量的 5%（取较大值），不会删除录像。操作期间必须保持供电稳定；旧式 95.9 GiB 分区仍需备份后重新初始化。请先物理拔掉 OTG，确认继续吗？");
   if (!confirmed) return;
@@ -2780,9 +2797,9 @@ function renderPercent(prefix, value) {
   $(`${prefix}-progress`).style.background = percent >= 90 ? "var(--danger)" : percent >= 75 ? "var(--warning)" : "var(--ok)";
 }
 
-async function loadSessions(silent = false) {
+async function loadSessions(silent = false, automatic = false) {
   if (state.loading) return;
-  return withPageLoading(silent ? "正在同步录像索引…" : "正在整理完整录像时间轴…", async () => {
+  const operation = async () => {
     state.loading = true;
     if (!silent) {
       timelineList.replaceChildren();
@@ -2795,9 +2812,11 @@ async function loadSessions(silent = false) {
         if (value) archiveParams.set(id.replace("-", "_"), value);
       }
       const [recentPayload, archivePayload] = await Promise.all([
-        request("/api/v1/video-sessions?clip_type=recent&limit=1000"),
-        request(`/api/v1/video-sessions?${archiveParams}`),
+        request("/api/v1/video-sessions?clip_type=recent&limit=1000", {loading: !silent}),
+        request(`/api/v1/video-sessions?${archiveParams}`, {loading: !silent}),
       ]);
+      // 自动请求开始后用户可能进入删除选择；此时保留原列表，避免已选卡片被重建。
+      if (automatic && recordingInteractionActive()) return;
       recentSessions = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
       archivedSessions = (archivePayload.items || []).filter((session) => ["saved", "sentry"].includes(session.clip_type));
       reconcileRecordingSelection();
@@ -2807,11 +2826,41 @@ async function loadSessions(silent = false) {
       $("load-more").hidden = true;
       if (!silent) setNotice(archivedSessions.length === 0 ? "当前筛选条件下没有已保存或哨兵录像" : "", false, false);
     } catch (error) {
-      setNotice(error.message, true);
+      if (silent) console.warn("后台刷新录像索引失败", error);
+      else setNotice(error.message, true);
     } finally {
       state.loading = false;
     }
-  });
+  };
+  if (silent) return operation();
+  return withPageLoading("正在整理完整录像时间轴…", operation);
+}
+
+function normalizeRecordingRefreshSeconds(value) {
+  const seconds = Number.parseInt(String(value), 10);
+  return [0, 15, 30, 60].includes(seconds) ? seconds : 60;
+}
+
+function recordingInteractionActive() {
+  return recordingDeleteMode || recordingDeleteInProgress || selectedRecordingSessions.size > 0 || timelineScrubbing || !playerModal.hidden;
+}
+
+function canAutomaticallyRefreshRecordings() {
+  return recordingRefreshSeconds > 0 && !appView.hidden && state.page === "dashboard" && !document.hidden
+    && !state.loading && !state.refreshing && !recordingInteractionActive();
+}
+
+function scheduleRecordingRefresh() {
+  window.clearTimeout(recordingRefreshTimer);
+  recordingRefreshTimer = 0;
+  if (recordingRefreshSeconds <= 0) return;
+  recordingRefreshTimer = window.setTimeout(async () => {
+    try {
+      if (canAutomaticallyRefreshRecordings()) await loadSessions(true, true);
+    } finally {
+      scheduleRecordingRefresh();
+    }
+  }, recordingRefreshSeconds * 1000);
 }
 
 function renderArchiveTimeline() {
@@ -5394,6 +5443,7 @@ function eventReasonLabel(metadata) {
   if (triggerType === "sentry_motion") return "哨兵检测到车辆震动";
   if (triggerType === "sentry_alarm") return "哨兵警报触发";
   if (triggerType === "sentry_other") return "哨兵模式事件";
+  if (triggerType === "vehicle_emergency_braking") return "自动紧急制动触发";
   if (reason === "user_interaction_dashcam_icon_tapped") return "手动点击保存";
   if (reason === "user_interaction_dashcam_panel_save" || reason === "user_interaction_dashcam_launcher_action_tapped") return "手动保存录像";
   if (reason === "user_interaction_honk") return "鸣笛保存";
@@ -5401,6 +5451,7 @@ function eventReasonLabel(metadata) {
   if (reason.startsWith("sentry_aware_accel")) return "哨兵检测到车辆震动";
   if (reason.startsWith("sentry_aware_object")) return "哨兵检测到周边对象";
   if (reason.startsWith("sentry_aware")) return "哨兵警戒触发";
+  if (reason === "vehicle_auto_emergency_braking") return "自动紧急制动触发";
   return reason ? `车辆事件触发（${reason}）` : "车辆事件触发";
 }
 
@@ -5467,7 +5518,5 @@ function formatUptime(value) {
 }
 
 window.setInterval(() => { if (!appView.hidden) loadStatus(); }, 10000);
-window.setInterval(() => {
-  if (!appView.hidden && state.page === "dashboard" && !document.hidden && playerModal.hidden) loadSessions(true);
-}, 30000);
+scheduleRecordingRefresh();
 initialize();

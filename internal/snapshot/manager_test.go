@@ -247,6 +247,56 @@ func TestManagerCreateAcceptsRepairedFilesystem(t *testing.T) {
 	}
 }
 
+func TestManagerCreateRepairedRepairsOnlyNewSnapshotCopyBeforeMount(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "teslacam.img")
+	snapshotPath := filepath.Join(root, "snapshots")
+	mountRoot := filepath.Join(root, "mounts")
+	if err := os.WriteFile(imagePath, []byte("teslacam"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(snapshotPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mountRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{}
+	manager := New(runner, Config{
+		ImagePath: imagePath, SnapshotPath: snapshotPath, MountRoot: mountRoot,
+		FSCKPath: "/opt/teslabox/media/bin/teslabox-fsck.exfat", Policy: testSnapshotPolicy(t),
+	})
+	view, err := manager.CreateRepaired(t.Context())
+	if err != nil {
+		t.Fatalf("CreateRepaired() error = %v", err)
+	}
+	if !view.RepairApplied {
+		t.Fatal("CreateRepaired() did not report the repair")
+	}
+	wantNames := []string{"/usr/sbin/xfs_io", "cp", "losetup", "/opt/teslabox/media/bin/teslabox-fsck.exfat", "losetup", "losetup", "mount"}
+	gotNames := make([]string, 0, len(runner.commands))
+	for _, item := range runner.commands {
+		gotNames = append(gotNames, item.name)
+	}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("commands = %v, want %v", gotNames, wantNames)
+	}
+	if slices.Contains(runner.commands[2].args, "--read-only") {
+		t.Fatalf("repair loop args = %v, must be writable", runner.commands[2].args)
+	}
+	if !slices.Contains(runner.commands[5].args, "--read-only") {
+		t.Fatalf("final loop args = %v, want read-only", runner.commands[5].args)
+	}
+	if got := runner.commands[3].args; !reflect.DeepEqual(got, []string{"-p", "/dev/loop7p1"}) {
+		t.Fatalf("fsck args = %v", got)
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("source image changed unexpectedly: %v", err)
+	}
+}
+
 func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

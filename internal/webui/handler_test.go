@@ -45,6 +45,12 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 	if bytes.Contains(body, []byte(`value="recent"`)) {
 		t.Error("最近录像应独立展示，不应再出现在归档筛选条件中")
 	}
+	if bytes.Contains(body, []byte("每一段旅程")) || bytes.Contains(body, []byte("每分钟文件自动衔接")) {
+		t.Error("首页不应保留旧的营销标题和说明")
+	}
+	if bytes.Contains(body, []byte("storage-defragment")) || bytes.Contains(body, []byte("离线整理")) {
+		t.Error("设置页不应继续暴露已撤下的离线整理入口")
+	}
 	if logsPosition, settingsPosition := bytes.Index(body, []byte(`data-page-link="logs"`)), bytes.Index(body, []byte(`data-page-link="settings"`)); logsPosition < 0 || settingsPosition < 0 || logsPosition > settingsPosition {
 		t.Error("侧边导航应将日志中心置于设置中心之前")
 	}
@@ -58,7 +64,8 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 		"logout-button", "player-quality", "playback-throughput", "playback-buffer", "tesla-browser-compatibility", "player-loading", "update-release-markdown",
 		"export-open", "export-progress", "password-change-open", "usb-gadget-disconnect", "usb-gadget-reconnect", "usb-gadget-warm-restart",
 		"storage-music-enabled", "storage-teslacam-percent", "storage-confirm-otg-disconnected",
-		"password-change-form", "export-layout", "export-camera", "export-quality-help", "export-overlay-mode-field", "行车记录仪模式", "画面上方信息栏", "悬浮信息栏", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "logs-summary", "中文诊断摘要", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "storage-reclaim", "snapshot-reserve-repair", "snapshot-reserve-cancel", "storage-fragmentation-check", "storage-capacity-migrate", "storage-defragment", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "recording-select-all", "recording-delete-selected", "删除录像", "车机虚拟盘可用", "录像索引", "特斯拉车机兼容模式", "teslabox-logo.svg", "login-brand", "app.css?v=20260819-2", "app.js?v=20260819-2",
+		"status-title", "SYSTEM MONITOR", "TeslaBox 运行状态", "hero-actions", "recording-refresh-interval", "录像自动刷新", `value="0">关`, `value="15">15 秒`, `value="30">30 秒`, `value="60">60 秒`,
+		"password-change-form", "export-layout", "export-camera", "export-quality-help", "export-overlay-mode-field", "行车记录仪模式", "画面上方信息栏", "悬浮信息栏", "update-check", "update-install", "update-notice", "logs-page", "logs-output", "logs-summary", "中文诊断摘要", "data-log-source=\"usb\"", "logs-radxa-adbd", "logs-radxa-usbnet", "media-page", "media-boombox-upload", "media-wrap-upload", "media-lightshow-upload", "media-music-breadcrumb", "media-music-pagination", "media-confirm-otg-disconnected", "wifi-ipv4-modal", "wifi-ipv4-form", "saved-network-toggle", "available-network-toggle", "maintenance-toggle", "storage-reclaim", "snapshot-reserve-repair", "snapshot-reserve-cancel", "storage-fragmentation-check", "storage-capacity-migrate", "logs-auto-refresh", "直接写入", "recent-recordings-section", "recent-video-grid", "recording-select-all", "recording-delete-selected", "删除录像", "车机虚拟盘可用", "录像索引", "特斯拉车机兼容模式", "teslabox-logo.svg", "login-brand", "app.css?v=20260902-2", "app.js?v=20260903-1",
 		"toast-region", "network-loading", "page-loading", "数据仍在加载，请勿重复操作。",
 		"自动（当前：高清）", "流畅（480p · 20 FPS）", "标清（720p · 24 FPS）", "高清（720p · 30 FPS）", "高保真合成（多路 H.265 · 1080 高度 · 30 FPS）", "多路原画", "player.html",
 	} {
@@ -108,6 +115,30 @@ func TestHandlerServesMarkdownReleaseNotes(t *testing.T) {
 	}
 }
 
+func TestHandlerKeepsAutomaticRecordingRefreshNonBlocking(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	script := recorder.Body.String()
+	for _, marker := range []string{
+		`readPreference(recordingRefreshPreferenceKey, "60")`,
+		`if (silent) return operation()`,
+		`if (automatic && recordingInteractionActive()) return`,
+		`if (canAutomaticallyRefreshRecordings()) await loadSessions(true, true)`,
+	} {
+		if !strings.Contains(script, marker) {
+			t.Errorf("录像自动刷新缺少非阻塞保护 %q", marker)
+		}
+	}
+	if strings.Contains(script, `silent ? "正在同步录像索引…"`) {
+		t.Fatal("后台录像刷新不应再显示阻塞式同步提示")
+	}
+}
+
 func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t)
@@ -120,7 +151,7 @@ func TestHandlerServesProtectedDiagnosticsCenter(t *testing.T) {
 
 	script := httptest.NewRecorder()
 	handler.ServeHTTP(script, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
-	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "report.summaries", "logs-summary-list", "downloadDiagnosticReport", "/api/v1/diagnostics/report", "reportPlaybackDiagnostic", "/api/v1/diagnostics/client-event", "playback_stall", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "deleteRecordingSession", "handleRecordingDeleteAction", "recordingDeleteMode", "selectableRecordingSessions", "删除此段最近录像", "/api/v1/video-sessions/delete", "session_ids", "confirm_otg_disconnected", "reclaimStorageSpace", "/api/v1/storage/reclaim", "repairSnapshotReserve", "/api/v1/storage/snapshot-reserve/repair", "cancelSnapshotReserveRepair", "/api/v1/storage/snapshot-reserve/cancel", "needs_maintenance_diagnosis", "exFAT 上次采样", "正在读取车机虚拟盘空间", "外层 XFS 可用", "media_volume_space", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery", "renderSavedNetworks(wifi.saved_networks || [], available)", "button.disabled = !state.wifi?.available", "requires_password", "旧配置没有可供后台服务读取的密码", "未检测到可用的无线网卡", "withPageLoading", "startNetworkLoading", "requestResponse", "正在读取日志与 USB Gadget 状态…", "正在读取网络、存储与系统设置…", "正在同步设备状态与录像索引…", "maybeShowOnboarding", "teslabox-onboarding-complete", "前往初始化存储"} {
+	for _, marker := range []string{"loadLogs", "/api/v1/logs?source=", "report.summaries", "logs-summary-list", "downloadDiagnosticReport", "/api/v1/diagnostics/report", "reportPlaybackDiagnostic", "/api/v1/diagnostics/client-event", "playback_stall", "host_detected", "枚举未完成", "enumeration_complete", "bus_suspend_known", "gadget_resume_pending", "等待冷启动", "可能已断开", "主机休眠或 OTG 已拔出", "USB 总线已挂起 · Gadget 仍保持就绪", "设备在线", "/api/v1/gadget/disconnect", "confirm_physical_disconnect", "/api/v1/gadget/reconnect", "confirm_physical_connection", "准备下次冷启动恢复", "/api/v1/gadget/reboot-recover", "温重启恢复", "温重启命令已提交", "setLogsNotice", "showToast", "toast-dismiss", "setUpdateNotice", "scheduleLogsRefresh", "toggleLogsAutoRefresh", "renderGadgetServiceStates", "radxa-adbd.service", "loadMediaAssets", "/api/v1/media-assets", "/api/v1/media-assets/external-delete", "deleteExternalMediaAsset", "deleteRecordingSession", "handleRecordingDeleteAction", "recordingDeleteMode", "selectableRecordingSessions", "删除此段最近录像", "/api/v1/video-sessions/delete", "session_ids", "confirm_otg_disconnected", "reclaimStorageSpace", "/api/v1/storage/reclaim", "repairSnapshotReserve", "/api/v1/storage/snapshot-reserve/repair", "cancelSnapshotReserveRepair", "/api/v1/storage/snapshot-reserve/cancel", "needs_maintenance_diagnosis", "exFAT 上次采样", "正在读取车机虚拟盘空间", "外层 XFS 可用", "media_volume_space", "renderMusicBrowser", "musicDirectoryEntries", "applyMediaAssets", "openWiFiIPv4Modal", "toggleNetworkPanel", "toggleMaintenanceAutoRecovery", "/api/v1/network/wifi/ipv4", "update_auto_recovery", "renderSavedNetworks(wifi.saved_networks || [], available)", "button.disabled = !state.wifi?.available", "requires_password", "旧配置没有可供后台服务读取的密码", "未检测到可用的无线网卡", "withPageLoading", "startNetworkLoading", "requestResponse", "正在读取日志与 USB Gadget 状态…", "正在读取网络、存储与系统设置…", "recordingRefreshPreferenceKey", "normalizeRecordingRefreshSeconds", "scheduleRecordingRefresh", "recordingInteractionActive", "loadSessions(true, true)", "loading: !silent", "maybeShowOnboarding", "teslabox-onboarding-complete", "前往初始化存储"} {
 		if !strings.Contains(script.Body.String(), marker) {
 			t.Errorf("日志中心脚本缺少标记 %q", marker)
 		}
@@ -273,6 +304,7 @@ func TestHandlerServesCustomExportWorkflow(t *testing.T) {
 		"initializeExportRange", "updateExportRangeFromSlider", "localDateTimeInput", "export-range-start", "export-range-end",
 		"已立即向浏览器发起", "允许多个文件下载", "RK3568 H.264 编码残块", "H.265（HEVC）MP4",
 		"renderExportOverlayOptions", "overlay_mode", "output_bytes", "实际 ${formatBytes(task.output_bytes)}",
+		"deleteExportHistoryTask", "/api/v1/exports/history/${encodeURIComponent(task.id)}", "删除后无法再次下载",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("自定义导出脚本缺少标记 %q", marker)
@@ -530,6 +562,22 @@ func TestHandlerKeepsSEIInSyncAcrossAutomaticSegmentTransition(t *testing.T) {
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Errorf("播放器缺少跨分钟 SEI 同步标记 %q", marker)
+		}
+	}
+}
+
+func TestHandlerShowsEmergencyBrakingEventReasonInChinese(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://teslabox.local/app.js", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	for _, marker := range []string{`triggerType === "vehicle_emergency_braking"`, `reason === "vehicle_auto_emergency_braking"`, "自动紧急制动触发"} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Errorf("自动紧急制动触发原因展示缺少标记 %q", marker)
 		}
 	}
 }

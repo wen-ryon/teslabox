@@ -466,6 +466,7 @@ func TestManagerDeleteRecordingsAndReclaimUsesOneMaintenanceWindow(t *testing.T)
 
 func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *testing.T) {
 	t.Parallel()
+	const fsckPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
 	root := t.TempDir()
 	imagePath := filepath.Join(root, "image.img")
 	if err := os.WriteFile(imagePath, []byte("image"), 0o600); err != nil {
@@ -475,6 +476,7 @@ func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *test
 	runner := &captureRunner{}
 	manager, err := New(Config{
 		ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "state", "media-staging"), MountPath: filepath.Join(root, "mount"),
+		FSCKPath: fsckPath,
 	}, runner, maintenance)
 	if err != nil {
 		t.Fatal(err)
@@ -494,7 +496,7 @@ func TestManagerReclaimSpaceUsesMaintenanceAndDetachesLoopBeforePunching(t *test
 	}
 	var checked bool
 	for _, command := range runner.commands {
-		if command.name == "fsck.exfat" {
+		if command.name == fsckPath {
 			checked = true
 		}
 	}
@@ -582,6 +584,7 @@ func TestManagerRepairSnapshotReservePersistsInterruptedState(t *testing.T) {
 
 func TestManagerCancelSnapshotReserveRepairValidatesRuntimeSafety(t *testing.T) {
 	t.Parallel()
+	const fsckPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
 	tests := []struct {
 		name      string
 		freeBytes uint64
@@ -602,10 +605,11 @@ func TestManagerCancelSnapshotReserveRepairValidatesRuntimeSafety(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
+			runner := &captureRunner{}
 			manager, err := New(Config{
 				ImagePath: imagePath, StatePath: filepath.Join(root, "state"), StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
-				Policy: storagepolicy.DefaultSnapshotReservePolicy(), OperationGuard: guard,
-			}, &captureRunner{}, &fakeMaintenance{})
+				FSCKPath: fsckPath, Policy: storagepolicy.DefaultSnapshotReservePolicy(), OperationGuard: guard,
+			}, runner, &fakeMaintenance{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -617,12 +621,20 @@ func TestManagerCancelSnapshotReserveRepairValidatesRuntimeSafety(t *testing.T) 
 			if result.State != test.wantState || result.RuntimeReady != test.wantReady {
 				t.Fatalf("CancelSnapshotReserveRepair() = %+v", result)
 			}
+			fsckCalled := false
+			for _, command := range runner.commands {
+				fsckCalled = fsckCalled || command.name == fsckPath
+			}
+			if !fsckCalled {
+				t.Fatalf("commands = %#v, missing dedicated fsck", runner.commands)
+			}
 		})
 	}
 }
 
 func TestManagerMountPartitionEnablesDiscardOnlyForKernelExFAT(t *testing.T) {
 	t.Parallel()
+	const fsckPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
 	tests := []struct {
 		name        string
 		exFAT       bool
@@ -638,6 +650,7 @@ func TestManagerMountPartitionEnablesDiscardOnlyForKernelExFAT(t *testing.T) {
 			manager, err := New(Config{
 				ImagePath: filepath.Join(root, "image.img"), StatePath: filepath.Join(root, "state"),
 				StagingPath: filepath.Join(root, "staging"), MountPath: filepath.Join(root, "mount"),
+				FSCKPath: fsckPath,
 			}, runner, &fakeMaintenance{})
 			if err != nil {
 				t.Fatal(err)
@@ -653,6 +666,13 @@ func TestManagerMountPartitionEnablesDiscardOnlyForKernelExFAT(t *testing.T) {
 			}
 			if options != tt.wantOptions {
 				t.Fatalf("mount options = %q, want %q", options, tt.wantOptions)
+			}
+			fsckCalled := false
+			for _, command := range runner.commands {
+				fsckCalled = fsckCalled || command.name == fsckPath
+			}
+			if fsckCalled != tt.exFAT {
+				t.Fatalf("fsck called = %t, want %t; commands = %#v", fsckCalled, tt.exFAT, runner.commands)
 			}
 		})
 	}

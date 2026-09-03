@@ -43,6 +43,8 @@ import (
 	"github.com/wen-ryon/teslabox/internal/writeback"
 )
 
+const teslaboxFSCKExFATPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
+
 func main() {
 	processStartedAt := time.Now()
 	reloadCh, stopReloadSignals := subscribeReloadSignals()
@@ -187,6 +189,7 @@ func main() {
 		ImagePath:    filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
 		SnapshotPath: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.SnapshotPath)),
 		MountRoot:    cfg.SnapshotMountPath,
+		FSCKPath:     teslaboxFSCKExFATPath,
 		Policy:       spacePolicy,
 	})
 	guardedGadget := gadget.NewGuardedLifecycle(gadgetManager, maintenanceGuard)
@@ -208,6 +211,7 @@ func main() {
 		ImagePath:  filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ImagePath)),
 		DataLabel:  cfg.DataLabel,
 		ImageLabel: "TESLACAM",
+		FSCKPath:   teslaboxFSCKExFATPath,
 		Policy:     spacePolicy,
 	}, runner, registry, storageadmin.NewOSDeviceLister(driveInspector), driveinit.New(driveInspector, runner), imageinit.New(imageinit.NewOSInspector(runner), runner), manager, storagebench.New(storagebench.DefaultConfig()))
 	authManager, err := webauth.New(webauth.Config{
@@ -258,6 +262,7 @@ func main() {
 		StatePath:      filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath)),
 		StagingPath:    filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.StatePath), "media-staging"),
 		MountPath:      "/run/teslabox/media-assets",
+		FSCKPath:       teslaboxFSCKExFATPath,
 		Policy:         spacePolicy,
 		OperationGuard: maintenanceGuard,
 	}, runner, manager, manager)

@@ -78,6 +78,7 @@ type Config struct {
 	ImagePath    string
 	SnapshotPath string
 	MountRoot    string
+	FSCKPath     string
 	Policy       storagepolicy.SnapshotReservePolicy
 }
 
@@ -200,8 +201,18 @@ func (m *Manager) Recover(ctx context.Context) error {
 	return nil
 }
 
-// Create 使用 XFS reflink 克隆原镜像，只修复副本并以只读 loop 方式挂载。
+// Create 使用 XFS reflink 克隆原镜像，只在挂载失败时修复副本并以只读 loop 方式挂载。
 func (m *Manager) Create(ctx context.Context) (View, error) {
+	return m.create(ctx, false)
+}
+
+// CreateRepaired 使用新的 XFS reflink 副本并在首次挂载前执行一次受限修复。
+// 该入口只供已确认扫描阶段文件系统 EIO 的单次恢复使用，绝不修改仍提供给车机的原始镜像。
+func (m *Manager) CreateRepaired(ctx context.Context) (View, error) {
+	return m.create(ctx, true)
+}
+
+func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (View, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -259,12 +270,28 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 	if err := os.Rename(temporaryImage, finalImage); err != nil {
 		return View{}, fmt.Errorf("发布 TeslaCam 快照: %w", err)
 	}
-	loopDevice, err = m.attachLoop(ctx, finalImage, true)
+	loopDevice, err = m.attachLoop(ctx, finalImage, !repairBeforeMount)
 	if err != nil {
 		return View{}, err
 	}
-	repairApplied := false
+	repairApplied := repairBeforeMount
+	if repairBeforeMount {
+		if err := m.repairLoop(ctx, loopDevice); err != nil {
+			return View{}, fmt.Errorf("修复扫描异常的 TeslaCam 快照副本: %w", err)
+		}
+		if err := m.detachLoop(ctx, loopDevice); err != nil {
+			return View{}, err
+		}
+		loopDevice = ""
+		loopDevice, err = m.attachLoop(ctx, finalImage, true)
+		if err != nil {
+			return View{}, err
+		}
+	}
 	firstMountErr := m.mountReadOnly(ctx, loopDevice+"p1", mountPath)
+	if firstMountErr != nil && repairApplied {
+		return View{}, fmt.Errorf("修复后只读挂载 TeslaCam 快照: %w", firstMountErr)
+	}
 	if firstMountErr != nil {
 		// 正常 reflink 副本通常可直接只读挂载；只有捕获到写入中间态时才运行全盘 fsck，
 		// 避免每 30 秒扫描都与车机的音乐读取和录像写入争抢底层闪存。
@@ -276,11 +303,8 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 		if err != nil {
 			return View{}, errors.Join(firstMountErr, err)
 		}
-		if _, err := m.runner.Run(ctx, "fsck.exfat", "-p", loopDevice+"p1"); err != nil {
-			commandError, ok := errors.AsType[*system.CommandError](err)
-			if !ok || commandError.Code != 1 {
-				return View{}, errors.Join(firstMountErr, fmt.Errorf("检查并修复 TeslaCam 快照: %w", err))
-			}
+		if err := m.repairLoop(ctx, loopDevice); err != nil {
+			return View{}, errors.Join(firstMountErr, fmt.Errorf("检查并修复 TeslaCam 快照: %w", err))
 		}
 		repairApplied = true
 		if err := m.detachLoop(ctx, loopDevice); err != nil {
@@ -322,6 +346,26 @@ func (m *Manager) Create(ctx context.Context) (View, error) {
 			FreePercent: freePercent,
 		},
 	}, nil
+}
+
+func (m *Manager) repairLoop(ctx context.Context, loopDevice string) error {
+	if !loopDevicePattern.MatchString(loopDevice) {
+		return errors.New("拒绝修复无效的 loop 设备")
+	}
+	// Debian 11 自带的 exfatprogs 1.1.0 会在写入中间态留下的孤立 0xc1
+	// 文件名项处停止；正式环境固定使用项目内置的 1.2.0。这里操作的始终是
+	// 刚创建的 reflink 副本，修复后仍只读挂载并由扫描结果决定是否发布。
+	fsckPath := strings.TrimSpace(m.config.FSCKPath)
+	if fsckPath == "" {
+		fsckPath = "fsck.exfat"
+	}
+	if _, err := m.runner.Run(ctx, fsckPath, "-p", loopDevice+"p1"); err != nil {
+		commandError, ok := errors.AsType[*system.CommandError](err)
+		if !ok || commandError.Code != 1 {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) ensureCOWExtentHint(ctx context.Context) error {

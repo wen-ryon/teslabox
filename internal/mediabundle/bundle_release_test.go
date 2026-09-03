@@ -31,6 +31,7 @@ func TestEmbeddedReleaseArchive(t *testing.T) {
 	for _, relative := range []string{
 		"bin/ffmpeg",
 		"bin/ffprobe",
+		"bin/teslabox-fsck.exfat",
 		"share/fonts/NotoSansCJK-Regular.ttc",
 	} {
 		info, err := os.Stat(filepath.Join(directory, filepath.FromSlash(relative)))

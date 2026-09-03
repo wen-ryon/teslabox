@@ -122,7 +122,7 @@ func classify(report *Report) {
 		report.Reason = fmt.Sprintf("镜像已有 %d 个物理 extent，其中 %.1f%% 不超过 64 KiB；持续写入可能出现高 IOPS 和长暂停", report.ExtentCount, tinyPercent)
 	case report.ExtentCount > 1024 || (report.ExtentCount > 128 && tinyPercent >= 10):
 		report.Severity = SeverityWarning
-		report.Reason = fmt.Sprintf("镜像物理 extent 偏多（%d 个，微小 extent %.1f%%），建议安排离线整理", report.ExtentCount, tinyPercent)
+		report.Reason = fmt.Sprintf("镜像物理 extent 偏多（%d 个，微小 extent %.1f%%），建议持续观察写入停顿和微小 extent 变化", report.ExtentCount, tinyPercent)
 	default:
 		report.Severity = SeverityHealthy
 		report.Reason = fmt.Sprintf("镜像 extent 分布正常（%d 个，微小 extent %.1f%%）", report.ExtentCount, tinyPercent)

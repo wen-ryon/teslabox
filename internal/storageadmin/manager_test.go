@@ -131,12 +131,6 @@ func (r *simulatedInitializationRunner) Run(_ context.Context, name string, _ ..
 	}
 }
 
-type defragmentRunner struct {
-	defragmented bool
-	commands     []string
-	statOutput   string
-}
-
 type capacityRunner struct {
 	size         int64
 	partitionEnd int64
@@ -209,54 +203,6 @@ func TestManagerShrinksExistingCapacityReserveAfterPreallocation(t *testing.T) {
 	}
 }
 
-type sparseHealthyRunner struct {
-	allocated bool
-	commands  []string
-}
-
-func (r *sparseHealthyRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
-	r.commands = append(r.commands, name)
-	switch name {
-	case "/usr/sbin/xfs_bmap":
-		if r.allocated {
-			return []byte("0: [0..4095]: 1000..5095 0 (1000..5095) 4096 000000\n"), nil
-		}
-		return []byte("0: [0..2047]: 1000..3047 0 (1000..3047) 2048 000000\n1: [2048..4095]: hole 2048\n"), nil
-	case "parted":
-		return []byte("BYT;\nimage:2097152B:file:512:512:msdos:;\n1:512B:2097152B:2096641B:::;\n"), nil
-	case "stat":
-		return []byte("4096:30000000:6000000\n"), nil
-	case "fallocate":
-		r.allocated = true
-	case "losetup":
-		return []byte("/dev/loop9\n"), nil
-	}
-	return nil, nil
-}
-
-func (r *defragmentRunner) Run(_ context.Context, name string, _ ...string) ([]byte, error) {
-	r.commands = append(r.commands, name)
-	switch name {
-	case "/usr/sbin/xfs_bmap":
-		if r.defragmented {
-			return []byte("0: [0..2047]: 1000..3047 0 (1000..3047) 2048 000000\n"), nil
-		}
-		return []byte(strings.Repeat("0: [0..7]: 1..8 0 (1..8) 8 000000\n", 129)), nil
-	case "stat":
-		if r.statOutput != "" {
-			return []byte(r.statOutput), nil
-		}
-		return []byte("4096:30000000:6000000\n"), nil
-	case "parted":
-		return []byte("BYT;\nimage:4096B:file:512:512:msdos:;\n1:512B:4096B:3585B:::;\n"), nil
-	case "/usr/sbin/xfs_fsr":
-		r.defragmented = true
-	case "losetup":
-		return []byte("/dev/loop7\n"), nil
-	}
-	return nil, nil
-}
-
 func TestManagerInitializeRegistersOnlyAfterCompleteLayout(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -300,115 +246,6 @@ func TestManagerInitializeRegistersOnlyAfterCompleteLayout(t *testing.T) {
 	}
 	if status.Benchmark == nil || status.Benchmark.Profile != storagebench.ProfileStable || status.Benchmark.MinimumBurstMBps != 42 {
 		t.Fatalf("benchmark status = %#v", status.Benchmark)
-	}
-}
-
-func TestManagerDefragmentVerifiesExtentImprovementAndFileSystem(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	imagePath := filepath.Join(root, "teslacam.img")
-	if err := os.WriteFile(imagePath, make([]byte, 4096), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	runner := &defragmentRunner{}
-	controller := &fakeController{state: service.Snapshot{Backing: backing.Status{Ready: true}}}
-	manager := New(Config{DataRoot: root, ImagePath: imagePath}, runner, storage.NewFileRegistry(filepath.Join(root, "registry.json")), fakeLister{}, &fakeDriveInitializer{}, &fakeImageInitializer{}, controller)
-	result, err := manager.Defragment(t.Context(), DefragmentRequest{ConfirmOTGDisconnected: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Changed || !result.FileSystemChecked || !result.RequiresColdBoot || result.Before.ExtentCount != 129 || result.After.ExtentCount != 1 {
-		t.Fatalf("result = %#v", result)
-	}
-	for _, required := range []string{"fallocate", "/usr/sbin/xfs_io", "/usr/sbin/xfs_fsr", "parted", "fsck.exfat"} {
-		if !slices.Contains(runner.commands, required) {
-			t.Fatalf("commands = %#v, missing %s", runner.commands, required)
-		}
-	}
-}
-
-func TestManagerDefragmentRequiresPhysicalDisconnect(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	imagePath := filepath.Join(root, "teslacam.img")
-	if err := os.WriteFile(imagePath, make([]byte, 4096), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	controller := &fakeController{state: service.Snapshot{Backing: backing.Status{Ready: true}}}
-	manager := New(Config{DataRoot: root, ImagePath: imagePath}, &defragmentRunner{}, storage.NewFileRegistry(filepath.Join(root, "registry.json")), fakeLister{}, &fakeDriveInitializer{}, &fakeImageInitializer{}, controller)
-	_, err := manager.Defragment(t.Context(), DefragmentRequest{})
-	var inputError *InputError
-	if !errors.As(err, &inputError) || !strings.Contains(inputError.Error(), "必须先物理拔掉") {
-		t.Fatalf("Defragment() error = %v", err)
-	}
-	if controller.maintenanceCalls != 0 {
-		t.Fatalf("maintenance calls = %d", controller.maintenanceCalls)
-	}
-}
-
-func TestManagerDefragmentRejectsInsufficientCopySpaceBeforeMaintenance(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	imagePath := filepath.Join(root, "teslacam.img")
-	if err := os.WriteFile(imagePath, make([]byte, 4096), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	runner := &defragmentRunner{statOutput: "4096:30000000:2000000\n"}
-	controller := &fakeController{state: service.Snapshot{Backing: backing.Status{Ready: true}}}
-	manager := New(Config{DataRoot: root, ImagePath: imagePath}, runner, storage.NewFileRegistry(filepath.Join(root, "registry.json")), fakeLister{}, &fakeDriveInitializer{}, &fakeImageInitializer{}, controller)
-
-	_, err := manager.Defragment(t.Context(), DefragmentRequest{ConfirmOTGDisconnected: true})
-	var inputError *InputError
-	if !errors.As(err, &inputError) || !strings.Contains(inputError.Error(), "无需仅因此重新初始化存储设备") {
-		t.Fatalf("Defragment() error = %v", err)
-	}
-	if controller.maintenanceCalls != 0 || slices.Contains(runner.commands, "/usr/sbin/xfs_fsr") || !slices.Contains(runner.commands, "/usr/sbin/xfs_io") {
-		t.Fatalf("maintenance calls = %d, commands = %#v", controller.maintenanceCalls, runner.commands)
-	}
-}
-
-func TestManagerDefragmentPreallocatesHealthySparseImageWithoutXFSFsr(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	imagePath := filepath.Join(root, "teslacam.img")
-	file, err := os.Create(imagePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Truncate(2 * 1024 * 1024); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	_ = file.Close()
-	runner := &sparseHealthyRunner{}
-	controller := &fakeController{state: service.Snapshot{Backing: backing.Status{Ready: true}}}
-	manager := New(Config{DataRoot: root, ImagePath: imagePath}, runner, storage.NewFileRegistry(filepath.Join(root, "registry.json")), fakeLister{}, &fakeDriveInitializer{}, &fakeImageInitializer{}, controller)
-	result, err := manager.Defragment(t.Context(), DefragmentRequest{ConfirmOTGDisconnected: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Changed || result.After.AllocatedBytes <= result.Before.AllocatedBytes || slices.Contains(runner.commands, "/usr/sbin/xfs_fsr") {
-		t.Fatalf("result = %#v, commands = %#v", result, runner.commands)
-	}
-}
-
-func TestManagerDefragmentLeavesHealthyAllocatedImageOnline(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	imagePath := filepath.Join(root, "teslacam.img")
-	if err := os.WriteFile(imagePath, make([]byte, 4096), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	runner := &defragmentRunner{defragmented: true}
-	controller := &fakeController{state: service.Snapshot{Backing: backing.Status{Ready: true}}}
-	manager := New(Config{DataRoot: root, ImagePath: imagePath}, runner, storage.NewFileRegistry(filepath.Join(root, "registry.json")), fakeLister{}, &fakeDriveInitializer{}, &fakeImageInitializer{}, controller)
-
-	result, err := manager.Defragment(t.Context(), DefragmentRequest{ConfirmOTGDisconnected: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Changed || result.FileSystemChecked || result.RequiresColdBoot || controller.maintenanceCalls != 0 {
-		t.Fatalf("result = %#v, maintenance calls = %d", result, controller.maintenanceCalls)
 	}
 }
 

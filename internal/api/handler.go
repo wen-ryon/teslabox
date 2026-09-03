@@ -59,7 +59,6 @@ type DeviceAdmin interface {
 type StorageAdmin interface {
 	Status(context.Context) (storageadmin.Status, error)
 	Fragmentation(context.Context) (fragmentation.Report, error)
-	Defragment(context.Context, storageadmin.DefragmentRequest) (storageadmin.DefragmentResult, error)
 	MigrateAdvertisedCapacity(context.Context, storageadmin.CapacityMigrationRequest) (storageadmin.CapacityMigrationResult, error)
 	Initialize(context.Context, storageadmin.InitializeRequest) (storageadmin.Candidate, error)
 	Cancel(context.Context, storageadmin.CancelRequest) error
@@ -122,6 +121,7 @@ type ExportAdmin interface {
 	UpdateSettings(media.ExportSettings) (media.ExportSettings, error)
 	History() []media.ExportTask
 	Consume(string) error
+	Delete(string) error
 }
 
 // UpdateAdmin 定义设置中心所需的签名更新能力。
@@ -295,7 +295,7 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		registerCompositeRoutes(mux, controller, settings.mediaCompositor, logger)
 	}
 	if settings.exportAdmin != nil {
-		registerExportRoutes(mux, controller, settings.exportAdmin, logger)
+		registerExportRoutes(mux, controller, settings.exportAdmin, settings.mediaInspector, logger)
 	}
 	if settings.updateAdmin != nil {
 		registerUpdateRoutes(mux, settings.updateAdmin, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
@@ -588,7 +588,7 @@ func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAd
 	})
 }
 
-func registerExportRoutes(mux *http.ServeMux, controller Controller, admin ExportAdmin, logger *slog.Logger) {
+func registerExportRoutes(mux *http.ServeMux, controller Controller, admin ExportAdmin, inspector MediaInspector, logger *slog.Logger) {
 	mux.HandleFunc("GET /api/v1/export-settings", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.Settings())
 	})
@@ -610,11 +610,22 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 	mux.HandleFunc("GET /api/v1/exports/history", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.History())
 	})
+	mux.HandleFunc("DELETE /api/v1/exports/history/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := admin.Delete(id); err != nil {
+			writeExportError(w, logger, "删除历史导出失败", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id})
+	})
 	mux.HandleFunc("POST /api/v1/exports", func(w http.ResponseWriter, r *http.Request) {
 		var request media.ExportRequest
 		if !decodeJSON(w, r, &request) {
 			return
 		}
+		// 导出任务完成后会释放快照租约；再次导出前必须像播放接口一样恢复媒体活动，
+		// 否则空闲清理刚卸载快照时会直接返回“媒体快照暂不可用”。
+		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		if state.MediaSnapshot == nil {
 			release()
@@ -643,6 +654,7 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			writeExportError(w, logger, "准备导出录像失败", err)
 			return
 		}
+		populateOriginalExportCanvas(r.Context(), inspector, request, &source, logger)
 		if !exportSpaceAvailable(state, estimated) {
 			release()
 			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
@@ -711,6 +723,31 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 		}
 		http.ServeContent(w, r, filename, info.ModTime(), file)
 	})
+}
+
+func populateOriginalExportCanvas(ctx context.Context, inspector MediaInspector, request media.ExportRequest, source *media.ExportSource, logger *slog.Logger) {
+	if inspector == nil || source == nil || request.Mode == media.ExportModeSource || request.Quality != "original" || request.Layout != "single" || len(request.Cameras) == 0 {
+		return
+	}
+	for _, video := range source.Videos {
+		if video.Camera != request.Cameras[0] {
+			continue
+		}
+		metadata, err := inspector.Probe(ctx, video.Path)
+		if err != nil {
+			logger.Warn("读取原画导出尺寸失败，使用 Tesla 原画默认尺寸", "error", err)
+			return
+		}
+		for _, stream := range metadata.Streams {
+			if stream.Width > 0 && stream.Height > 0 {
+				source.CanvasWidth = stream.Width
+				source.CanvasHeight = stream.Height
+				return
+			}
+		}
+		logger.Warn("原画录像没有有效的视频尺寸，使用 Tesla 原画默认尺寸")
+		return
+	}
 }
 
 func exportSpaceAvailable(state service.Snapshot, estimated uint64) bool {
@@ -1583,31 +1620,6 @@ func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *
 			return
 		}
 		writeJSON(w, http.StatusOK, report)
-	})
-	mux.HandleFunc("POST /api/v1/storage/defragment", func(w http.ResponseWriter, r *http.Request) {
-		var input storageadmin.DefragmentRequest
-		if !decodeJSON(w, r, &input) {
-			return
-		}
-		operationCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Hour)
-		defer cancel()
-		result, err := admin.Defragment(operationCtx, input)
-		if err != nil {
-			logger.Warn("整理 TeslaCam 镜像失败", "error", err)
-			if errors.Is(err, storageadmin.ErrUnsafeState) {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": "当前仍有录像播放、导出或 USB 存储占用，无法安全整理"})
-				return
-			}
-			var inputError *storageadmin.InputError
-			if errors.As(err, &inputError) {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": inputError.Error()})
-				return
-			}
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "镜像整理失败，Gadget 已保持安全断开，请查看日志"})
-			return
-		}
-		logger.Info("TeslaCam 镜像整理完成", "before_extents", result.Before.ExtentCount, "after_extents", result.After.ExtentCount, "changed", result.Changed)
-		writeJSON(w, http.StatusOK, result)
 	})
 	mux.HandleFunc("POST /api/v1/storage/migrate-capacity", func(w http.ResponseWriter, r *http.Request) {
 		var input storageadmin.CapacityMigrationRequest

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/backing"
@@ -30,6 +31,7 @@ const (
 	dataDriveConfirmationWait    = 500 * time.Millisecond
 	fallbackSnapshotScanInterval = 30 * time.Second
 	minimumSnapshotScanInterval  = time.Minute
+	repairedSnapshotScanInterval = 5 * time.Minute
 	fallbackSnapshotActiveWindow = 2 * time.Minute
 )
 
@@ -76,6 +78,7 @@ type GadgetLifecycle interface {
 type SnapshotLifecycle interface {
 	Recover(ctx context.Context) error
 	Create(ctx context.Context) (mediasnapshot.View, error)
+	CreateRepaired(ctx context.Context) (mediasnapshot.View, error)
 	Remove(ctx context.Context, view mediasnapshot.View) error
 	Space() (mediasnapshot.SpaceStatus, error)
 }
@@ -455,7 +458,7 @@ func (m *Manager) ActivateMedia(ctx context.Context) error {
 	state := m.Snapshot()
 	snapshotFresh := state.MediaSnapshot != nil &&
 		!m.lastSnapshotAt.IsZero() &&
-		now.Sub(m.lastSnapshotAt) < m.snapshotScanInterval()
+		now.Sub(m.lastSnapshotAt) < m.snapshotRefreshInterval(state)
 	if wasActive || snapshotFresh {
 		return nil
 	}
@@ -968,6 +971,31 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 		return m.storeSnapshotFailure(previous, fmt.Errorf("创建 TeslaCam 快照: %w", err))
 	}
 	videos, err := m.scanner.Scan(view.MountPath)
+	if err != nil && isRepairableSnapshotScanError(err) {
+		firstScanErr := err
+		if cleanupErr := m.snapshotter.Remove(ctx, view); cleanupErr != nil {
+			return m.storeSnapshotFailure(previous, errors.Join(
+				fmt.Errorf("扫描 TeslaCam 快照: %w", firstScanErr),
+				fmt.Errorf("清理扫描异常快照: %w", cleanupErr),
+			))
+		}
+		view, err = m.snapshotter.CreateRepaired(ctx)
+		if err != nil {
+			return m.storeSnapshotFailure(previous, errors.Join(
+				fmt.Errorf("扫描 TeslaCam 快照: %w", firstScanErr),
+				fmt.Errorf("创建修复后的 TeslaCam 快照副本: %w", err),
+			))
+		}
+		videos, err = m.scanner.Scan(view.MountPath)
+		if err == nil {
+			m.logger.Warn(
+				"TeslaCam 快照扫描 EIO 后已修复副本并重试成功",
+				"snapshot_id", view.ID,
+				"first_error", firstScanErr,
+				"video_count", len(videos),
+			)
+		}
+	}
 	if err != nil {
 		cleanupErr := m.snapshotter.Remove(ctx, view)
 		cause := fmt.Errorf("扫描 TeslaCam 快照: %w", err)
@@ -998,7 +1026,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	elapsed := time.Since(startedAt)
 	if view.RepairApplied {
 		m.logger.Warn(
-			"TeslaCam 快照只读挂载失败后已修复副本",
+			"TeslaCam 快照副本已执行受限文件系统修复",
 			"snapshot_id", view.ID,
 			"duration_ms", elapsed.Milliseconds(),
 			"video_count", len(videos),
@@ -1017,6 +1045,10 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	}
 	m.cleanupRetired(ctx)
 	return nil
+}
+
+func isRepairableSnapshotScanError(err error) bool {
+	return errors.Is(err, syscall.EIO)
 }
 
 func (m *Manager) storeSnapshotFailure(previous Snapshot, cause error) error {
@@ -1079,7 +1111,7 @@ func (m *Manager) shouldRunAutomaticSnapshotLocked(now time.Time) bool {
 		// 启动后没有浏览请求时不扫描 96GB/更大镜像，避免无意义的磁盘唤醒和车端 I/O 抖动。
 		return now.Before(m.mediaActiveUntil)
 	}
-	return now.Before(m.mediaActiveUntil) && now.Sub(m.lastSnapshotAt) >= m.snapshotScanInterval()
+	return now.Before(m.mediaActiveUntil) && now.Sub(m.lastSnapshotAt) >= m.snapshotRefreshInterval(state)
 }
 
 // releaseIdleMediaSnapshotLocked 在媒体页面停止活动后解除 reflink 共享，避免车机覆盖写持续产生 COW extent。
@@ -1129,6 +1161,15 @@ func (m *Manager) snapshotScanInterval() time.Duration {
 	}
 	// TeslaCam 文件按分钟滚动，小于一分钟只会重复克隆同一批数据并增加 COW 写放大。
 	return max(interval, minimumSnapshotScanInterval)
+}
+
+func (m *Manager) snapshotRefreshInterval(state Snapshot) time.Duration {
+	interval := m.snapshotScanInterval()
+	// 修复副本的完整 fsck 和重新扫描明显更重；后台保留更长冷却，手动扫描仍可立即执行。
+	if state.MediaSnapshot != nil && state.MediaSnapshot.RepairApplied {
+		return max(interval, repairedSnapshotScanInterval)
+	}
+	return interval
 }
 
 func (m *Manager) snapshotActiveWindow() time.Duration {

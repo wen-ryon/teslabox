@@ -133,6 +133,8 @@ type SourceExportFile struct {
 type ExportSource struct {
 	SessionStart time.Time
 	SessionEnd   time.Time
+	CanvasWidth  int
+	CanvasHeight int
 	Videos       []ExportVideo
 	SourceFiles  []SourceExportFile
 	OverlayCues  []ExportOverlayCue
@@ -640,15 +642,24 @@ func (e *Exporter) Open(id string) (*os.File, ExportTask, error) {
 
 // Consume 删除已被浏览器完整接收的导出，并从历史中移除。
 func (e *Exporter) Consume(id string) error {
+	return e.deleteCompleted(id, "删除已下载导出")
+}
+
+// Delete 删除用户明确放弃的已完成导出，并从历史中移除。
+func (e *Exporter) Delete(id string) error {
+	return e.deleteCompleted(id, "删除历史导出")
+}
+
+func (e *Exporter) deleteCompleted(id, operation string) error {
 	task, err := e.Task(id)
 	if err != nil {
 		return err
 	}
 	if task.State != ExportCompleted || !task.DownloadReady {
-		return errors.New("导出文件尚未就绪")
+		return &InputError{Message: "只能删除已经完成的导出文件"}
 	}
 	if err := os.Remove(e.outputPathForTask(task)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("删除已下载导出: %w", err)
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 	e.mu.Lock()
 	current, found := e.tasks[id]
@@ -867,7 +878,40 @@ func ExportDownloadFilename(task ExportTask) string {
 	if startAt.IsZero() {
 		startAt = task.CreatedAt
 	}
-	return "export-" + exportViewLabel(task.Request) + "-" + startAt.Format("20060102-150405") + ".mp4"
+	return strings.Join([]string{
+		exportViewLabel(task.Request),
+		exportQualityLabel(task.Request.Quality),
+		startAt.Format("20060102-150405"),
+		exportOverlayLabel(task.Request),
+	}, "-") + ".mp4"
+}
+
+func exportQualityLabel(quality string) string {
+	switch quality {
+	case "smooth":
+		return "流畅"
+	case "standard":
+		return "标清"
+	case "high":
+		return "高保真"
+	case "original":
+		return "原画"
+	default:
+		return "默认画质"
+	}
+}
+
+func exportOverlayLabel(request ExportRequest) string {
+	switch {
+	case request.BurnTimestamp && request.BurnSEI:
+		return "仪表+时间"
+	case request.BurnSEI:
+		return "仪表"
+	case request.BurnTimestamp:
+		return "时间"
+	default:
+		return "无叠加"
+	}
 }
 
 func exportViewLabel(request ExportRequest) string {
@@ -1517,14 +1561,14 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 		"smooth":   {width: 854, height: 480, fps: 20, bitrate: 1500},
 		"standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
 		"high":     {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)},
-		"original": {width: 1280, height: 960, fps: 36},
+		"original": {width: 1448, height: 938, fps: 36},
 	}[request.Quality]
 	if !ok || !isHostOrLinuxAbsolutePath(output) {
 		return nil, &InputError{Message: "导出参数无效"}
 	}
 	exportStart := source.SessionStart.Add(time.Duration(request.StartSeconds * float64(time.Second)))
 	exportEnd := exportStart.Add(time.Duration(request.DurationSeconds * float64(time.Second)))
-	tiles, err := exportTiles(request, profile)
+	tiles, err := exportTiles(request, profile, source)
 	if err != nil {
 		return nil, err
 	}
@@ -1606,9 +1650,9 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 	if len(subtitlePaths) > 0 && subtitlePaths[0] != "" {
 		if effectiveExportOverlayMode(request) == ExportOverlayTopBar {
 			_, videoHeight := exportTileCanvasSize(tiles)
-			barHeight := exportInformationBarHeight(videoHeight)
+			barHeight := exportInformationBarHeight(request, videoHeight)
 			if !request.BurnSEI {
-				barHeight = exportTimestampBarHeight(videoHeight)
+				barHeight = exportTimestampBarHeight(request, videoHeight)
 			}
 			filters = append(filters, fmt.Sprintf("[%s]pad=w=iw:h=ih+%d:x=0:y=%d:color=black[canvas]", outputLabel, barHeight, barHeight))
 			outputLabel = "canvas"
@@ -1639,9 +1683,11 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 	return args, nil
 }
 
-func exportInformationBarHeight(videoHeight int) int {
+func exportInformationBarHeight(request ExportRequest, videoHeight int) int {
 	preferred := 64
 	switch {
+	case isFrontOriginalSingleExport(request):
+		preferred = 112
 	case videoHeight >= 1080:
 		preferred = 96
 	case videoHeight >= 720:
@@ -1650,9 +1696,11 @@ func exportInformationBarHeight(videoHeight int) int {
 	return alignedExportBarHeight(videoHeight, preferred)
 }
 
-func exportTimestampBarHeight(videoHeight int) int {
+func exportTimestampBarHeight(request ExportRequest, videoHeight int) int {
 	preferred := 48
-	if videoHeight >= 960 {
+	if isFrontOriginalSingleExport(request) {
+		preferred = 80
+	} else if videoHeight >= 960 {
 		preferred = 64
 	}
 	return alignedExportBarHeight(videoHeight, preferred)
@@ -1663,12 +1711,12 @@ func alignedExportBarHeight(videoHeight, preferred int) int {
 	return preferred + (16-(videoHeight+preferred)%16)%16
 }
 
-func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOverlayCue) (bool, error) {
+func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOverlayCue, sources ...ExportSource) (bool, error) {
 	if !request.BurnTimestamp && !request.BurnSEI {
 		return false, nil
 	}
 	mode := effectiveExportOverlayMode(request)
-	canvasWidth, canvasHeight, barHeight, separateBar, err := exportOverlayCanvas(request)
+	canvasWidth, canvasHeight, barHeight, separateBar, err := exportOverlayCanvas(request, sources...)
 	if err != nil {
 		return false, err
 	}
@@ -1690,6 +1738,10 @@ func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOver
 			fontScale = 0.66
 		}
 	}
+	if isFrontOriginalSingleExport(request) {
+		// 前视原画画布大于其他单路源，单独放大叠加层，避免用户观看成片时仪表和时间显得过小。
+		fontScale = 1.15
+	}
 	dashboardSize := int(math.Round(29 * fontScale))
 	timeSize := int(math.Round(24 * fontScale))
 	labelSize := int(math.Round(14 * fontScale))
@@ -1702,11 +1754,11 @@ func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOver
 	if mode == ExportOverlayFloating {
 		barHeight = max(scaleASS(88, fontScale), 64)
 		panelTop = max(scaleASS(6, fontScale), 4)
-		preferredWidth := 560
+		panelWidth = scaleASS(600, fontScale)
 		if !request.BurnSEI {
-			preferredWidth = 460
+			panelWidth = scaleASS(460, fontScale)
 		}
-		panelWidth = min(canvasWidth-scaleASS(32, fontScale), scaleASS(preferredWidth, fontScale))
+		panelWidth = min(canvasWidth-scaleASS(32, fontScale), panelWidth)
 		panelLeft = (canvasWidth - panelWidth) / 2
 	}
 	if mode == ExportOverlayTopBar || mode == ExportOverlayFloating {
@@ -1749,7 +1801,7 @@ func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOver
 	content := fmt.Sprintf("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nScaledBorderAndShadow: yes\nWrapStyle: 2\n\n", canvasWidth, canvasHeight) +
 		"[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n" +
 		"Style: Canvas,Noto Sans CJK SC,10,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n" +
-		fmt.Sprintf("Style: DashcamTime,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,7,%d,0,%d,1\n", scaleASS(46, fontScale), scaleASS(14, fontScale), scaleASS(10, fontScale)) +
+		fmt.Sprintf("Style: DashcamTime,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,0,0,7,%d,0,%d,1\n", scaleASS(46, fontScale), scaleASS(14, fontScale), scaleASS(10, fontScale)) +
 		fmt.Sprintf("Style: TimeLabel,Noto Sans CJK SC,%d,&H007A7171,&H007A7171,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n", labelSize) +
 		fmt.Sprintf("Style: TimeValue,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n", timeSize) +
 		fmt.Sprintf("Style: Dashboard,Noto Sans CJK SC,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,1,0,1,0,0,5,0,0,0,1\n\n", dashboardSize) +
@@ -1760,15 +1812,15 @@ func writeOverlaySubtitles(path string, request ExportRequest, cues []ExportOver
 	return true, nil
 }
 
-func exportOverlayCanvas(request ExportRequest) (width, height, barHeight int, separateBar bool, err error) {
+func exportOverlayCanvas(request ExportRequest, sources ...ExportSource) (width, height, barHeight int, separateBar bool, err error) {
 	profile, ok := map[string]compositeProfile{
 		"smooth": {width: 854, height: 480, fps: 20, bitrate: 1500}, "standard": {width: 1280, height: 720, fps: 24, bitrate: 3000},
-		"high": {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)}, "original": {width: 1280, height: 960, fps: 36},
+		"high": {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)}, "original": {width: 1448, height: 938, fps: 36},
 	}[request.Quality]
 	if !ok {
 		return 0, 0, 0, false, &InputError{Message: "导出画质无效"}
 	}
-	tiles, err := exportTiles(request, profile)
+	tiles, err := exportTiles(request, profile, sources...)
 	if err != nil {
 		return 0, 0, 0, false, err
 	}
@@ -1776,9 +1828,9 @@ func exportOverlayCanvas(request ExportRequest) (width, height, barHeight int, s
 	separateBar = effectiveExportOverlayMode(request) == ExportOverlayTopBar
 	if separateBar {
 		if request.BurnSEI {
-			barHeight = exportInformationBarHeight(height)
+			barHeight = exportInformationBarHeight(request, height)
 		} else {
-			barHeight = exportTimestampBarHeight(height)
+			barHeight = exportTimestampBarHeight(request, height)
 		}
 		height += barHeight
 	}
@@ -1801,6 +1853,11 @@ func effectiveExportOverlayMode(request ExportRequest) ExportOverlayMode {
 		return ExportOverlayDashcam
 	}
 	return ExportOverlayTopBar
+}
+
+func isFrontOriginalSingleExport(request ExportRequest) bool {
+	return request.Layout == "single" && request.Quality == "original" &&
+		len(request.Cameras) == 1 && request.Cameras[0] == "front"
 }
 
 func scaleASS(value int, scale float64) int {
@@ -1833,14 +1890,14 @@ func exportTelemetryASS(telemetry *ExportTelemetry) string {
 	if assisted {
 		steeringColor = blue
 	}
-	leftColor, rightColor := gray, gray
+	leftColor, rightColor := white, white
 	if telemetry.BlinkerVisible && telemetry.LeftBlinker {
 		leftColor = green
 	}
 	if telemetry.BlinkerVisible && telemetry.RightBlinker {
 		rightColor = green
 	}
-	brakeColor := gray
+	brakeColor := white
 	if telemetry.BrakeApplied {
 		brakeColor = red
 	}
@@ -1871,8 +1928,8 @@ func appendExportTelemetryDashboard(lines []string, start, end string, centerX, 
 	)
 	gear, autopilot := "—", "手动"
 	speed, steering, accelerator := 0, 0.0, 0
-	steeringColor, brakeColor, acceleratorColor := white, gray, gray
-	leftColor, rightColor := gray, gray
+	steeringColor, brakeColor, acceleratorColor := white, white, gray
+	leftColor, rightColor := white, white
 	if telemetry != nil {
 		if value := strings.TrimSpace(telemetry.Gear); value != "" {
 			gear = value
@@ -1913,18 +1970,18 @@ func appendExportTelemetryDashboard(lines []string, start, end string, centerX, 
 	} else if steering < 0 {
 		steeringSign = "−"
 	}
-	assistanceColor := gray
-	if autopilot != "手动" {
-		assistanceColor = white
-	}
+	assistanceColor := white
 
-	gearX := centerX - scaleASS(238, scale)
-	steeringX := centerX - scaleASS(158, scale)
-	leftX := centerX - scaleASS(72, scale)
+	// 七个状态位共用按字号缩放的 80 像素步距；每种导出规格调整字号时，
+	// 图标间距和长标签的安全留白会一起变化，避免只放大文字后互相覆盖。
+	step := scaleASS(80, scale)
+	gearX := centerX - 3*step
+	steeringX := centerX - 2*step
+	leftX := centerX - step
 	speedX := centerX
-	rightX := centerX + scaleASS(72, scale)
-	brakeX := centerX + scaleASS(158, scale)
-	acceleratorX := centerX + scaleASS(238, scale)
+	rightX := centerX + step
+	brakeX := centerX + 2*step
+	acceleratorX := centerX + 3*step
 	// 图标中心与“时速 + km/h”组合的视觉中心对齐，避免四个状态项悬在顶部。
 	iconTop := top + scaleASS(15, scale)
 	labelY := top + barHeight - scaleASS(27, scale)
@@ -1975,8 +2032,8 @@ func assDashboardVector(start, end string, layer, x, y int, scale float64, color
 func appendSteeringWheelASS(lines []string, start, end string, centerX, top int, scale float64, color string, angle float64) []string {
 	path := "m 20.4 1.99 b 21.1 1.97 21.8 1.97 22.5 1.99 b 29.08 2.44 34.71 6.34 37.31 12.41 b 40 18.04 38.77 25.63 34.66 30.24 b 34.58 30.28 34.52 30.33 34.45 30.38 b 33.9 30.94 33.34 31.51 32.79 32.08 b 30.97 34.03 26.55 35.91 23.86 36.14 b 10.41 38.03 0 24.87 5.53 12.34 b 8.11 6.26 13.87 2.44 20.4 1.99 c m 8.59 14.96 b 8.63 17.41 12.3 15.67 13.62 15.51 b 20.04 14.02 25.1 14.28 31.42 16.05 b 32.8 16.47 34.63 16.27 33.96 14.33 b 30.98 6.48 21.43 3.91 14.32 7.85 b 11.81 9.22 9.3 12.19 8.59 14.96 c m 10.82 27.8 b 10.81 27.88 10.85 27.93 10.93 27.93 b 11.72 29.37 17.53 33.72 18.13 30.45 b 18.04 26.33 15.7 22.47 11.35 21.9 b 9.45 21.71 7.96 22.63 8.83 24.7 b 9.32 25.73 10.02 26.98 10.82 27.8 c m 26.65 24.44 b 26.57 24.45 26.53 24.5 26.53 24.58 b 25.41 25.95 23.32 30.17 25.05 31.56 b 26.28 32.35 29.32 30.16 30.32 29.37 b 30.56 29.37 30.76 29.27 30.9 29.07 b 31.11 28.76 31.83 28.33 31.76 27.93 b 32.81 26.7 35.69 22.61 32.72 21.96 b 30.77 21.55 27.75 22.81 26.65 24.44 c"
 	angle = min(540, max(-540, angle))
-	rotation := fmt.Sprintf("\\org(%d,%d)\\frz%.2f", centerX, top+scaleASS(20, scale), angle)
-	// 直接复用在线播放方向盘的透明复合路径，保证造型和旋转中心一致。
+	// CSS 正角度顺时针，而 ASS 的 frz 正角度逆时针；导出层必须反号才能与在线播放一致。
+	rotation := fmt.Sprintf("\\org(%d,%d)\\frz%.2f", centerX, top+scaleASS(20, scale), -angle)
 	return append(lines, assDashboardVector(start, end, 5, centerX, top, scale, color, path, rotation))
 }
 
@@ -2050,13 +2107,17 @@ func isHostOrLinuxAbsolutePath(value string) bool {
 	return isLinuxAbsolutePath(value) || filepath.IsAbs(strings.TrimSpace(value))
 }
 
-func exportTiles(request ExportRequest, profile compositeProfile) ([]compositeTile, error) {
+func exportTiles(request ExportRequest, profile compositeProfile, sources ...ExportSource) ([]compositeTile, error) {
 	if request.Layout == "single" {
-		width := profile.width
-		if request.Quality != "original" {
-			width = teslaAspectWidth(profile.height)
+		width, height := profile.width, profile.height
+		if request.Quality == "original" {
+			if len(sources) > 0 && sources[0].CanvasWidth > 0 && sources[0].CanvasHeight > 0 {
+				width, height = sources[0].CanvasWidth, sources[0].CanvasHeight
+			}
+		} else {
+			width = teslaAspectWidth(height)
 		}
-		return []compositeTile{{camera: request.Cameras[0], width: width, height: profile.height}}, nil
+		return []compositeTile{{camera: request.Cameras[0], width: width, height: height}}, nil
 	}
 	if request.Quality == "high" {
 		return highExportTiles(request.Layout)

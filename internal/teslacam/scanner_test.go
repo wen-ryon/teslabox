@@ -112,6 +112,7 @@ func TestClassifyEventTrigger(t *testing.T) {
 		{name: "哨兵对象检测", reason: "sentry_aware_object_detection", want: "sentry_object"},
 		{name: "哨兵震动检测", reason: "sentry_aware_accel_0.8", want: "sentry_motion"},
 		{name: "哨兵警报", reason: "sentry_panic_0", want: "sentry_alarm"},
+		{name: "自动紧急制动", reason: "vehicle_auto_emergency_braking", want: "vehicle_emergency_braking"},
 		{name: "未知事件", reason: "future_event", want: "unknown"},
 	}
 	for _, test := range tests {
