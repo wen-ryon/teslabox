@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$PrivateKey,
     [string]$NotesFile = "",
     [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
-    [string]$OutputDirectory = "dist\update"
+    [string]$OutputDirectory = "dist\update",
+    [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,12 +14,14 @@ $privateKeyPath = (Resolve-Path $PrivateKey).Path
 if ($privateKeyPath.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The release private key must be stored outside the repository."
 }
-$dirty = git -C $root status --porcelain
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to read the Git working tree status."
-}
-if ($dirty) {
-    throw "Commit or clean the working tree before creating a release."
+if (-not $AllowDirty) {
+    $dirty = git -C $root status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to read the Git working tree status."
+    }
+    if ($dirty) {
+        throw "Commit or clean the working tree before creating a release."
+    }
 }
 $output = Join-Path $root $OutputDirectory
 New-Item -ItemType Directory -Force $output | Out-Null
