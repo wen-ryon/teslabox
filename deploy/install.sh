@@ -4,7 +4,7 @@ set -eu
 INSTALLER_VERSION="0.1.28"
 RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.28"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
-BOOTSTRAP_SHA256="698c48e1897c9273e3e2f3699d4e7fe253c4499a7d78c11fb33603b1257aaf2c"
+BOOTSTRAP_SHA256="382964f928b9e894d602222d376f7bc99ac139c0a48daadaa112cd66ba2b4bd7"
 # MT7922 测试内核只使用已在 ROCK 3A 上验证的固定归档，首装主程序升级不应隐式更换内核基线。
 MT7922_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.16"
 MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
