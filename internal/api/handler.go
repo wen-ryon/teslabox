@@ -20,10 +20,12 @@ import (
 
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
+	"github.com/wen-ryon/teslabox/internal/fancontrol"
 	"github.com/wen-ryon/teslabox/internal/fragmentation"
 	"github.com/wen-ryon/teslabox/internal/maintenancemode"
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
+	"github.com/wen-ryon/teslabox/internal/onboarding"
 	"github.com/wen-ryon/teslabox/internal/service"
 	"github.com/wen-ryon/teslabox/internal/storageadmin"
 	"github.com/wen-ryon/teslabox/internal/system"
@@ -140,6 +142,20 @@ type Diagnostics interface {
 	Bundle(context.Context) (diagnostics.Bundle, error)
 }
 
+// FanAdmin 提供风扇设置和实时状态，硬件缺失时仍返回可解释状态。
+type FanAdmin interface {
+	Status() fancontrol.Status
+	Update(fancontrol.Settings) (fancontrol.Status, error)
+	Begin(string) func()
+}
+
+// OnboardingAdmin 保存跨访问地址共享的设备级首次引导状态。
+type OnboardingAdmin interface {
+	State() onboarding.State
+	CompletePageGuide() (onboarding.State, error)
+	DismissStorage(string) (onboarding.State, error)
+}
+
 type handlerOptions struct {
 	deviceAdmin     DeviceAdmin
 	storageAdmin    StorageAdmin
@@ -151,6 +167,8 @@ type handlerOptions struct {
 	updateAdmin     UpdateAdmin
 	diagnostics     Diagnostics
 	automation      MaintenanceAutomation
+	fanAdmin        FanAdmin
+	onboardingAdmin OnboardingAdmin
 }
 
 // Option 配置可选的 API 能力。
@@ -206,6 +224,16 @@ func WithMaintenanceAutomation(automation MaintenanceAutomation) Option {
 	return func(options *handlerOptions) { options.automation = automation }
 }
 
+// WithFanAdmin 启用设置中心风扇控制接口。
+func WithFanAdmin(admin FanAdmin) Option {
+	return func(options *handlerOptions) { options.fanAdmin = admin }
+}
+
+// WithOnboardingAdmin 启用设备级首次引导状态接口。
+func WithOnboardingAdmin(admin OnboardingAdmin) Option {
+	return func(options *handlerOptions) { options.onboardingAdmin = admin }
+}
+
 // NewHandler 创建版本化 REST 路由并限制允许的方法。
 func NewHandler(controller Controller, logger *slog.Logger, options ...Option) http.Handler {
 	settings := handlerOptions{}
@@ -244,6 +272,10 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		serveThumbnail(w, r, state)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
+		if settings.fanAdmin != nil {
+			end := settings.fanAdmin.Begin("single")
+			defer end()
+		}
 		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
@@ -306,7 +338,79 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.diagnostics != nil {
 		registerDiagnosticsRoutes(mux, settings.diagnostics, logger)
 	}
-	return requestLogger(mux, logger)
+	if settings.fanAdmin != nil {
+		registerFanRoutes(mux, settings.fanAdmin, logger)
+	}
+	if settings.onboardingAdmin != nil {
+		registerOnboardingRoutes(mux, settings.onboardingAdmin, logger)
+	}
+	var handler http.Handler = mux
+	if settings.fanAdmin != nil {
+		handler = fanActivityMiddleware(handler, settings.fanAdmin)
+	}
+	return requestLogger(handler, logger)
+}
+
+func registerOnboardingRoutes(mux *http.ServeMux, admin OnboardingAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/onboarding", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, admin.State())
+	})
+	mux.HandleFunc("POST /api/v1/onboarding/page-complete", func(w http.ResponseWriter, _ *http.Request) {
+		state, err := admin.CompletePageGuide()
+		if err != nil {
+			logger.Warn("保存页面引导状态失败", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存页面引导状态失败"})
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+	mux.HandleFunc("POST /api/v1/onboarding/storage-dismiss", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			StablePath string `json:"stable_path"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		state, err := admin.DismissStorage(input.StablePath)
+		if err != nil {
+			logger.Warn("保存存储引导状态失败", "error", err)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+}
+
+func fanActivityMiddleware(next http.Handler, fan FanAdmin) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		maintenance := r.Method != http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/storage/") || strings.HasPrefix(r.URL.Path, "/api/v1/media-assets/"))
+		if !maintenance {
+			next.ServeHTTP(w, r)
+			return
+		}
+		end := fan.Begin("maintenance")
+		defer end()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func registerFanRoutes(mux *http.ServeMux, admin FanAdmin, logger *slog.Logger) {
+	mux.HandleFunc("GET /api/v1/fan", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, admin.Status())
+	})
+	mux.HandleFunc("POST /api/v1/fan", func(w http.ResponseWriter, r *http.Request) {
+		var settings fancontrol.Settings
+		if !decodeJSON(w, r, &settings) {
+			return
+		}
+		status, err := admin.Update(settings)
+		if err != nil {
+			logger.Warn("保存风扇设置失败", "error", err)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
 }
 
 func activateMedia(controller Controller, logger *slog.Logger, ctx context.Context) {

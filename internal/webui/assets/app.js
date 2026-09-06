@@ -14,14 +14,13 @@ const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "me
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
 const recordingRefreshPreferenceKey = "teslabox-recording-refresh-seconds";
 const savedRecordingRefreshSeconds = normalizeRecordingRefreshSeconds(readPreference(recordingRefreshPreferenceKey, "60"));
-const onboardingPreferenceKey = "teslabox-onboarding-complete";
 const initialPage = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
 const state = {
   offset: 0, total: 0, loading: false, refreshing: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
   period: ["month", "week", "day"].includes(savedPeriod) ? savedPeriod : "month",
   page: initialPage, mustChangePassword: false,
-  wifi: null, ap: null, storage: null, update: null, updateHistory: null, maintenance: null, mediaAssets: null, uiFont: savedUIFont,
+  wifi: null, ap: null, storage: null, update: null, updateHistory: null, maintenance: null, fan: null, mediaAssets: null, uiFont: savedUIFont,
   musicPath: "", musicPage: 0,
 };
 const $ = (id) => document.getElementById(id);
@@ -213,7 +212,15 @@ const compatibilitySelects = new Map();
 let compatibilitySelectSequence = 0;
 let compatibilitySelectDocumentObserver = null;
 let onboardingStorage = null;
+let onboardingState = null;
 let onboardingChecking = false;
+let pageGuideIndex = -1;
+const pageGuideSteps = [
+  {target:"nav-toggle", title:"页面从这里切换", detail:"点击左上角 TeslaBox 标志可以打开主导航，在概览、媒体中心、日志中心和设置中心之间切换。"},
+  {target:"live-indicator", title:"设备连接状态", detail:"这里表示管理页面能否正常连接 TeslaBox 服务。显示“设备在线”时，页面可以继续读取设备状态。"},
+  {target:"internet-indicator", title:"互联网状态", detail:"这里表示 TeslaBox 当前是否能够访问互联网。无互联网不影响车机写入录像和局域网查看。"},
+  {target:"appearance-toggle", title:"页面设置", detail:"点击右上角齿轮可以切换主题、全局字体和车机浏览器兼容模式，也可以退出管理页面。"},
+];
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
@@ -376,7 +383,37 @@ function showApp() {
   $("logout-button").hidden = !state.authEnabled;
 }
 
+function initializeSettingsTabs() {
+  const tabs = $("settings-tabs");
+  const sections = [...$("settings-page").querySelectorAll(":scope > .settings-section")];
+  if (!tabs || !sections.length || tabs.childElementCount) return;
+  const saved = readPreference("teslabox-settings-tab", "");
+  sections.forEach((section, index) => {
+    if (!section.id) section.id = `settings-panel-${index+1}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.settingsTab = section.id;
+    button.textContent = section.querySelector("h2")?.textContent?.trim() || `设置 ${index+1}`;
+    button.addEventListener("click", () => activateSettingsTab(section.id, true));
+    tabs.append(button);
+  });
+  activateSettingsTab(sections.some((section) => section.id === saved) ? saved : sections[0].id, false);
+}
+
+function activateSettingsTab(id, remember = true) {
+  const sections = [...$("settings-page").querySelectorAll(":scope > .settings-section")];
+  if (!sections.some((section) => section.id === id)) return;
+  sections.forEach((section) => { section.hidden = section.id !== id; });
+  $("settings-tabs").querySelectorAll("[data-settings-tab]").forEach((button) => {
+    const active = button.dataset.settingsTab === id;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (remember) writePreference("teslabox-settings-tab", id);
+}
+
 async function initialize() {
+	initializeSettingsTabs();
   try {
     const session = await requestResponse("/api/v1/auth/session", {loading:false}).then((response) => response.json());
     state.authEnabled = session.enabled;
@@ -508,6 +545,10 @@ $("ap-repair-interface").addEventListener("click", repairAPInterface);
 $("export-settings-save").addEventListener("click", saveExportSettings);
 $("export-history-refresh").addEventListener("click", loadExportSettings);
 $("export-delete-after-download").addEventListener("change", renderExportRetentionControls);
+$("fan-maximum").addEventListener("input", renderFanCalculation);
+$("fan-mode-automatic").addEventListener("click", () => setFanTemperatureMode("automatic"));
+$("fan-mode-manual").addEventListener("click", () => setFanTemperatureMode("manual"));
+$("fan-save").addEventListener("click", saveFanSettings);
 $("wifi-connect-form").addEventListener("submit", connectNewWiFi);
 $("wifi-ipv4-form").addEventListener("submit", saveWiFiIPv4Settings);
 $("wifi-ipv4-mode").addEventListener("change", renderWiFiIPv4Fields);
@@ -517,6 +558,13 @@ $("storage-capacity-migrate").addEventListener("click", migrateStorageCapacity);
 $("storage-init-form").addEventListener("submit", initializeStorageDevice);
 $("onboarding-skip").addEventListener("click", dismissOnboarding);
 $("onboarding-primary").addEventListener("click", followOnboardingPrimaryAction);
+$("page-guide-skip").addEventListener("click", completePageGuide);
+$("page-guide-previous").addEventListener("click", () => renderPageGuideStep(pageGuideIndex - 1));
+$("page-guide-next").addEventListener("click", () => {
+  if (pageGuideIndex >= pageGuideSteps.length - 1) completePageGuide();
+  else renderPageGuideStep(pageGuideIndex + 1);
+});
+window.addEventListener("resize", () => { if (pageGuideIndex >= 0) positionPageGuide(); });
 $("storage-music-enabled").addEventListener("change", renderStoragePartitionPreview);
 $("storage-teslacam-percent").addEventListener("input", renderStoragePartitionPreview);
 $("maintenance-auto-recovery").addEventListener("click", toggleMaintenanceAutoRecovery);
@@ -829,6 +877,7 @@ function renderMediaAssets(payload) {
   const categories = ["boombox", "wrap", "lightshow"];
   categories.forEach((category) => renderMediaCategory(category, assets.filter((asset) => asset.category === category)));
   renderMusicBrowser(assets.filter((asset) => asset.category === "music"));
+  renderMusicPartitionAvailability(payload);
   const status = $("media-apply-status");
   status.className = `badge${payload.needs_apply ? " error" : " ok"}`;
   status.textContent = payload.needs_apply ? "有待应用变更" : "已同步";
@@ -839,6 +888,20 @@ function renderMediaAssets(payload) {
     $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。`;
   } else {
     $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。`;
+  }
+}
+
+function renderMusicPartitionAvailability(payload) {
+  const known = Boolean(payload.music_partition_known);
+  const available = Boolean(payload.music_partition_available);
+  const disabled = known && !available;
+  $("media-music-card").classList.toggle("disabled", disabled);
+  $("media-music-files").disabled = disabled;
+  $("media-music-upload").disabled = disabled;
+  if (disabled) {
+    $("media-music-count").textContent = "未创建分区";
+    $("media-music-list").replaceChildren(Object.assign(document.createElement("p"), {className:"empty-state", textContent:"当前存储没有 FAT32 音乐分区。请在设置中心的“外接存储”中重新初始化并启用音乐分区。"}));
+    $("media-music-page-summary").textContent = "音乐导入已禁用";
   }
 }
 
@@ -1021,6 +1084,10 @@ function createMediaAssetRow(category, asset) {
 }
 
 async function uploadMediaFiles(category) {
+	if (category === "music" && state.mediaAssets?.music_partition_known && !state.mediaAssets?.music_partition_available) {
+		setMediaNotice("当前存储没有 FAT32 音乐分区，请先在设置中心重新初始化并启用音乐分区。", true);
+		return;
+	}
   const configuration = {
     boombox: {input:"media-boombox-files", button:"media-boombox-upload", role:"file"},
     wrap: {input:"media-wrap-files", button:"media-wrap-upload", role:"file"},
@@ -1338,8 +1405,8 @@ async function postJSON(path, body) {
 async function loadSettings() {
   return withPageLoading("正在读取网络、存储与系统设置…", async () => {
     setSettingsNotice("正在读取网络设置…", false, false);
-    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, reserveResult, exportSettingsResult, exportHistoryResult] = await Promise.allSettled([
-      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/storage/snapshot-reserve"), request("/api/v1/export-settings"), request("/api/v1/exports/history"),
+    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, reserveResult, exportSettingsResult, exportHistoryResult, fanResult] = await Promise.allSettled([
+      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/storage/snapshot-reserve"), request("/api/v1/export-settings"), request("/api/v1/exports/history"), request("/api/v1/fan"),
     ]);
     if (wifiResult.status === "fulfilled") {
       state.wifi = wifiResult.value;
@@ -1372,6 +1439,10 @@ async function loadSettings() {
       renderMaintenanceUnavailable(maintenanceResult.reason.message);
     }
     if (reserveResult.status === "fulfilled") renderSnapshotReserveStatus(reserveResult.value);
+    if (fanResult.status === "fulfilled") {
+      state.fan = fanResult.value;
+      renderFanSettings();
+    } else renderFanUnavailable(fanResult.reason.message);
     if (exportSettingsResult.status === "fulfilled" && exportHistoryResult.status === "fulfilled") {
       state.exportSettings = exportSettingsResult.value;
       state.exportHistory = exportHistoryResult.value;
@@ -1397,6 +1468,95 @@ async function loadExportSettings() {
   state.exportSettings = settingsResult.value;
   state.exportHistory = historyResult.value;
   renderExportSettings();
+}
+
+const fanSceneDefinitions = [
+  ["idle", "待机 / 持续录像"], ["single", "单路在线播放"], ["multi", "多路合成播放"],
+  ["export", "视频导出"], ["maintenance", "存储维护"],
+];
+
+function renderFanSettings() {
+  const fan = state.fan;
+  if (!fan) return;
+  $("fan-status").textContent = fan.available ? "控制在线" : "硬件不可用";
+  $("fan-status").className = `badge ${fan.available ? "ok" : "error"}`;
+  $("fan-temperature").textContent = fan.temperature_c ? `${fan.temperature_c}℃` : "不可用";
+  $("fan-scene").textContent = ({idle:"待机 / 持续录像",single:"单路在线播放",multi:"多路合成播放",export:"视频导出",maintenance:"存储维护"})[fan.scenario] || fan.scenario || "待机";
+  $("fan-temperature-request").textContent = `${Number(fan.temperature_request || 0)}%`;
+  $("fan-output").textContent = `${Number(fan.output_percent || 0)}%`;
+  $("fan-maximum").value = String(fan.maximum_percent ?? 50);
+  $("fan-mode-automatic").classList.toggle("active", fan.temperature_mode === "automatic");
+  $("fan-mode-manual").classList.toggle("active", fan.temperature_mode === "manual");
+  $("fan-manual-levels").hidden = fan.temperature_mode !== "manual";
+  renderFanLevels();
+  renderFanScenes();
+  renderFanCalculation();
+  $("fan-save").disabled = false;
+  $("fan-detail").textContent = fan.available ? "场景请求与温度请求取较高值后，再乘以最大转速限制。" : (fan.reason || "当前板卡未提供可用的PWM风扇接口，不影响其他功能运行。");
+}
+
+function renderFanLevels() {
+  const container = $("fan-manual-levels");
+  container.replaceChildren();
+  (state.fan?.temperature_levels || []).forEach((level, index) => {
+    const row = document.createElement("label");
+    row.className = "fan-level";
+    row.innerHTML = `<strong>档位 ${index+1}</strong><input data-fan-temperature type="number" min="20" max="100" value="${Number(level.temperature_c)}"><span>℃</span><input data-fan-percent type="number" min="0" max="100" value="${Number(level.percent)}"><span>%</span>`;
+    container.append(row);
+  });
+}
+
+function renderFanScenes() {
+  const container = $("fan-scene-controls");
+  container.replaceChildren();
+  for (const [key,label] of fanSceneDefinitions) {
+    const value = Number(state.fan?.scenarios?.[key] ?? 0);
+    const control = document.createElement("label");
+    control.className = "fan-scene-control";
+    control.innerHTML = `<header><strong>${label}</strong><output>${value}%</output></header><input data-fan-scene="${key}" type="range" min="0" max="100" step="5" value="${value}">`;
+    control.querySelector("input").addEventListener("input", (event) => { control.querySelector("output").value = `${event.target.value}%`; renderFanCalculation(); });
+    container.append(control);
+  }
+}
+
+function renderFanCalculation() {
+  const maximum = Number($("fan-maximum").value || 0);
+  $("fan-maximum-output").value = `${maximum}%`;
+  if (!state.fan) return;
+  const requestPercent = Math.max(Number(state.fan.scenario_request || 0), Number(state.fan.temperature_request || 0));
+  $("fan-output").textContent = `${Math.round(requestPercent*maximum/100)}%`;
+}
+
+function setFanTemperatureMode(mode) {
+  if (!state.fan || !["automatic","manual"].includes(mode)) return;
+  state.fan.temperature_mode = mode;
+  $("fan-mode-automatic").classList.toggle("active", mode === "automatic");
+  $("fan-mode-manual").classList.toggle("active", mode === "manual");
+  $("fan-manual-levels").hidden = mode !== "manual";
+}
+
+function fanSettingsPayload() {
+  const levels = [...$("fan-manual-levels").querySelectorAll(".fan-level")].map((row) => ({
+    temperature_c:Number(row.querySelector("[data-fan-temperature]").value), percent:Number(row.querySelector("[data-fan-percent]").value),
+  }));
+  const scenarios = {};
+  document.querySelectorAll("[data-fan-scene]").forEach((input) => { scenarios[input.dataset.fanScene] = Number(input.value); });
+  return {enabled:Boolean(state.fan.enabled), maximum_percent:Number($("fan-maximum").value), temperature_mode:state.fan.temperature_mode, temperature_levels:levels, scenarios};
+}
+
+async function saveFanSettings() {
+  const button = $("fan-save"); button.disabled = true;
+  try {
+    state.fan = await postJSON("/api/v1/fan", fanSettingsPayload());
+    renderFanSettings();
+    setSettingsNotice("风扇设置已保存", false);
+  } catch (error) { setSettingsNotice(`保存风扇设置失败：${error.message}`, true); }
+  finally { button.disabled = false; }
+}
+
+function renderFanUnavailable(message) {
+  $("fan-status").textContent = "不可用"; $("fan-status").className = "badge error";
+  $("fan-detail").textContent = `风扇控制暂不可用：${message}`; $("fan-save").disabled = true;
 }
 
 function renderExportSettings() {
@@ -2324,6 +2484,8 @@ async function loadStorageDevices() {
   try {
     state.storage = await request("/api/v1/storage/devices");
     renderStorageDevices(state.storage);
+    onboardingStorage = state.storage;
+    if (onboardingState?.page_guide_complete && $("onboarding-modal").hidden) maybeShowStorageOnboarding();
     setSettingsNotice("存储设备列表已更新", false);
   } catch (error) {
     renderStorageUnavailable(error.message);
@@ -2497,67 +2659,115 @@ function closeStorageModal() {
 }
 
 async function maybeShowOnboarding() {
-  if (onboardingChecking || readPreference(onboardingPreferenceKey, "false") === "true" || state.mustChangePassword || appView.hidden) return;
+  if (onboardingChecking || state.mustChangePassword || appView.hidden) return;
   onboardingChecking = true;
-  const button = $("onboarding-primary");
-  button.disabled = true;
-  button.textContent = "正在检查…";
-  $("onboarding-modal").hidden = false;
   try {
-    onboardingStorage = state.storage || await request("/api/v1/storage/devices", {loading:false});
-    renderOnboardingStorage(onboardingStorage);
+    const [guide, storage] = await Promise.all([
+      request("/api/v1/onboarding", {loading:false}),
+      state.storage ? Promise.resolve(state.storage) : request("/api/v1/storage/devices", {loading:false}),
+    ]);
+    onboardingState = guide;
+    onboardingStorage = storage;
+    if (!guide.page_guide_complete) {
+      startPageGuide();
+      return;
+    }
+    maybeShowStorageOnboarding();
   } catch (error) {
-    onboardingStorage = null;
-    $("onboarding-storage-status").textContent = "暂不可用";
-    $("onboarding-storage-status").className = "badge error";
-    $("onboarding-storage-detail").textContent = `暂时无法读取存储状态：${error.message}`;
-    button.textContent = "打开存储设置";
+    console.warn("读取首次引导状态失败", error);
   } finally {
     onboardingChecking = false;
-    button.disabled = false;
-    window.setTimeout(() => button.focus(), 0);
   }
 }
 
-function renderOnboardingStorage(storage) {
-  const devices = Array.isArray(storage?.devices) ? storage.devices : [];
-  const initialized = devices.find((device) => device.active || device.initialized);
-  const candidate = devices.find((device) => device.can_resume || device.can_initialize);
+function maybeShowStorageOnboarding() {
+  const devices = Array.isArray(onboardingStorage?.devices) ? onboardingStorage.devices : [];
+  const dismissed = new Set(onboardingState?.dismissed_storage_stable_paths || []);
+  const candidate = devices.find((device) => (device.can_resume || device.can_initialize) && !device.initialized && !dismissed.has(device.stable_path));
+  if (!candidate) return;
+  onboardingStorage = {...onboardingStorage, onboardingCandidate:candidate};
   const status = $("onboarding-storage-status");
   const detail = $("onboarding-storage-detail");
-  const button = $("onboarding-primary");
-  if (initialized) {
-    status.textContent = "已就绪";
-    status.className = "badge ok";
-    detail.textContent = `${initialized.model || "数据盘"} 已初始化，可以直接查看和管理录像。`;
-    button.textContent = "完成指引";
-    return;
-  }
-  status.textContent = candidate ? "需要初始化" : "等待设备";
+  $("onboarding-storage-name").textContent = candidate.model || "初始化外接存储";
+  status.textContent = candidate.can_resume ? "可继续初始化" : "需要初始化";
   status.className = "badge error";
-  detail.textContent = candidate
-    ? `已检测到 ${candidate.model || "外接存储设备"}（${formatBytes(candidate.size_bytes)}），请先完成安全初始化。`
-    : "尚未检测到可初始化的数据盘；请插入带稳定序列号的 USB 存储设备或 NVMe 数据盘。";
-  button.textContent = candidate ? "前往初始化存储" : "打开存储设置";
+  detail.textContent = `${formatBytes(candidate.size_bytes)} · ${candidate.serial ? `序列号 ${candidate.serial}` : "已取得稳定设备标识"}`;
+  $("onboarding-modal").hidden = false;
+  window.setTimeout(() => $("onboarding-primary").focus(), 0);
 }
 
-function dismissOnboarding() {
-  writePreference(onboardingPreferenceKey, "true");
+async function dismissOnboarding() {
+  const candidate = onboardingStorage?.onboardingCandidate;
   $("onboarding-modal").hidden = true;
+  if (!candidate?.stable_path) return;
+  try {
+    onboardingState = await postJSON("/api/v1/onboarding/storage-dismiss", {stable_path:candidate.stable_path}, {loading:false});
+  } catch (error) {
+    showToast(`无法保存暂不处理状态：${error.message}`, true);
+  }
 }
 
 function followOnboardingPrimaryAction() {
-  const devices = Array.isArray(onboardingStorage?.devices) ? onboardingStorage.devices : [];
-  const initialized = devices.some((device) => device.active || device.initialized);
-  if (initialized) {
-    dismissOnboarding();
-    return;
-  }
-  const candidate = devices.find((device) => device.can_resume || device.can_initialize);
-  dismissOnboarding();
+  const candidate = onboardingStorage?.onboardingCandidate;
+  $("onboarding-modal").hidden = true;
   showPage("settings", true);
+  activateSettingsTab("storage-settings-section", true);
   window.requestAnimationFrame(() => $("storage-settings-section").scrollIntoView({behavior:"smooth", block:"start"}));
   if (candidate) openStorageModal(candidate);
+}
+
+function startPageGuide() {
+  $("page-guide").hidden = false;
+  renderPageGuideStep(0);
+}
+
+function clearPageGuideTarget() {
+  document.querySelectorAll(".page-guide-target").forEach((element) => element.classList.remove("page-guide-target"));
+  document.querySelectorAll(".page-guide-host").forEach((element) => element.classList.remove("page-guide-host"));
+  closeAppearanceMenu();
+}
+
+function renderPageGuideStep(index) {
+  pageGuideIndex = Math.max(0, Math.min(pageGuideSteps.length - 1, index));
+  clearPageGuideTarget();
+  const step = pageGuideSteps[pageGuideIndex];
+  const target = $(step.target);
+  target.classList.add("page-guide-target");
+  target.closest(".topbar")?.classList.add("page-guide-host");
+  $("page-guide-title").textContent = step.title;
+  $("page-guide-detail").textContent = step.detail;
+  $("page-guide-progress").textContent = `${pageGuideIndex + 1} / ${pageGuideSteps.length}`;
+  $("page-guide-previous").hidden = pageGuideIndex === 0;
+  $("page-guide-next").textContent = pageGuideIndex === pageGuideSteps.length - 1 ? "完成" : "下一步";
+  window.requestAnimationFrame(positionPageGuide);
+}
+
+function positionPageGuide() {
+  const step = pageGuideSteps[pageGuideIndex];
+  const target = step ? $(step.target) : null;
+  const card = $("page-guide-card");
+  if (!target || !card) return;
+  const targetRect = target.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const margin = 14;
+  const top = targetRect.bottom + margin + cardRect.height <= window.innerHeight
+    ? targetRect.bottom + margin
+    : Math.max(margin, targetRect.top - cardRect.height - margin);
+  const left = Math.max(margin, Math.min(window.innerWidth - cardRect.width - margin, targetRect.left + targetRect.width / 2 - cardRect.width / 2));
+  card.style.top = `${top}px`;
+  card.style.left = `${left}px`;
+}
+
+async function completePageGuide() {
+  clearPageGuideTarget();
+  pageGuideIndex = -1;
+  $("page-guide").hidden = true;
+  try {
+    onboardingState = await request("/api/v1/onboarding/page-complete", {method:"POST", loading:false});
+    maybeShowStorageOnboarding();
+  } catch (error) {
+    showToast(`无法保存页面引导状态：${error.message}`, true);
+  }
 }
 
 async function initializeStorageDevice(event) {

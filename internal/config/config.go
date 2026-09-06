@@ -27,6 +27,7 @@ const (
 	defaultRegistryPath             = "/var/lib/teslabox-system/storage-registry.json"
 	defaultWebAuthPath              = "/var/lib/teslabox-system/web-auth.json"
 	defaultMaintenancePath          = "/var/lib/teslabox-system/maintenance.json"
+	defaultOnboardingPath           = "/var/lib/teslabox-system/onboarding.json"
 	defaultTeslaTimeZone            = "Asia/Shanghai"
 	defaultUpdateDir                = "/var/lib/teslabox-system/updates"
 	defaultUpdateRequest            = "/var/lib/teslabox-system/update-request.json"
@@ -73,6 +74,7 @@ type Config struct {
 	RegistryPath                string
 	WebAuthStatePath            string
 	MaintenanceStatePath        string
+	OnboardingStatePath         string
 	TeslaTimeZone               string
 	UpdateManifestURL           string
 	UpdateCatalogURL            string
@@ -200,6 +202,7 @@ func Load() (Config, error) {
 		RegistryPath:                envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		WebAuthStatePath:            envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
 		MaintenanceStatePath:        envString("TESLABOX_MAINTENANCE_STATE", defaultMaintenancePath),
+		OnboardingStatePath:         envString("TESLABOX_ONBOARDING_STATE", defaultOnboardingPath),
 		TeslaTimeZone:               envString("TESLABOX_TESLA_TIME_ZONE", defaultTeslaTimeZone),
 		UpdateManifestURL:           updateManifestURL,
 		UpdateCatalogURL:            updateCatalogURL,
@@ -306,6 +309,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaintenanceStatePath != "" && !isSafeAbsolutePath(c.MaintenanceStatePath) {
 		return fmt.Errorf("TESLABOX_MAINTENANCE_STATE 必须是非根目录的绝对路径")
+	}
+	if c.OnboardingStatePath != "" && !isSafeAbsolutePath(c.OnboardingStatePath) {
+		return fmt.Errorf("TESLABOX_ONBOARDING_STATE 必须是非根目录的绝对路径")
 	}
 	if !isSafeAbsolutePath(c.ExportStatePath) {
 		return fmt.Errorf("TESLABOX_EXPORT_STATE 必须是非根目录的绝对路径")

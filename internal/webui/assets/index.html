@@ -6,8 +6,8 @@
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20260902-2">
-  <script src="/app.js?v=20260903-1" defer></script>
+  <link rel="stylesheet" href="/app.css?v=20260906-2">
+  <script src="/app.js?v=20260906-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -39,9 +39,11 @@
         <div class="appearance-control">
           <button id="appearance-toggle" class="ghost appearance-toggle" type="button" aria-label="打开页面设置" aria-haspopup="true" aria-expanded="false" aria-controls="appearance-menu"><span aria-hidden="true">⚙</span></button>
           <div id="appearance-menu" class="appearance-menu" role="group" aria-label="页面设置" hidden>
-            <div class="appearance-menu-head"><strong>页面设置</strong><small>外观设置会保存在当前浏览器</small></div>
+            <div class="appearance-menu-head"><strong>页面设置</strong><small>主题、字体与兼容模式保存在当前浏览器</small></div>
             <label for="theme-select"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
             <label for="settings-font-size"><span>页面字体</span><select id="settings-font-size" aria-label="调整全部页面字体大小"><option value="compact">紧凑 · 12px</option><option value="small">较小 · 13px</option><option value="medium" selected>标准 · 14px</option><option value="large">较大 · 15px</option><option value="xlarge">最大 · 16px</option></select></label>
+            <label class="appearance-compatibility" for="tesla-browser-compatibility"><span>车机兼容</span><span class="appearance-switch-row"><input id="tesla-browser-compatibility" type="checkbox"><i aria-hidden="true"></i><span>页面内选择器</span></span></label>
+            <p class="appearance-help">当特斯拉车机浏览器无法操作原生下拉框时开启。</p>
             <div class="appearance-menu-footer"><button id="logout-button" class="ghost" type="button">退出管理页面</button></div>
           </div>
         </div>
@@ -189,7 +191,7 @@
           <div id="media-lightshow-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
         </article>
 
-        <article class="settings-card media-card">
+        <article id="media-music-card" class="settings-card media-card">
           <div class="media-card-head"><div><p class="eyebrow">MUSIC</p><h2>音乐</h2><p>批量写入可选 FAT32 音乐分区。若初始化时未创建 MUSIC 分区，应用时会给出明确提示。</p></div><span id="media-music-count" class="badge">0 首</span></div>
           <label class="media-upload-control">选择音乐<input id="media-music-files" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.m4a,.aac,.flac" multiple></label>
           <button id="media-music-upload" class="secondary compact" type="button">暂存音乐</button>
@@ -213,14 +215,7 @@
         <button id="settings-refresh" class="secondary" type="button">刷新设置</button>
       </section>
       <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
-
-      <section class="settings-section compatibility-section" aria-labelledby="compatibility-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">TESLA BROWSER</p><h2 id="compatibility-settings-title">车机浏览器兼容</h2></div></div>
-        <article class="settings-card compatibility-card">
-          <div><h3>特斯拉车机兼容模式</h3><p>启用后，页面不再调用浏览器原生下拉框，改用可直接点选的页面内选项面板。此设置只保存在当前浏览器，不影响手机或电脑。</p></div>
-          <label class="toggle-choice compatibility-toggle"><input id="tesla-browser-compatibility" type="checkbox"><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>使用车机兼容选择器</strong><small>适用于点击画质、信道等下拉框没有反应的特斯拉浏览器。</small></span></label>
-        </article>
-      </section>
+      <nav id="settings-tabs" class="settings-tabs" aria-label="设置分类"></nav>
 
       <section class="settings-section" aria-labelledby="wifi-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">WIRELESS LAN</p><h2 id="wifi-settings-title">WiFi 无线局域网</h2></div></div>
@@ -303,6 +298,18 @@
           <div class="form-actions"><p id="export-settings-detail" class="muted">正在读取导出策略…</p><button id="export-settings-save" class="primary" type="button">保存导出设置</button></div>
           <div class="export-history-head"><div><h3>历史导出</h3><p>只显示仍保留在数据盘、可再次下载的文件。</p></div><button id="export-history-refresh" class="secondary compact" type="button">刷新历史</button></div>
           <div id="export-history-list" class="export-history-list"><p class="empty-state">正在读取…</p></div>
+        </article>
+      </section>
+
+      <section class="settings-section" aria-labelledby="fan-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">THERMAL &amp; FAN</p><h2 id="fan-settings-title">散热与风扇</h2></div><span id="fan-status" class="badge">读取中</span></div>
+        <article class="settings-card fan-settings-card">
+          <div class="fan-live-grid"><div><span>CPU 温度</span><strong id="fan-temperature">—</strong></div><div><span>当前场景</span><strong id="fan-scene">—</strong></div><div><span>温度请求</span><strong id="fan-temperature-request">—</strong></div><div><span>最终 PWM</span><strong id="fan-output">—</strong></div></div>
+          <label class="fan-range"><span><strong>最大转速限制</strong><small>建议将最大转速控制在 0.45W 功耗以内</small></span><input id="fan-maximum" type="range" min="0" max="100" step="5" value="50"><output id="fan-maximum-output">50%</output></label>
+          <div class="fan-mode-head"><div><h3>温度转速调节</h3><p>自动使用 TeslaBox 推荐曲线；手动允许设置四个温度档位。温度与场景取较高请求后，仍需乘以上方最大转速限制。</p></div><div class="segmented-control"><button id="fan-mode-automatic" type="button">自动</button><button id="fan-mode-manual" type="button">手动</button></div></div>
+          <div id="fan-manual-levels" class="fan-levels" hidden></div>
+          <div class="fan-scenes"><h3>场景转速</h3><div id="fan-scene-controls" class="fan-scene-grid"></div></div>
+          <div class="form-actions"><p id="fan-detail" class="muted">正在读取风扇控制状态…</p><button id="fan-save" class="primary" type="button">保存风扇设置</button></div>
         </article>
       </section>
 
@@ -456,16 +463,24 @@
   <section id="onboarding-modal" class="action-modal onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" hidden>
     <div class="action-modal-backdrop"></div>
     <div class="action-modal-card onboarding-card">
-      <div class="onboarding-heading"><div><p class="eyebrow">FIRST USE</p><h2 id="onboarding-title">欢迎使用 TeslaBox</h2></div><span>首次使用指引</span></div>
-      <p class="onboarding-intro">按下面顺序完成准备，可以避免存储未初始化、热点不可用或车机无法识别 USB。</p>
+      <div class="onboarding-heading"><div><p class="eyebrow">NEW STORAGE</p><h2 id="onboarding-title">发现新的外接存储设备</h2></div><span>存储初始化引导</span></div>
+      <p class="onboarding-intro">这块设备尚未完成 TeslaBox 初始化。初始化后才能作为 TeslaCam 数据盘使用。</p>
       <ol class="onboarding-steps">
-        <li class="onboarding-step onboarding-step-primary"><i>1</i><div><strong>初始化外接存储</strong><p id="onboarding-storage-detail">正在检查存储设备…</p></div><span id="onboarding-storage-status" class="badge">检查中</span></li>
-        <li class="onboarding-step"><i>2</i><div><strong>确认 WiFi 与 AP 热点</strong><p>可在设置中心连接上游 WiFi，并按无线网卡能力选择是否开启 TeslaBox 热点。</p></div></li>
-        <li class="onboarding-step"><i>3</i><div><strong>连接车机 USB</strong><p>ROCK 3A 请先插好 OTG 线再冷启动；运行中不要强制反复绑定 Gadget。</p></div></li>
+        <li class="onboarding-step onboarding-step-primary"><i>1</i><div><strong id="onboarding-storage-name">初始化外接存储</strong><p id="onboarding-storage-detail">正在检查存储设备…</p></div><span id="onboarding-storage-status" class="badge">检查中</span></li>
       </ol>
       <p class="onboarding-note">初始化会擦除所选整块数据盘，进入下一步后仍需核对序列号并再次确认，不会在此窗口直接执行。</p>
-      <div class="modal-actions onboarding-actions"><button id="onboarding-skip" class="ghost" type="button">跳过指引</button><button id="onboarding-primary" class="primary" type="button">正在检查…</button></div>
+      <div class="modal-actions onboarding-actions"><button id="onboarding-skip" class="ghost" type="button">暂不处理</button><button id="onboarding-primary" class="primary" type="button">前往初始化</button></div>
     </div>
+  </section>
+
+  <section id="page-guide" class="page-guide" role="dialog" aria-modal="true" aria-labelledby="page-guide-title" hidden>
+    <div class="page-guide-backdrop"></div>
+    <article id="page-guide-card" class="page-guide-card">
+      <p class="eyebrow">PAGE GUIDE</p>
+      <h2 id="page-guide-title">认识 TeslaBox</h2>
+      <p id="page-guide-detail"></p>
+      <div class="page-guide-footer"><span id="page-guide-progress">1 / 4</span><div><button id="page-guide-skip" class="ghost" type="button">跳过</button><button id="page-guide-previous" class="ghost" type="button">上一步</button><button id="page-guide-next" class="primary" type="button">下一步</button></div></div>
+    </article>
   </section>
 
   <section id="player-modal" class="player-modal" role="dialog" aria-modal="true" aria-labelledby="player-title" hidden>

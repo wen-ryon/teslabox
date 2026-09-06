@@ -108,11 +108,13 @@ type Asset struct {
 
 // Status 是媒体中心可安全展示的资源清单。
 type Status struct {
-	Available      bool    `json:"available"`
-	ImageAvailable bool    `json:"image_available"`
-	NeedsApply     bool    `json:"needs_apply"`
-	Assets         []Asset `json:"assets"`
-	Message        string  `json:"message,omitempty"`
+	Available               bool    `json:"available"`
+	ImageAvailable          bool    `json:"image_available"`
+	MusicPartitionKnown     bool    `json:"music_partition_known"`
+	MusicPartitionAvailable bool    `json:"music_partition_available"`
+	NeedsApply              bool    `json:"needs_apply"`
+	Assets                  []Asset `json:"assets"`
+	Message                 string  `json:"message,omitempty"`
 }
 
 // RecordingDeleteRequest 只接收服务端从当前媒体快照解析出的录像相对路径。
@@ -238,32 +240,34 @@ func (m *Manager) statusWithDiscoveredAssets(ctx context.Context, assets []Asset
 		status.Message = "媒体快照正在准备，已显示 TeslaBox 管理的文件；稍后刷新可读取电脑或车机直接写入的文件。"
 		return status
 	}
-	discovered, err := m.discoverSnapshotAssets(ctx, *view)
+	discovered, musicPresent, err := m.discoverSnapshotAssets(ctx, *view)
 	if err != nil {
 		status.Message = "媒体快照读取不完整，已显示 TeslaBox 管理的文件；稍后刷新可重试。"
 		return status
 	}
 	status.Assets = publicAssets(mergeAssets(assets, discovered))
+	status.MusicPartitionKnown = true
+	status.MusicPartitionAvailable = musicPresent
 	return status
 }
 
-func (m *Manager) discoverSnapshotAssets(ctx context.Context, view mediasnapshot.View) ([]Asset, error) {
+func (m *Manager) discoverSnapshotAssets(ctx context.Context, view mediasnapshot.View) ([]Asset, bool, error) {
 	assets, err := scanPrimaryAssets(view.MountPath)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// 快照租约已保证该 loop 在本次扫描结束前不会被回收；复用它可避免再次探测分区丢失 p2。
 	if !loopDevicePattern.MatchString(view.LoopDevice) {
-		return assets, nil
+		return assets, false, nil
 	}
 	music, musicPresent, err := m.scanSnapshotMusic(ctx, view.LoopDevice)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if musicPresent {
 		assets = append(assets, music...)
 	}
-	return assets, nil
+	return assets, musicPresent, nil
 }
 
 func scanPrimaryAssets(root string) ([]Asset, error) {

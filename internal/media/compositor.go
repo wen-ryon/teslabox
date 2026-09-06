@@ -42,7 +42,11 @@ type Compositor struct {
 	streamSlot      chan struct{}
 	compatibilityMu sync.RWMutex
 	compatibility   map[string]bool
+	beginActivity   func() func()
 }
+
+// SetActivityHook 设置实时合成期间的可选活动通知。
+func (c *Compositor) SetActivityHook(begin func() func()) { c.beginActivity = begin }
 
 // NewCompositor 在启动阶段拒绝不安全路径，避免请求阶段执行任意程序。
 func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, error) {
@@ -63,6 +67,10 @@ func NewCompositor(runner streamingRunner, ffmpegPath string) (*Compositor, erro
 
 // Stream 沿用请求上下文，避免浏览器断开后遗留占用硬件的 FFmpeg 进程。
 func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, output io.Writer) error {
+	if c.beginActivity != nil {
+		end := c.beginActivity()
+		defer end()
+	}
 	waitTimer := time.NewTimer(streamAcquireTimeout)
 	defer waitTimer.Stop()
 	select {

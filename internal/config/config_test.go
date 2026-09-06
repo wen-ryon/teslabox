@@ -54,6 +54,9 @@ func TestLoad(t *testing.T) {
 	if cfg.MaintenanceStatePath != "/var/lib/teslabox-system/maintenance.json" || cfg.TeslaTimeZone != "Asia/Shanghai" {
 		t.Errorf("maintenance/timezone config = %q, %q", cfg.MaintenanceStatePath, cfg.TeslaTimeZone)
 	}
+	if cfg.OnboardingStatePath != "/var/lib/teslabox-system/onboarding.json" {
+		t.Errorf("OnboardingStatePath = %q", cfg.OnboardingStatePath)
+	}
 	if cfg.WiFiInterface != "" || cfg.APInterface != "ap0" {
 		t.Errorf("network interfaces = %q, %q", cfg.WiFiInterface, cfg.APInterface)
 	}

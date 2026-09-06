@@ -327,6 +327,9 @@ func TestManagerStatusDiscoversDirectlyWrittenMediaFromSnapshot(t *testing.T) {
 	if source.scanCalls != 1 || source.released != 1 || len(status.Assets) != 2 {
 		t.Fatalf("snapshot calls = %d/%d, assets = %#v", source.scanCalls, source.released, status.Assets)
 	}
+	if !status.MusicPartitionKnown || status.MusicPartitionAvailable {
+		t.Fatalf("music partition status = known:%v available:%v", status.MusicPartitionKnown, status.MusicPartitionAvailable)
+	}
 	for _, asset := range status.Assets {
 		if !asset.External || !asset.Applied || asset.Pending || asset.PendingDelete {
 			t.Fatalf("direct asset = %#v", asset)
@@ -359,6 +362,9 @@ func TestManagerScansMusicPartitionRecursivelyFromReadOnlySnapshot(t *testing.T)
 	}
 	if source.scanCalls != 1 || source.released != 1 || len(status.Assets) != 2 {
 		t.Fatalf("snapshot calls = %d/%d, assets = %#v", source.scanCalls, source.released, status.Assets)
+	}
+	if !status.MusicPartitionKnown || !status.MusicPartitionAvailable {
+		t.Fatalf("music partition status = known:%v available:%v", status.MusicPartitionKnown, status.MusicPartitionAvailable)
 	}
 	got := []string{status.Assets[0].Name, status.Assets[1].Name}
 	if got[0] != "manual-song.mp3" || got[1] != "热门歌曲/精选/nested-song.mp3" {

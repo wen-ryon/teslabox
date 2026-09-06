@@ -170,12 +170,13 @@ type persistedExportTask struct {
 
 // ExportConfig 限制导出路径、队列和单任务资源占用。
 type ExportConfig struct {
-	FFmpegPath  string
-	OutputDir   string
-	StatePath   string
-	QueueSize   int
-	MaxDuration time.Duration
-	Logger      *slog.Logger
+	FFmpegPath    string
+	OutputDir     string
+	StatePath     string
+	QueueSize     int
+	MaxDuration   time.Duration
+	Logger        *slog.Logger
+	BeginActivity func() func()
 }
 
 type exportRunner interface {
@@ -671,6 +672,10 @@ func (e *Exporter) deleteCompleted(id, operation string) error {
 }
 
 func (e *Exporter) runJob(parent context.Context, job exportJob) {
+	if e.config.BeginActivity != nil {
+		end := e.config.BeginActivity()
+		defer end()
+	}
 	defer func() {
 		job.release()
 		e.mu.Lock()

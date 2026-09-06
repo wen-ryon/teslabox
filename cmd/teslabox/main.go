@@ -19,6 +19,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/driveinit"
+	"github.com/wen-ryon/teslabox/internal/fancontrol"
 	"github.com/wen-ryon/teslabox/internal/gadget"
 	"github.com/wen-ryon/teslabox/internal/hostmigration"
 	"github.com/wen-ryon/teslabox/internal/imageinit"
@@ -27,6 +28,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/mediabundle"
+	"github.com/wen-ryon/teslabox/internal/onboarding"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
@@ -229,6 +231,11 @@ func main() {
 		logger.Error("初始化自动维护设置失败", "error", err)
 		os.Exit(1)
 	}
+	onboardingManager, err := onboarding.New(cfg.OnboardingStatePath)
+	if err != nil {
+		logger.Error("初始化首次引导状态失败", "error", err)
+		os.Exit(1)
+	}
 	deviceAdmin := deviceadmin.New(runner, logger, deviceadmin.NetworkConfig{
 		WiFiInterface: cfg.WiFiInterface,
 		APInterface:   cfg.APInterface,
@@ -245,13 +252,28 @@ func main() {
 		logger.Error("初始化实时合成器失败", "error", err)
 		os.Exit(1)
 	}
+	fanManager, err := fancontrol.New(fancontrol.Config{
+		StatePath:       "/var/lib/teslabox-system/fan-settings.json",
+		PWMChipPath:     "/sys/class/pwm/pwmchip8",
+		TemperaturePath: "/sys/class/thermal/thermal_zone0/temp",
+		PeriodNS:        10000,
+		ActiveLow:       true,
+		PollInterval:    5 * time.Second,
+		Logger:          logger,
+	})
+	if err != nil {
+		logger.Error("初始化风扇设置失败", "error", err)
+		os.Exit(1)
+	}
+	mediaCompositor.SetActivityHook(func() func() { return fanManager.Begin("multi") })
 	mediaExporter, err := media.NewExporter(runner, media.ExportConfig{
-		FFmpegPath:  cfg.FFmpegPath,
-		OutputDir:   filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
-		StatePath:   cfg.ExportStatePath,
-		QueueSize:   cfg.ExportQueueSize,
-		MaxDuration: cfg.ExportMaxDuration,
-		Logger:      logger,
+		FFmpegPath:    cfg.FFmpegPath,
+		OutputDir:     filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
+		StatePath:     cfg.ExportStatePath,
+		QueueSize:     cfg.ExportQueueSize,
+		MaxDuration:   cfg.ExportMaxDuration,
+		Logger:        logger,
+		BeginActivity: func() func() { return fanManager.Begin("export") },
 	})
 	if err != nil {
 		logger.Error("初始化视频导出器失败", "error", err)
@@ -320,10 +342,13 @@ func main() {
 		api.WithUpdateAdmin(updateManager),
 		api.WithMaintenanceAutomation(maintenanceSettings),
 		api.WithDiagnostics(diagnostics.New(runner)),
+		api.WithFanAdmin(fanManager),
+		api.WithOnboardingAdmin(onboardingManager),
 	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 	go deviceAdmin.Run(ctx)
 	go mediaExporter.Run(ctx)
+	go fanManager.Run(ctx)
 	watchReloadSignal(ctx, manager, reloadCh)
 
 	server := &http.Server{

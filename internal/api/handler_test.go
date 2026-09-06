@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/wen-ryon/teslabox/internal/gadget"
+	"github.com/wen-ryon/teslabox/internal/onboarding"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
@@ -532,5 +534,34 @@ func TestStorageStatusIncludesTeslaUSBPhase(t *testing.T) {
 	}
 	if !payload.GadgetStatus.Bound || !payload.GadgetStatus.HostConnected || !payload.GadgetStatus.EnumerationComplete || !payload.GadgetStatus.BusSuspendKnown || !payload.GadgetStatus.BusSuspended || payload.GadgetStatus.UDCState != "configured" || payload.GadgetStatus.CurrentSpeed != "high-speed" {
 		t.Fatalf("GadgetStatus = %#v", payload.GadgetStatus)
+	}
+}
+
+func TestOnboardingRoutesPersistDeviceState(t *testing.T) {
+	t.Parallel()
+	manager, err := onboarding.New(filepath.Join(t.TempDir(), "onboarding.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithOnboardingAdmin(manager))
+
+	complete := httptest.NewRecorder()
+	handler.ServeHTTP(complete, httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/page-complete", nil))
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete status = %d, body = %s", complete.Code, complete.Body.String())
+	}
+
+	dismiss := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/storage-dismiss", strings.NewReader(`{"stable_path":"/dev/disk/by-id/usb-test"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(dismiss, request)
+	if dismiss.Code != http.StatusOK {
+		t.Fatalf("dismiss status = %d, body = %s", dismiss.Code, dismiss.Body.String())
+	}
+
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/api/v1/onboarding", nil))
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"page_guide_complete":true`) || !strings.Contains(read.Body.String(), "/dev/disk/by-id/usb-test") {
+		t.Fatalf("read status = %d, body = %s", read.Code, read.Body.String())
 	}
 }
