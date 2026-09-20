@@ -104,3 +104,64 @@ func TestInitializePWMLeavesMatchingEnabledChannelUntouched(t *testing.T) {
 		}
 	}
 }
+
+func TestInitializePWMConfiguresFreshZeroPeriodChannel(t *testing.T) {
+	chip := t.TempDir()
+	pwm := filepath.Join(chip, "pwm0")
+	if err := os.Mkdir(pwm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"period": "0", "duty_cycle": "0", "enable": "0"} {
+		if err := os.WriteFile(filepath.Join(pwm, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager := &Manager{config: Config{PWMChipPath: chip, PeriodNS: 10000}}
+	if err := manager.initializePWM(); err != nil {
+		t.Fatal(err)
+	}
+	period, err := os.ReadFile(filepath.Join(pwm, "period"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(period) != "10000" {
+		t.Fatalf("period=%q, want 10000", period)
+	}
+}
+
+func TestNewImmediatelyStopsActiveLowFan(t *testing.T) {
+	chip := t.TempDir()
+	pwm := filepath.Join(chip, "pwm0")
+	if err := os.Mkdir(pwm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"period": "1000", "duty_cycle": "0", "enable": "0"} {
+		if err := os.WriteFile(filepath.Join(pwm, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := New(Config{
+		StatePath: filepath.Join(t.TempDir(), "fan.json"), PWMChipPath: chip,
+		TemperaturePath: filepath.Join(t.TempDir(), "temp"), PeriodNS: 1000, ActiveLow: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.available {
+		t.Fatalf("manager unavailable: %s", manager.reason)
+	}
+	duty, err := os.ReadFile(filepath.Join(pwm, "duty_cycle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(duty) != "1000" {
+		t.Fatalf("duty_cycle=%q, want 1000 for active-low stop", duty)
+	}
+	enabled, err := os.ReadFile(filepath.Join(pwm, "enable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(enabled) != "1" {
+		t.Fatalf("enable=%q, want 1", enabled)
+	}
+}

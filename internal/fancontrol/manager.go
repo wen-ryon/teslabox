@@ -65,19 +65,21 @@ type Config struct {
 	PeriodNS        int
 	ActiveLow       bool
 	PollInterval    time.Duration
+	StartupDelay    time.Duration
 	Logger          *slog.Logger
 }
 
 // Manager 合并温度和业务场景请求，并确保输出不突破最大转速限制。
 type Manager struct {
-	config      Config
-	mu          sync.RWMutex
-	settings    Settings
-	available   bool
-	reason      string
-	temperature int
-	output      int
-	activities  map[string]int
+	config       Config
+	mu           sync.RWMutex
+	settings     Settings
+	available    bool
+	reason       string
+	temperature  int
+	output       int
+	activities   map[string]int
+	controlledAt time.Time
 }
 
 // New 创建风扇控制器；硬件不可用不会返回错误，避免影响主服务。
@@ -91,18 +93,29 @@ func New(config Config) (*Manager, error) {
 	if config.PollInterval <= 0 {
 		config.PollInterval = 5 * time.Second
 	}
+	if config.StartupDelay < 0 {
+		return nil, errors.New("风扇启动延迟不能小于零")
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
 	m := &Manager{config: config, settings: DefaultSettings(), activities: make(map[string]int)}
-	if err := m.load(); err != nil {
-		return nil, err
-	}
 	if err := m.initializePWM(); err != nil {
 		m.reason = err.Error()
 		config.Logger.Warn("PWM 风扇不可用，TeslaBox 主链路继续运行", "error", err)
 	} else {
 		m.available = true
+		m.controlledAt = time.Now()
+		// 尽早接管 PWM 并保持停转，避免风扇启动电流与系统开机负载叠加。
+		if err := m.writePWM(0); err != nil {
+			m.available = false
+			m.reason = err.Error()
+			config.Logger.Warn("PWM 风扇初始停转失败，停止后续硬件操作", "error", err)
+		}
+	}
+	// 即使持久化设置损坏，也应先完成硬件接管，避免服务反复重启期间风扇保持满速。
+	if err := m.load(); err != nil {
+		return nil, err
 	}
 	return m, nil
 }
@@ -119,7 +132,21 @@ func (m *Manager) Run(ctx context.Context) {
 	m.mu.RLock()
 	startupPercent := m.settings.MaximumPercent
 	available := m.available
+	controlledAt := m.controlledAt
 	m.mu.RUnlock()
+	if available {
+		remaining := m.config.StartupDelay - time.Since(controlledAt)
+		if remaining > 0 {
+			m.config.Logger.Info("PWM 风扇已由系统接管，启动延迟期间保持停转", "remaining_ms", remaining.Milliseconds())
+			timer := time.NewTimer(remaining)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+		}
+	}
 	// 两线风扇在较低占空比下可能无法自行起转，先以用户设定的绝对上限短暂启动。
 	if available && startupPercent > 0 {
 		if err := m.writePWM(startupPercent); err != nil {
@@ -279,8 +306,17 @@ func (m *Manager) initializePWM() error {
 	if err := os.WriteFile(filepath.Join(pwm, "enable"), []byte("0"), 0200); err != nil && !strings.Contains(strings.ToLower(err.Error()), "invalid argument") {
 		return fmt.Errorf("停用PWM以更新周期: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(pwm, "duty_cycle"), []byte("0"), 0200); err != nil {
-		return fmt.Errorf("重置PWM占空比: %w", err)
+	currentPeriod, periodErr := readInteger(periodPath)
+	currentDuty, dutyErr := readInteger(filepath.Join(pwm, "duty_cycle"))
+	if periodErr != nil || dutyErr != nil {
+		return errors.New("读取PWM当前周期或占空比失败")
+	}
+	// 刚导出的 Rockchip PWM 通道以 period=0、duty_cycle=0 起步；此时再次写 duty_cycle=0 会返回 EINVAL，必须先设置有效周期。
+	// 已有周期缩短且旧占空比超过新周期时才需要先归零，避免违反 duty_cycle <= period 的内核约束。
+	if currentPeriod > 0 && currentDuty > m.config.PeriodNS {
+		if err := os.WriteFile(filepath.Join(pwm, "duty_cycle"), []byte("0"), 0200); err != nil {
+			return fmt.Errorf("缩短周期前重置PWM占空比: %w", err)
+		}
 	}
 	if err := os.WriteFile(periodPath, []byte(strconv.Itoa(m.config.PeriodNS)), 0200); err != nil {
 		return fmt.Errorf("设置PWM周期: %w", err)

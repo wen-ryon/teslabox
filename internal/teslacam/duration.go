@@ -15,16 +15,30 @@ type mp4Box struct {
 }
 
 func readMP4Duration(path string) (float64, error) {
+	duration, _, err := readMP4DurationProof(path)
+	return duration, err
+}
+
+func readMP4DurationProof(path string) (float64, *durationProof, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	moov, err := findMP4Box(file, 0, info.Size(), "moov")
+	reader := &proofReader{source: &durationPageReader{source: file, size: info.Size(), pages: make(map[int64][]byte)}, proof: durationProof{size: info.Size()}}
+	duration, err := readMP4DurationFrom(reader, info.Size())
+	if err != nil || reader.overflow {
+		return duration, nil, err
+	}
+	return duration, &reader.proof, nil
+}
+
+func readMP4DurationFrom(file io.ReaderAt, size int64) (float64, error) {
+	moov, err := findMP4Box(file, 0, size, "moov")
 	if err != nil {
 		return 0, err
 	}

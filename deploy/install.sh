@@ -14,6 +14,8 @@ MT7922_BLUETOOTH_ARCHIVE="teslabox-mt7922-bluetooth-rock3a-5.10.160teslabox2.tar
 MT7922_BLUETOOTH_SHA256="482a41aadad95fa8bf3b3df06e42ea2e374c5788442d7be39449076500638fd5"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/history.json"
+UPDATE_BETA_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/beta/latest.json"
+UPDATE_BETA_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/beta/history.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
 RADXA_KEYRING_VERSION="0.2.0"
 RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
@@ -411,8 +413,10 @@ for REQUIRED_PAYLOAD_FILE in \
     systemd/teslabox.service \
     systemd/teslabox-update.service \
     systemd/teslabox-ap.service \
+    systemd/teslabox-fan-early.service \
     udev/99-teslabox.rules \
     scripts/teslabox-ap-setup.sh \
+    scripts/teslabox-fan-early.sh \
     scripts/install-media-toolchain.sh \
     keyring/radxa-archive-keyring_0.2.0_all.deb \
     media/teslabox-media-debian11-arm64.tar.gz \
@@ -473,13 +477,16 @@ if [ ! -f /etc/teslabox/teslabox.env ]; then
 fi
 
 ENV_TEMP="${WORK_DIR}/teslabox.env.updated"
-awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|PUBLIC_KEY|CHANNEL|BOARD)=/ && !/^TESLABOX_EXPORT_MAX_DURATION=/' \
+awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|BETA_MANIFEST_URL|BETA_CATALOG_URL|PUBLIC_KEY|CHANNEL|CHANNEL_STATE|BOARD)=/ && !/^TESLABOX_EXPORT_MAX_DURATION=/' \
     /etc/teslabox/teslabox.env >"${ENV_TEMP}"
 {
     printf '%s\n' "TESLABOX_UPDATE_MANIFEST_URL=${UPDATE_MANIFEST_URL}"
     printf '%s\n' "TESLABOX_UPDATE_CATALOG_URL=${UPDATE_CATALOG_URL}"
+    printf '%s\n' "TESLABOX_UPDATE_BETA_MANIFEST_URL=${UPDATE_BETA_MANIFEST_URL}"
+    printf '%s\n' "TESLABOX_UPDATE_BETA_CATALOG_URL=${UPDATE_BETA_CATALOG_URL}"
     printf '%s\n' "TESLABOX_UPDATE_PUBLIC_KEY=${UPDATE_PUBLIC_KEY}"
     printf '%s\n' 'TESLABOX_UPDATE_CHANNEL=stable'
+    printf '%s\n' 'TESLABOX_UPDATE_CHANNEL_STATE=/var/lib/teslabox-system/update-channel.json'
     printf '%s\n' 'TESLABOX_UPDATE_BOARD=radxa-rock-3a'
     printf '%s\n' 'TESLABOX_EXPORT_MAX_DURATION=0s'
 } >>"${ENV_TEMP}"
@@ -489,8 +496,10 @@ log "安装 systemd、udev 和 AP 恢复组件"
 install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox.service" /etc/systemd/system/teslabox.service
 install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-update.service" /etc/systemd/system/teslabox-update.service
 install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-ap.service" /etc/systemd/system/teslabox-ap.service
+install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-fan-early.service" /etc/systemd/system/teslabox-fan-early.service
 install -m 0644 "${PAYLOAD_DIR}/udev/99-teslabox.rules" /etc/udev/rules.d/99-teslabox.rules
 install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-ap-setup.sh" /usr/local/libexec/teslabox-ap-setup.sh
+install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-fan-early.sh" /usr/local/libexec/teslabox-fan-early.sh
 
 log "停用 Radxa 原厂 USB Gadget 服务"
 for GADGET_SERVICE in radxa-adbd.service radxa-usbnet.service; do
@@ -508,7 +517,7 @@ done
 systemctl disable --now teslabox-gadget.service >/dev/null 2>&1 || true
 systemctl daemon-reload
 udevadm control --reload-rules
-systemctl enable avahi-daemon.service teslabox.service >/dev/null
+systemctl enable avahi-daemon.service teslabox-fan-early.service teslabox.service >/dev/null
 
 network_env_value() {
     sed -n "s/^$1=//p" /etc/teslabox/teslabox.env | sed -n '1p'

@@ -62,6 +62,21 @@ func main() {
 		}
 		os.Exit(1)
 	}
+	// 风扇控制必须先于存储、网络和媒体初始化接管硬件，避免启动负载叠加。
+	fanManager, err := fancontrol.New(fancontrol.Config{
+		StatePath:       "/var/lib/teslabox-system/fan-settings.json",
+		PWMChipPath:     "/sys/class/pwm/pwmchip8",
+		TemperaturePath: "/sys/class/thermal/thermal_zone0/temp",
+		PeriodNS:        10000,
+		ActiveLow:       true,
+		PollInterval:    5 * time.Second,
+		StartupDelay:    20 * time.Second,
+		Logger:          logger,
+	})
+	if err != nil {
+		logger.Error("初始化风扇设置失败", "error", err)
+		os.Exit(1)
+	}
 	spacePolicy, err := storagepolicy.NewSnapshotReservePolicy(cfg.MinFreeBytes, cfg.MinFreePercent, cfg.InitializationHeadroomBytes)
 	if err != nil {
 		logger.Error("初始化快照空间策略失败", "error", err)
@@ -94,6 +109,21 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
+	fanMigrationCtx, fanMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	fanComponentsChanged, fanMigrationErr := hostmigration.EnsureFanEarlyComponents(
+		fanMigrationCtx,
+		hostmigration.FanComponentPaths{
+			Script: "/usr/local/libexec/teslabox-fan-early.sh",
+			Unit:   "/etc/systemd/system/teslabox-fan-early.service",
+		},
+		runner,
+	)
+	fanMigrationCancel()
+	if fanMigrationErr != nil {
+		logger.Warn("无法安装早期风扇控制组件，主程序内风扇控制继续生效", "error", fanMigrationErr)
+	} else if fanComponentsChanged {
+		logger.Info("已安装早期风扇控制组件，将在下次开机提前停止风扇")
+	}
 	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	udevMigrated, migrationErr := hostmigration.RemoveLegacyUdevSignal(
 		migrationCtx,
@@ -196,6 +226,12 @@ func main() {
 	})
 	guardedGadget := gadget.NewGuardedLifecycle(gadgetManager, maintenanceGuard)
 	manager := service.NewManager(cfg, detector, inspector, prober, mounter, guardedGadget, snapshotManager, teslacam.NewScanner(teslaTimeLocation), logger, maintenanceGuard)
+	manager.ConfigureSpaceRecovery("/var/lib/teslabox-system/space-recovery.once", func(parent context.Context) error {
+		rebootCtx, cancel := context.WithTimeout(parent, 10*time.Second)
+		defer cancel()
+		_, err := runner.Run(rebootCtx, "systemctl", "--no-block", "reboot")
+		return err
+	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -252,19 +288,6 @@ func main() {
 		logger.Error("初始化实时合成器失败", "error", err)
 		os.Exit(1)
 	}
-	fanManager, err := fancontrol.New(fancontrol.Config{
-		StatePath:       "/var/lib/teslabox-system/fan-settings.json",
-		PWMChipPath:     "/sys/class/pwm/pwmchip8",
-		TemperaturePath: "/sys/class/thermal/thermal_zone0/temp",
-		PeriodNS:        10000,
-		ActiveLow:       true,
-		PollInterval:    5 * time.Second,
-		Logger:          logger,
-	})
-	if err != nil {
-		logger.Error("初始化风扇设置失败", "error", err)
-		os.Exit(1)
-	}
 	mediaCompositor.SetActivityHook(func() func() { return fanManager.Begin("multi") })
 	mediaExporter, err := media.NewExporter(runner, media.ExportConfig{
 		FFmpegPath:    cfg.FFmpegPath,
@@ -306,7 +329,8 @@ func main() {
 	}
 	updateManager, err := updater.New(updater.Config{
 		ManifestURL: cfg.UpdateManifestURL, CatalogURL: cfg.UpdateCatalogURL, PublicKey: cfg.UpdatePublicKey,
-		Channel: cfg.UpdateChannel, Board: cfg.UpdateBoard,
+		BetaManifestURL: cfg.UpdateBetaManifestURL, BetaCatalogURL: cfg.UpdateBetaCatalogURL,
+		Channel: cfg.UpdateChannel, ChannelStatePath: cfg.UpdateChannelStatePath, Board: cfg.UpdateBoard,
 		CurrentVersion: buildversion.Version, CurrentCommit: buildversion.Commit,
 		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
 		ResultPath: cfg.UpdateResultPath, MaximumSize: cfg.UpdateMaxBytes, Logger: logger,

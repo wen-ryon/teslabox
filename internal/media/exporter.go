@@ -70,6 +70,9 @@ const (
 type ExportRequest struct {
 	Mode            ExportMode        `json:"mode,omitempty"`
 	SessionID       string            `json:"session_id"`
+	SnapshotID      string            `json:"snapshot_id,omitempty"`
+	RangeStartAt    *time.Time        `json:"range_start_at,omitempty"`
+	RangeEndAt      *time.Time        `json:"range_end_at,omitempty"`
 	MomentIDs       []string          `json:"moment_ids,omitempty"`
 	StartSeconds    float64           `json:"start_seconds"`
 	DurationSeconds float64           `json:"duration_seconds"`
@@ -131,6 +134,7 @@ type SourceExportFile struct {
 
 // ExportSource 固定任务创建时的只读快照和完整录像时间轴。
 type ExportSource struct {
+	MediaContext context.Context
 	SessionStart time.Time
 	SessionEnd   time.Time
 	CanvasWidth  int
@@ -691,6 +695,13 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 	}
 	timeout := exportTimeout(job.request, job.source)
 	ctx, cancel := context.WithTimeout(parent, timeout)
+	if job.source.MediaContext != nil {
+		stop := context.AfterFunc(job.source.MediaContext, cancel)
+		defer stop()
+		if job.source.MediaContext.Err() != nil {
+			cancel()
+		}
+	}
 	e.cancels[job.id] = cancel
 	now := time.Now()
 	task.State = ExportRunning

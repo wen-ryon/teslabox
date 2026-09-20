@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$PackageUrl,
     [Parameter(Mandatory = $true)][string]$PrivateKey,
+    [ValidateSet("stable", "beta")][string]$Channel = "stable",
     [string]$NotesFile = "",
     [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
     [string]$OutputDirectory = "dist\update",
@@ -84,13 +85,22 @@ $arguments = @(
     "-package", $binary,
     "-package-url", $PackageUrl,
     "-version", $Version,
+    "-channel", $Channel,
     "-output", $manifest
 )
 if ($NotesFile) {
     $arguments += @("-notes-file", $NotesFile)
 }
 $manifestGOCACHE = $env:GOCACHE
+$manifestGOOS = $env:GOOS
+$manifestGOARCH = $env:GOARCH
+$manifestCGO = $env:CGO_ENABLED
 try {
+    # 发布包必须交叉编译为 Linux/ARM64；签名工具则必须使用当前 Windows 宿主架构执行。
+    # 不依赖调用终端遗留的 GOOS/GOARCH，避免 go run 生成无法在本机启动的交叉编译程序。
+    $env:GOOS = (go env GOHOSTOS).Trim()
+    $env:GOARCH = (go env GOHOSTARCH).Trim()
+    $env:CGO_ENABLED = "1"
     $env:GOCACHE = Join-Path $root ".gocache"
     & go @arguments
     if ($LASTEXITCODE -ne 0) {
@@ -98,6 +108,9 @@ try {
     }
 } finally {
     $env:GOCACHE = $manifestGOCACHE
+    $env:GOOS = $manifestGOOS
+    $env:GOARCH = $manifestGOARCH
+    $env:CGO_ENABLED = $manifestCGO
 }
 Copy-Item -Force $manifest $versionManifest
 

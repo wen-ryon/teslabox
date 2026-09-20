@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,12 @@ type Controller interface {
 	Refresh(ctx context.Context) error
 	Scan(ctx context.Context) error
 	ActivateMedia(ctx context.Context) error
+}
+
+type thumbnailCache interface {
+	CachedThumbnail(string) ([]byte, time.Time, bool)
+	HasCachedThumbnail(string) bool
+	StoreCachedThumbnail(string, []byte) error
 }
 
 // DeviceAdmin 定义设置中心需要的无线和电源管理能力。
@@ -129,6 +136,7 @@ type ExportAdmin interface {
 // UpdateAdmin 定义设置中心所需的签名更新能力。
 type UpdateAdmin interface {
 	Status() updater.Status
+	SetChannel(string) (updater.Status, error)
 	Check(context.Context) (updater.Status, error)
 	History(context.Context) (updater.ReleaseHistory, error)
 	Select(context.Context, string) (updater.Status, error)
@@ -241,6 +249,7 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		option(&settings)
 	}
 	mux := http.NewServeMux()
+	sessionCatalog := &sessionIndex{}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -258,18 +267,56 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		writeVideoGroupList(w, r, controller.Snapshot().Videos)
 	})
 	mux.HandleFunc("GET /api/v1/video-sessions", func(w http.ResponseWriter, r *http.Request) {
-		activateMedia(controller, logger, r.Context())
-		writeVideoSessionList(w, r, controller.Snapshot().Videos)
+		if cache, ok := controller.(interface {
+			CachedMedia(bool) service.CachedMediaIndex
+		}); ok {
+			cached := cache.CachedMedia(r.URL.Query().Get("metadata_only") != "true")
+			if cached.ID != "" {
+				filterCachedThumbnails(controller, cached.Videos)
+				writeVideoSessionPage(w, r, sessionCatalog.getList(cached.ID, cached.Videos, false), cached.ID)
+				return
+			}
+		}
+		// 时长轮询只读取现有内存索引，不因页面请求创建或修复磁盘快照。
+		if r.URL.Query().Get("metadata_only") != "true" {
+			activateMedia(controller, logger, r.Context())
+		}
+		state := controller.Snapshot()
+		id := ""
+		if state.MediaSnapshot != nil {
+			id = state.MediaSnapshot.ID
+		}
+		windowed := r.URL.Query().Get("clip_type") == "recent" && r.URL.Query().Get("windowed") == "true"
+		writeVideoSessionPage(w, r, sessionCatalog.getList(id, state.Videos, windowed), id)
 	})
 	mux.HandleFunc("GET /api/v1/video-sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		activateMedia(controller, logger, r.Context())
-		writeVideoSession(w, r, controller.Snapshot().Videos)
+		state, release := controller.AcquireMediaSnapshot()
+		defer release()
+		if state.MediaSnapshot == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用，请稍后刷新录像"})
+			return
+		}
+		if !recentSnapshotMatches(r.PathValue("id"), r.URL.Query().Get("snapshot_id"), state.MediaSnapshot.ID) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "最近录像已更新或循环覆盖，请刷新列表后重新打开"})
+			return
+		}
+		if !checkRequestedSnapshot(w, r, state) {
+			return
+		}
+		for _, session := range sessionCatalog.getList(state.MediaSnapshot.ID, state.Videos, isRecentWindow(r.PathValue("id"))) {
+			if session.ID == r.PathValue("id") {
+				writeSessionDetail(w, cloneSessionForDuration(session), state.MediaSnapshot.MountPath, state.MediaSnapshot.ID)
+				return
+			}
+		}
+		http.NotFound(w, r)
 	})
 	mux.HandleFunc("GET /api/v1/thumbnails/{id}", func(w http.ResponseWriter, r *http.Request) {
 		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
-		serveThumbnail(w, r, state)
+		serveThumbnail(w, r, state, controller, logger)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
 		if settings.fanAdmin != nil {
@@ -611,6 +658,20 @@ func registerUpdateRoutes(mux *http.ServeMux, admin UpdateAdmin, gadget GadgetAd
 	mux.HandleFunc("GET /api/v1/update", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, admin.Status())
 	})
+	mux.HandleFunc("POST /api/v1/update/channel", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Channel string `json:"channel"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		status, err := admin.SetChannel(request.Channel)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
 	mux.HandleFunc("POST /api/v1/update/check", func(w http.ResponseWriter, r *http.Request) {
 		status, err := admin.Check(r.Context())
 		if err != nil {
@@ -736,16 +797,38 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
 			return
 		}
+		if !recentSnapshotMatches(request.SessionID, request.SnapshotID, state.MediaSnapshot.ID) || request.SnapshotID != "" && request.SnapshotID != state.MediaSnapshot.ID {
+			release()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "最近录像快照已更新，请重新打开该时间段后选择导出范围"})
+			return
+		}
 		session, found := findVideoSession(state.Videos, request.SessionID)
 		if !found {
 			release()
 			http.NotFound(w, r)
 			return
 		}
+		wallRange := request.RangeStartAt != nil || request.RangeEndAt != nil
+		if wallRange && !session.RecentWindow {
+			release()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "拍摄时间范围只支持最近录像"})
+			return
+		}
+		if !wallRange {
+			refineVideoSessionDurations(state.MediaSnapshot.MountPath, &session)
+		}
+		if !wallRange && request.Mode != media.ExportModeSource && !exportTimelineVerified(session, request) {
+			release()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "录像包含无法确认时长的文件，暂不能安全导出，请刷新录像后重试"})
+			return
+		}
 		var source media.ExportSource
 		var estimated uint64
 		var err error
-		if request.Mode == media.ExportModeSource {
+		if wallRange {
+			source, err = recentRangeSource(r.Context(), state.MediaSnapshot.MountPath, state.Videos, &request)
+			estimated = media.EstimateExportWorkingBytes(request)
+		} else if request.Mode == media.ExportModeSource {
 			source, err = sourceFileExportSource(state.MediaSnapshot.MountPath, session, request)
 			estimated = media.EstimateSourceExportBytes(source)
 		} else {
@@ -764,6 +847,7 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
 			return
 		}
+		source.MediaContext = state.MediaContext
 		task, err := admin.Create(request, source, release)
 		if err != nil {
 			writeExportError(w, logger, "创建导出任务失败", err)
@@ -889,6 +973,9 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
+		if !checkRequestedSnapshot(w, r, state) {
+			return
+		}
 		if state.MediaSnapshot == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
 			return
@@ -905,6 +992,7 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 			http.NotFound(w, r)
 			return
 		}
+		refineVideoGroupDurations(state.MediaSnapshot.MountPath, selected)
 		startSeconds := 0.0
 		if value := r.URL.Query().Get("start_seconds"); value != "" {
 			parsed, parseErr := strconv.ParseFloat(value, 64)
@@ -1043,6 +1131,9 @@ func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector Me
 		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
 		defer release()
+		if !checkRequestedSnapshot(w, r, state) {
+			return
+		}
 		if state.MediaSnapshot == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "媒体快照暂不可用"})
 			return
@@ -1595,6 +1686,7 @@ func normalizeRecordingSessionIDs(values []string) ([]string, error) {
 
 func recordingDeleteSelection(videos []teslacam.Video, sessionIDs []string) ([]videoSession, []string, error) {
 	available := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)
+	available = append(available, recentWindows(available)...)
 	byID := make(map[string]videoSession, len(available))
 	for _, session := range available {
 		byID[session.ID] = session
@@ -1940,6 +2032,28 @@ func writeDeviceAdminError(w http.ResponseWriter, logger *slog.Logger, message s
 }
 
 func serveVideo(w http.ResponseWriter, r *http.Request, state service.Snapshot, download bool) {
+	if state.MediaContext != nil {
+		if state.MediaContext.Err() != nil {
+			http.Error(w, "空间保护已暂停播放，请稍后重试", http.StatusServiceUnavailable)
+			return
+		}
+		// 打断慢客户端的阻塞写入，退出后再由原有 defer 释放快照租约。
+		controller := http.NewResponseController(w)
+		done := make(chan struct{})
+		stop := context.AfterFunc(state.MediaContext, func() {
+			defer close(done)
+			_ = controller.SetWriteDeadline(time.Now())
+		})
+		defer func() {
+			if !stop() {
+				<-done
+			}
+			_ = controller.SetWriteDeadline(time.Time{})
+		}()
+	}
+	if !checkRequestedSnapshot(w, r, state) {
+		return
+	}
 	if state.MediaSnapshot == nil {
 		http.Error(w, "媒体快照暂不可用", http.StatusServiceUnavailable)
 		return
@@ -2000,9 +2114,9 @@ func snapshotFilePath(root, relative string) (string, error) {
 	return name, nil
 }
 
-func serveThumbnail(w http.ResponseWriter, r *http.Request, state service.Snapshot) {
+func serveThumbnail(w http.ResponseWriter, r *http.Request, state service.Snapshot, controller Controller, logger *slog.Logger) {
 	if state.MediaSnapshot == nil {
-		http.Error(w, "媒体快照暂不可用", http.StatusServiceUnavailable)
+		serveCachedThumbnail(w, r, controller)
 		return
 	}
 	relative, found := findThumbnail(state.Videos, r.PathValue("id"))
@@ -2034,9 +2148,63 @@ func serveThumbnail(w http.ResponseWriter, r *http.Request, state service.Snapsh
 		http.Error(w, "缩略图暂不可用", http.StatusServiceUnavailable)
 		return
 	}
+	if info.Size() <= 0 || info.Size() > 4<<20 {
+		http.Error(w, "缩略图大小无效", http.StatusServiceUnavailable)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 4<<20+1))
+	if err != nil || len(data) > 4<<20 {
+		http.Error(w, "缩略图暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	if cache, ok := controller.(thumbnailCache); ok {
+		if err := cache.StoreCachedThumbnail(r.PathValue("id"), data); err != nil {
+			logger.Warn("缓存录像缩略图失败", "thumbnail_id", r.PathValue("id"), "error", err)
+		}
+	}
+	writeThumbnail(w, r, filepath.Base(relative), info.ModTime(), data)
+}
+
+func serveCachedThumbnail(w http.ResponseWriter, r *http.Request, controller Controller) {
+	cache, ok := controller.(thumbnailCache)
+	if !ok {
+		http.Error(w, "媒体快照暂不可用", http.StatusServiceUnavailable)
+		return
+	}
+	data, modified, found := cache.CachedThumbnail(r.PathValue("id"))
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	writeThumbnail(w, r, r.PathValue("id")+".png", modified, data)
+}
+
+func writeThumbnail(w http.ResponseWriter, r *http.Request, name string, modified time.Time, data []byte) {
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "private, max-age=30")
-	http.ServeContent(w, r, filepath.Base(relative), info.ModTime(), file)
+	w.Header().Set("Cache-Control", "private, max-age=300, immutable")
+	http.ServeContent(w, r, name, modified, bytes.NewReader(data))
+}
+
+func filterCachedThumbnails(controller Controller, videos []teslacam.Video) {
+	cache, ok := controller.(thumbnailCache)
+	known := make(map[string]bool)
+	for index := range videos {
+		id := videos[index].ThumbnailID
+		if !ok || id == "" {
+			videos[index].ThumbnailID = ""
+			videos[index].ThumbnailPath = ""
+			continue
+		}
+		available, checked := known[id]
+		if !checked {
+			available = cache.HasCachedThumbnail(id)
+			known[id] = available
+		}
+		if !available {
+			videos[index].ThumbnailID = ""
+			videos[index].ThumbnailPath = ""
+		}
+	}
 }
 
 func findThumbnail(videos []teslacam.Video, id string) (string, bool) {
@@ -2087,27 +2255,35 @@ type videoGroup struct {
 }
 
 type videoSession struct {
-	ID            string                  `json:"id"`
-	ClipType      string                  `json:"clip_type"`
-	Event         string                  `json:"event,omitempty"`
-	EventMetadata *teslacam.EventMetadata `json:"event_metadata,omitempty"`
-	ThumbnailID   string                  `json:"-"`
-	ThumbnailURL  string                  `json:"thumbnail_url,omitempty"`
-	StartAt       time.Time               `json:"start_at"`
-	EndAt         time.Time               `json:"end_at"`
-	Duration      float64                 `json:"duration_seconds"`
-	SegmentCount  int                     `json:"segment_count"`
-	TotalSize     int64                   `json:"total_size"`
-	Complete      bool                    `json:"complete"`
-	Cameras       []string                `json:"cameras"`
-	Moments       []videoGroup            `json:"moments,omitempty"`
+	Cached          bool                    `json:"cached,omitempty"`
+	Coverage        []recentCoverage        `json:"coverage,omitempty"`
+	SnapshotID      string                  `json:"snapshot_id,omitempty"`
+	RecentWindow    bool                    `json:"recent_window,omitempty"`
+	DurationState   string                  `json:"duration_state"`
+	DurationPending bool                    `json:"duration_pending"`
+	ID              string                  `json:"id"`
+	ClipType        string                  `json:"clip_type"`
+	Event           string                  `json:"event,omitempty"`
+	EventMetadata   *teslacam.EventMetadata `json:"event_metadata,omitempty"`
+	ThumbnailID     string                  `json:"-"`
+	ThumbnailURL    string                  `json:"thumbnail_url,omitempty"`
+	StartAt         time.Time               `json:"start_at"`
+	EndAt           time.Time               `json:"end_at"`
+	Duration        float64                 `json:"duration_seconds"`
+	SegmentCount    int                     `json:"segment_count"`
+	TotalSize       int64                   `json:"total_size"`
+	Complete        bool                    `json:"complete"`
+	Cameras         []string                `json:"cameras"`
+	Moments         []videoGroup            `json:"moments,omitempty"`
 }
 
 type videoSessionListResponse struct {
-	Items  []videoSession `json:"items"`
-	Total  int            `json:"total"`
-	Limit  int            `json:"limit"`
-	Offset int            `json:"offset"`
+	Cached     bool           `json:"cached,omitempty"`
+	SnapshotID string         `json:"snapshot_id"`
+	Items      []videoSession `json:"items"`
+	Total      int            `json:"total"`
+	Limit      int            `json:"limit"`
+	Offset     int            `json:"offset"`
 }
 
 type videoGroupListResponse struct {
@@ -2182,12 +2358,19 @@ func writeVideoGroupList(w http.ResponseWriter, r *http.Request, videos []teslac
 	})
 }
 
-func writeVideoSessionList(w http.ResponseWriter, r *http.Request, videos []teslacam.Video) {
-	query := r.URL.Query()
+func writeVideoSessionList(w http.ResponseWriter, r *http.Request, videos []teslacam.Video, snapshotIDs ...string) {
 	sessions := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)
+	writeVideoSessionPage(w, r, sessions, snapshotIDs...)
+}
+
+func writeVideoSessionPage(w http.ResponseWriter, r *http.Request, sessions []videoSession, snapshotIDs ...string) {
+	query := r.URL.Query()
 	filtered := make([]videoSession, 0, len(sessions))
 	for _, session := range sessions {
-		if value := query.Get("clip_type"); value != "" && session.ClipType != value {
+		if ids := query["session_id"]; len(ids) > 0 && !slices.Contains(ids, session.ID) {
+			continue
+		}
+		if value := query.Get("clip_type"); value == "archive" && session.ClipType != "saved" && session.ClipType != "sentry" || value != "" && value != "archive" && session.ClipType != value {
 			continue
 		}
 		if value := query.Get("event"); value != "" && session.Event != value {
@@ -2206,27 +2389,66 @@ func writeVideoSessionList(w http.ResponseWriter, r *http.Request, videos []tesl
 	end := min(offset+limit, len(filtered))
 	items := append([]videoSession(nil), filtered[offset:end]...)
 	for index := range items {
+		items[index] = cloneSessionForDuration(items[index])
+		if len(snapshotIDs) > 0 {
+			items[index].SnapshotID = snapshotIDs[0]
+			items[index].Cached = strings.HasPrefix(snapshotIDs[0], "cache:")
+		}
+		if index < 6 && items[index].ClipType != "recent" {
+			for _, moment := range items[index].Moments {
+				teslacam.PrioritizeDurations(moment.Videos)
+			}
+		}
+		refineVideoSessionDurations("", &items[index])
+		if items[index].RecentWindow {
+			items[index].Coverage = recentSessionCoverage(items[index])
+		}
 		items[index].Moments = nil
 	}
 	if items == nil {
 		items = []videoSession{}
 	}
+	id := ""
+	if len(snapshotIDs) > 0 {
+		id = snapshotIDs[0]
+	}
 	writeJSON(w, http.StatusOK, videoSessionListResponse{
-		Items: items, Total: len(filtered), Limit: limit, Offset: offset,
+		Cached:     strings.HasPrefix(id, "cache:"),
+		SnapshotID: id,
+		Items:      items, Total: len(filtered), Limit: limit, Offset: offset,
 	})
 }
 
-func writeVideoSession(w http.ResponseWriter, r *http.Request, videos []teslacam.Video) {
+func writeVideoSession(w http.ResponseWriter, r *http.Request, videos []teslacam.Video, snapshotRoot string, snapshotIDs ...string) {
 	session, found := findVideoSession(videos, r.PathValue("id"))
 	if found {
+		if len(snapshotIDs) > 0 {
+			session.SnapshotID = snapshotIDs[0]
+		}
+		// 列表可以用切片时长快速展示；播放器和导出范围必须共享精确时间轴，
+		// 否则尾段、缺帧或非一分钟片段会导致跳转、播放进度和导出范围错位。
+		if snapshotRoot != "" {
+			refineVideoSessionDurations(snapshotRoot, &session)
+		}
 		writeJSON(w, http.StatusOK, session)
 		return
 	}
 	http.NotFound(w, r)
 }
 
+// writeSessionDetail 复用快照分组，但精确时长仍以文件校验结果为准，不把列表估算传给播放器。
+func writeSessionDetail(w http.ResponseWriter, session videoSession, root, snapshotID string) {
+	session.SnapshotID = snapshotID
+	refineVideoSessionDurations(root, &session)
+	writeJSON(w, http.StatusOK, session)
+}
+
 func findVideoSession(videos []teslacam.Video, id string) (videoSession, bool) {
-	for _, session := range groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap) {
+	sessions := groupVideoSessions(groupVideos(videos, videoGroupTolerance), sessionContinuityGap)
+	if isRecentWindow(id) {
+		sessions = recentWindows(sessions)
+	}
+	for _, session := range sessions {
 		if session.ID == id {
 			return session, true
 		}
@@ -2269,6 +2491,41 @@ func recordingSessionPaths(session videoSession) ([]string, error) {
 	return paths, nil
 }
 
+// exportTimelineVerified 校验范围之前的时间轴和范围内的所选画面，避免无关尾段阻止导出。
+func exportTimelineVerified(session videoSession, request media.ExportRequest) bool {
+	switch request.Layout {
+	case "composite6":
+		request.Cameras = []string{"left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"}
+	case "composite4a", "composite4b":
+		request.Cameras = []string{"front", "back", "left_repeater", "right_repeater"}
+	case "composite3":
+		request.Cameras = []string{"front", "right_repeater", "left_repeater"}
+	}
+	end := request.StartSeconds + request.DurationSeconds
+	if math.IsNaN(end) || math.IsInf(end, 0) || request.StartSeconds < 0 || request.DurationSeconds <= 0 {
+		return false
+	}
+	for _, moment := range session.Moments {
+		if moment.TimelineStart >= end {
+			break
+		}
+		known := false
+		for _, video := range moment.Videos {
+			if video.DurationState == "verified" {
+				known = true
+			}
+			if moment.TimelineStart+moment.Duration > request.StartSeconds && video.DurationState != "verified" &&
+				(len(request.Cameras) == 0 || slices.Contains(request.Cameras, video.Camera)) {
+				return false
+			}
+		}
+		if !known {
+			return false
+		}
+	}
+	return true
+}
+
 func exportSource(snapshotRoot string, session videoSession) (media.ExportSource, error) {
 	sessionEnd := session.EndAt
 	if session.Duration > 0 {
@@ -2278,6 +2535,9 @@ func exportSource(snapshotRoot string, session videoSession) (media.ExportSource
 	for _, moment := range session.Moments {
 		momentStart := session.StartAt.Add(time.Duration(moment.TimelineStart * float64(time.Second)))
 		for _, video := range moment.Videos {
+			if video.DurationState == "unavailable" {
+				continue
+			}
 			name, err := snapshotVideoPath(snapshotRoot, video.Path)
 			if err != nil {
 				return media.ExportSource{}, err
@@ -2375,33 +2635,74 @@ func groupVideos(videos []teslacam.Video, tolerance time.Duration) []videoGroup 
 		}
 	}
 	for index := range groups {
-		group := &groups[index]
-		slices.SortFunc(group.Videos, func(left, right teslacam.Video) int {
-			return cameraRank(left.Camera) - cameraRank(right.Camera)
-		})
-		latest := group.RecordedAt
-		var endAt time.Time
-		for _, video := range group.Videos {
-			if video.RecordedAt.After(latest) {
-				latest = video.RecordedAt
-			}
-			duration := time.Duration(video.Duration * float64(time.Second))
-			if duration > 0 {
-				videoEnd := video.RecordedAt.Add(duration)
-				if videoEnd.After(endAt) {
-					endAt = videoEnd
-				}
-			}
-		}
-		if endAt.IsZero() {
-			endAt = latest.Add(defaultSegmentDuration)
-		}
-		group.TimeSpreadMS = latest.Sub(group.RecordedAt).Milliseconds()
-		group.EndAt = endAt
-		group.Duration = endAt.Sub(group.RecordedAt).Seconds()
-		group.Complete = len(group.Videos) == 6
+		finalizeVideoGroup(&groups[index])
 	}
 	return groups
+}
+
+func refineVideoGroupDurations(snapshotRoot string, group *videoGroup) {
+	if snapshotRoot == "" {
+		teslacam.ApplyPreviewDurations(group.Videos)
+	} else {
+		teslacam.RefineVideoDurations(snapshotRoot, group.Videos)
+	}
+	finalizeVideoGroup(group)
+}
+
+func refineVideoSessionDurations(snapshotRoot string, session *videoSession) {
+	session.DurationState = "verified"
+	session.DurationPending = false
+	session.EndAt = session.StartAt
+	for index := range session.Moments {
+		group := &session.Moments[index]
+		refineVideoGroupDurations(snapshotRoot, group)
+		for _, video := range group.Videos {
+			if video.DurationState != "verified" && video.DurationState != "unavailable" {
+				session.DurationPending = true
+			}
+			if video.DurationState == "unavailable" {
+				session.DurationState = "unavailable"
+			} else if video.DurationState == "cached" && session.DurationState == "verified" {
+				session.DurationState = "cached"
+			} else if video.DurationState != "verified" && video.DurationState != "cached" && session.DurationState != "unavailable" {
+				session.DurationState = "estimated"
+			}
+		}
+		if group.EndAt.After(session.EndAt) {
+			session.EndAt = group.EndAt
+		}
+	}
+	assignSessionTimeline(session)
+}
+
+func finalizeVideoGroup(group *videoGroup) {
+	slices.SortFunc(group.Videos, func(left, right teslacam.Video) int {
+		return cameraRank(left.Camera) - cameraRank(right.Camera)
+	})
+	latest := group.RecordedAt
+	var endAt time.Time
+	for _, video := range group.Videos {
+		if video.RecordedAt.After(latest) {
+			latest = video.RecordedAt
+		}
+		if video.DurationState == "unavailable" {
+			continue
+		}
+		duration := time.Duration(video.Duration * float64(time.Second))
+		if duration > 0 {
+			videoEnd := video.RecordedAt.Add(duration)
+			if videoEnd.After(endAt) {
+				endAt = videoEnd
+			}
+		}
+	}
+	if endAt.IsZero() {
+		endAt = latest.Add(defaultSegmentDuration)
+	}
+	group.TimeSpreadMS = latest.Sub(group.RecordedAt).Milliseconds()
+	group.EndAt = endAt
+	group.Duration = endAt.Sub(group.RecordedAt).Seconds()
+	group.Complete = len(group.Videos) == 6
 }
 
 func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []videoSession {
@@ -2410,9 +2711,21 @@ func groupVideoSessions(groups []videoGroup, continuityGap time.Duration) []vide
 		return left.RecordedAt.Compare(right.RecordedAt)
 	})
 	sessions := make([]videoSession, 0, len(ordered))
+	byEvent := make(map[[2]string]int)
 	for _, group := range ordered {
-		sessionIndex := matchingSession(sessions, group, continuityGap)
+		key := [2]string{group.ClipType, group.Event}
+		if group.ClipType == "recent" {
+			key[1] = ""
+		}
+		sessionIndex, exists := byEvent[key]
+		if !exists || !sessionAcceptsGroup(sessions[sessionIndex], group, continuityGap) {
+			sessionIndex = -1
+		}
+		if group.ClipType != "recent" && !((group.ClipType == "saved" || group.ClipType == "sentry") && group.Event != "") {
+			sessionIndex = matchingSession(sessions, group, continuityGap)
+		}
 		if sessionIndex < 0 {
+			byEvent[key] = len(sessions)
 			sessions = append(sessions, videoSession{
 				ID: group.ID, ClipType: group.ClipType, Event: group.Event, EventMetadata: group.EventMetadata,
 				ThumbnailID: group.ThumbnailID,
@@ -2521,6 +2834,10 @@ func sessionAcceptsGroup(session videoSession, group videoGroup, continuityGap t
 func matchingGroup(groups []videoGroup, video teslacam.Video, tolerance time.Duration) int {
 	for index := len(groups) - 1; index >= 0; index-- {
 		group := groups[index]
+		// 输入按时间倒序；早建分组最多向前吸收一个容差，超过双倍窗口后无需扫描全部历史。
+		if group.RecordedAt.Sub(video.RecordedAt) > 2*tolerance {
+			break
+		}
 		if group.ClipType != video.ClipType || group.Event != video.Event || groupHasCamera(group, video.Camera) {
 			continue
 		}

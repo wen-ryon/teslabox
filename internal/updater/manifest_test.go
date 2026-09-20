@@ -267,6 +267,97 @@ func TestManagerCheckAllowsNonStableBuildToInstallStableRelease(t *testing.T) {
 	}
 }
 
+func TestManagerSetChannelPersistsSelectionAndUsesBetaSource(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageContent := []byte("beta-package")
+	var stableManifest, betaManifest Manifest
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/stable/latest.json":
+			_ = json.NewEncoder(writer).Encode(stableManifest)
+		case "/beta/latest.json":
+			_ = json.NewEncoder(writer).Encode(betaManifest)
+		case "/teslabox":
+			_, _ = writer.Write(packageContent)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	stableManifest = signedTestManifest(t, privateKey, server.URL+"/teslabox", packageContent)
+	betaManifest = stableManifest
+	betaManifest.Version = "1.2.4"
+	betaManifest.Channel = "beta"
+	if err := betaManifest.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	statePath := filepath.Join(root, "update-channel.json")
+	manager, err := New(Config{
+		ManifestURL: server.URL + "/stable/latest.json", CatalogURL: server.URL + "/stable/history.json",
+		BetaManifestURL: server.URL + "/beta/latest.json", BetaCatalogURL: server.URL + "/beta/history.json",
+		PublicKey: base64.StdEncoding.EncodeToString(publicKey), Channel: "stable", ChannelStatePath: statePath,
+		Board: "radxa-rock-3a", Arch: "arm64", CurrentVersion: "1.2.3", DownloadDir: filepath.Join(root, "updates"),
+		RequestPath: filepath.Join(root, "request.json"), ResultPath: filepath.Join(root, "result.json"), MaximumSize: 1024,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range manager.clients {
+		client.config.HTTPClient = server.Client()
+	}
+	status, err := manager.SetChannel("beta")
+	if err != nil || status.Channel != "beta" || !status.HistoryConfigured {
+		t.Fatalf("SetChannel() = %+v, %v", status, err)
+	}
+	content, err := os.ReadFile(statePath)
+	if err != nil || string(content) != "{\"channel\":\"beta\"}\n" {
+		t.Fatalf("saved channel = %q, %v", content, err)
+	}
+	status, err = manager.Check(context.Background())
+	if err != nil || !status.Available || status.LatestVersion != "1.2.4" || status.Channel != "beta" {
+		t.Fatalf("beta Check() = %+v, %v", status, err)
+	}
+}
+
+func TestManagerCheckReportsMissingBetaPreviewWithoutFailure(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	root := t.TempDir()
+	manager, err := New(Config{
+		ManifestURL: server.URL + "/stable/latest.json", CatalogURL: server.URL + "/stable/history.json",
+		BetaManifestURL: server.URL + "/beta/latest.json", BetaCatalogURL: server.URL + "/beta/history.json",
+		PublicKey: base64.StdEncoding.EncodeToString(publicKey), Channel: "stable", Board: "radxa-rock-3a", Arch: "arm64",
+		CurrentVersion: "1.2.3", DownloadDir: filepath.Join(root, "updates"), RequestPath: filepath.Join(root, "request.json"),
+		ResultPath: filepath.Join(root, "result.json"), MaximumSize: 1024,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range manager.clients {
+		client.config.HTTPClient = server.Client()
+	}
+	if _, err := manager.SetChannel("beta"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Check(context.Background())
+	if err != nil || status.State != StateCurrent || status.Available || status.Message != "内测通道暂未发布可用版本。" {
+		t.Fatalf("Check() = %+v, %v", status, err)
+	}
+	status, err = manager.SetChannel("stable")
+	if err != nil || status.Channel != "stable" || status.Message != "" {
+		t.Fatalf("SetChannel(stable) = %+v, %v", status, err)
+	}
+}
+
 func signedTestManifest(t *testing.T, privateKey ed25519.PrivateKey, packageURL string, content []byte) Manifest {
 	t.Helper()
 	hash := sha256.Sum256(content)

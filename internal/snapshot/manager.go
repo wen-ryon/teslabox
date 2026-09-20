@@ -88,13 +88,14 @@ type Manager struct {
 	config         Config
 	now            func() time.Time
 	space          func(string) (uint64, uint64, error)
+	volumeSpace    func(string) (uint64, uint64, error)
 	cowHintApplied bool
 	mu             sync.Mutex
 }
 
 // New 创建快照管理器，目录本身必须由显式初始化或 systemd 准备完成。
 func New(runner system.Runner, config Config) *Manager {
-	return &Manager{runner: runner, config: config, now: time.Now, space: platformSpace}
+	return &Manager{runner: runner, config: config, now: time.Now, space: platformXFSSpace, volumeSpace: platformSpace}
 }
 
 // Space 检查快照目录所在文件系统是否仍为车端录像保留了安全余量。
@@ -212,7 +213,7 @@ func (m *Manager) CreateRepaired(ctx context.Context) (View, error) {
 	return m.create(ctx, true)
 }
 
-func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (View, error) {
+func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (result View, resultErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -244,20 +245,29 @@ func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (View, err
 
 	cleanup := true
 	loopDevice := ""
+	mountAttempted := false
 	defer func() {
 		if cleanup {
-			canRemoveImage := true
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			// 必须先卸载；losetup -d 可能只设置 autoclear，返回成功并不表示挂载引用已消失。
+			if mountAttempted {
+				if _, err := m.runner.Run(cleanupCtx, "umount", "--", mountPath); err != nil && !isNotMountedError(err) {
+					resultErr = errors.Join(resultErr, fmt.Errorf("清理失败快照挂载: %w", err))
+					return
+				}
+			}
 			if loopDevice != "" {
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				_, detachErr := m.runner.Run(cleanupCtx, "losetup", "--detach", loopDevice)
-				cancel()
-				canRemoveImage = detachErr == nil
+				if err := m.detachLoop(cleanupCtx, loopDevice); err != nil {
+					resultErr = errors.Join(resultErr, err)
+					return
+				}
 			}
-			if canRemoveImage {
-				_ = os.Remove(temporaryImage)
-				_ = os.Remove(finalImage)
+			for _, path := range []string{temporaryImage, finalImage, mountPath} {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					resultErr = errors.Join(resultErr, fmt.Errorf("清理失败快照 %s: %w", path, err))
+				}
 			}
-			_ = os.Remove(mountPath)
 		}
 	}()
 
@@ -288,6 +298,7 @@ func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (View, err
 			return View{}, err
 		}
 	}
+	mountAttempted = true
 	firstMountErr := m.mountReadOnly(ctx, loopDevice+"p1", mountPath)
 	if firstMountErr != nil && repairApplied {
 		return View{}, fmt.Errorf("修复后只读挂载 TeslaCam 快照: %w", firstMountErr)
@@ -323,7 +334,7 @@ func (m *Manager) create(ctx context.Context, repairBeforeMount bool) (View, err
 		}
 	}
 
-	totalBytes, freeBytes, err := platformSpace(mountPath)
+	totalBytes, freeBytes, err := m.volumeSpace(mountPath)
 	if err != nil {
 		return View{}, fmt.Errorf("读取 TeslaCam 虚拟盘容量: %w", err)
 	}

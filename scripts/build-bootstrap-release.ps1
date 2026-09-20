@@ -123,8 +123,10 @@ $files = @{
     "deploy\systemd\teslabox.service" = "systemd\teslabox.service"
     "deploy\systemd\teslabox-update.service" = "systemd\teslabox-update.service"
     "deploy\systemd\teslabox-ap.service" = "systemd\teslabox-ap.service"
+    "deploy\systemd\teslabox-fan-early.service" = "systemd\teslabox-fan-early.service"
     "deploy\udev\99-teslabox.rules" = "udev\99-teslabox.rules"
     "deploy\scripts\teslabox-ap-setup.sh" = "scripts\teslabox-ap-setup.sh"
+    "deploy\scripts\teslabox-fan-early.sh" = "scripts\teslabox-fan-early.sh"
     "deploy\media-toolchain\install.sh" = "scripts\install-media-toolchain.sh"
 }
 foreach ($entry in $files.GetEnumerator()) {

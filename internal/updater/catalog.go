@@ -96,4 +96,5 @@ type ReleaseHistory struct {
 	Configured  bool      `json:"configured"`
 	GeneratedAt string    `json:"generated_at,omitempty"`
 	Releases    []Release `json:"releases"`
+	Message     string    `json:"message,omitempty"`
 }

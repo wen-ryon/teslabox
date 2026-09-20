@@ -155,7 +155,12 @@ let requestedPosition = 0;
 let loadToken = 0;
 let activeDisplay = normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6"));
 let recentSessions = [];
+let sessionOpenSequence = 0;
+let sessionOpening = false;
+let sessionOpenController = null;
 let archivedSessions = [];
+let archivePages = 1;
+let archiveTotal = 0;
 const selectedRecordingSessions = new Set();
 let recordingDeleteInProgress = false;
 let recordingDeleteMode = false;
@@ -205,9 +210,9 @@ let pendingRequestControl = null;
 let pendingRequestControlTimer = 0;
 let loadingSequence = 0;
 const networkLoadingTasks = new Map();
-const pageLoadingTasks = new Map();
 const requestLoadingControls = new Map();
 let networkLoadingTimer = 0;
+let settingsLoadSequence = 0;
 const compatibilitySelects = new Map();
 let compatibilitySelectSequence = 0;
 let compatibilitySelectDocumentObserver = null;
@@ -308,33 +313,6 @@ function startNetworkLoading(message) {
   };
 }
 
-function renderPageLoading() {
-  const root = $("page-loading");
-  const loading = pageLoadingTasks.size > 0 && !appView.hidden;
-  root.hidden = !loading;
-  appView.toggleAttribute("aria-busy", loading);
-  if (loading) $("page-loading-message").textContent = latestLoadingMessage(pageLoadingTasks, "正在读取设备状态…");
-}
-
-function startPageLoading(message) {
-  const token = ++loadingSequence;
-  pageLoadingTasks.set(token, message || "正在读取设备状态…");
-  renderPageLoading();
-  return () => {
-    pageLoadingTasks.delete(token);
-    renderPageLoading();
-  };
-}
-
-async function withPageLoading(message, operation) {
-  const finish = startPageLoading(message);
-  try {
-    return await operation();
-  } finally {
-    finish();
-  }
-}
-
 async function requestResponse(path, options = {}) {
   const {loading = true, loadingMessage, ...fetchOptions} = options;
   const finish = loading ? startNetworkLoading(loadingMessage) : () => {};
@@ -359,7 +337,9 @@ async function request(path, options = {}) {
       message = payload.error || message;
       if (payload.suggestion) message += `；${payload.suggestion}`;
     } catch (_) { /* 保留通用提示 */ }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return null;
   return response.json();
@@ -581,11 +561,14 @@ document.querySelectorAll("[data-close-confirm]").forEach((element) => element.a
 $("confirm-submit").addEventListener("click", () => resolveConfirmation(true));
 $("reboot-button").addEventListener("click", () => requestPower("reboot"));
 $("shutdown-button").addEventListener("click", () => requestPower("shutdown"));
+$("update-channel-stable").addEventListener("click", () => setUpdateChannel("stable"));
+$("update-channel-beta").addEventListener("click", () => setUpdateChannel("beta"));
 $("update-check").addEventListener("click", checkUpdate);
 $("update-history-load").addEventListener("click", loadUpdateHistory);
 $("update-download").addEventListener("click", downloadUpdate);
 $("update-install").addEventListener("click", installUpdate);
-$("filter-form").addEventListener("submit", (event) => { event.preventDefault(); loadSessions(false); });
+$("filter-form").addEventListener("submit", (event) => { event.preventDefault(); archivePages = 1; loadSessions(false); });
+$("load-more").addEventListener("click", () => { if (!state.loading) { archivePages++; loadSessions(true); } });
 $("recording-refresh-interval").value = String(recordingRefreshSeconds);
 renderCompatibilitySelect($("recording-refresh-interval"));
 $("recording-refresh-interval").addEventListener("change", (event) => {
@@ -612,6 +595,14 @@ $("export-range-end").addEventListener("input", () => updateExportRangeFromSlide
 $("export-start-time").addEventListener("change", () => updateExportRangeFromTime("start"));
 $("export-end-time").addEventListener("change", () => updateExportRangeFromTime("end"));
 document.querySelectorAll("[data-export-adjust]").forEach((button) => button.addEventListener("click", () => adjustExportRange(button.dataset.exportAdjust)));
+document.querySelectorAll("[data-export-step]").forEach((button) => button.addEventListener("click", () => {
+  $("export-adjust-step").value = button.dataset.exportStep;
+  document.querySelectorAll("[data-export-step]").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+  document.querySelectorAll("[data-export-adjust]").forEach((item) => {
+    const [edge, direction] = item.dataset.exportAdjust.split(":");
+    item.textContent = `${edge === "start" ? "开始" : "结束"} ${Number(direction) < 0 ? "−" : "+"}${button.dataset.exportStep} 秒`;
+  });
+}));
 $("export-mode-clip").addEventListener("click", () => setExportMode("clip"));
 $("export-mode-source").addEventListener("click", () => setExportMode("source"));
 $("export-source-current").addEventListener("click", selectCurrentSourceMoment);
@@ -664,9 +655,7 @@ document.addEventListener("fullscreenchange", handlePlayerViewportChange);
 document.addEventListener("webkitfullscreenchange", handlePlayerViewportChange);
 
 async function refreshAll() {
-  await withPageLoading("正在同步设备状态与录像索引…", async () => {
-    await Promise.allSettled([loadStatus(), loadSessions(false)]);
-  });
+  await Promise.allSettled([loadStatus(), loadSessions(false)]);
 }
 
 async function refreshRecordings() {
@@ -818,8 +807,7 @@ async function loadLogs({background = false} = {}) {
       scheduleLogsRefresh();
     }
   };
-  if (background) return load();
-  return withPageLoading("正在读取日志与 USB Gadget 状态…", load);
+  return load();
 }
 
 async function downloadDiagnosticReport() {
@@ -856,20 +844,18 @@ async function downloadDiagnosticReport() {
 
 async function loadMediaAssets() {
   if (state.page !== "media" || appView.hidden) return;
-  return withPageLoading("正在读取媒体中心内容…", async () => {
-    $("media-refresh").disabled = true;
-    setMediaNotice("", false);
-    try {
-      const payload = await request("/api/v1/media-assets");
-      state.mediaAssets = payload;
-      renderMediaAssets(payload);
-    } catch (error) {
-      setMediaNotice(error.message, true);
-      renderMediaUnavailable(error.message);
-    } finally {
-      $("media-refresh").disabled = false;
-    }
-  });
+  $("media-refresh").disabled = true;
+  setMediaNotice("", false);
+  try {
+    const payload = await request("/api/v1/media-assets");
+    state.mediaAssets = payload;
+    renderMediaAssets(payload);
+  } catch (error) {
+    setMediaNotice(error.message, true);
+    renderMediaUnavailable(error.message);
+  } finally {
+    $("media-refresh").disabled = false;
+  }
 }
 
 function renderMediaAssets(payload) {
@@ -1403,56 +1389,50 @@ async function postJSON(path, body) {
 }
 
 async function loadSettings() {
-  return withPageLoading("正在读取网络、存储与系统设置…", async () => {
-    setSettingsNotice("正在读取网络设置…", false, false);
-    const [wifiResult, apResult, storageResult, updateResult, maintenanceResult, reserveResult, exportSettingsResult, exportHistoryResult, fanResult] = await Promise.allSettled([
-      request("/api/v1/network/wifi"), request("/api/v1/network/ap"), request("/api/v1/storage/devices"), request("/api/v1/update"), request("/api/v1/maintenance"), request("/api/v1/storage/snapshot-reserve"), request("/api/v1/export-settings"), request("/api/v1/exports/history"), request("/api/v1/fan"),
+  const sequence = ++settingsLoadSequence;
+  const releaseRefresh = setRequestControlLoading($("settings-refresh"));
+  const current = () => sequence === settingsLoadSequence;
+  const apply = (operation, success, failure) => operation.then(
+    (value) => {
+      if (!current()) return false;
+      success(value);
+      return true;
+    },
+    (error) => {
+      if (!current()) return false;
+      failure(error);
+      return false;
+    },
+  );
+
+  try {
+    const results = await Promise.all([
+      apply(request("/api/v1/network/wifi"), (value) => { state.wifi = value; renderWiFiSettings(value); }, (error) => renderWiFiUnavailable(error.message)),
+      apply(request("/api/v1/network/ap"), (value) => { state.ap = value; renderAPSettings(value); }, (error) => renderAPUnavailable(error.message)),
+      apply(request("/api/v1/storage/devices"), (value) => { state.storage = value; renderStorageDevices(value); }, (error) => renderStorageUnavailable(error.message)),
+      apply(request("/api/v1/update"), (value) => { state.update = value; renderUpdate(value); }, (error) => renderUpdateUnavailable(error.message)),
+      apply(request("/api/v1/maintenance"), (value) => { state.maintenance = value; renderMaintenanceSettings(value); }, (error) => renderMaintenanceUnavailable(error.message)),
+      apply(request("/api/v1/storage/snapshot-reserve"), renderSnapshotReserveStatus, () => {}),
+      apply(request("/api/v1/fan"), (value) => { state.fan = value; renderFanSettings(); }, (error) => renderFanUnavailable(error.message)),
+      Promise.allSettled([request("/api/v1/export-settings"), request("/api/v1/exports/history")]).then((values) => {
+        if (!current()) return false;
+        const [settingsResult, historyResult] = values;
+        if (settingsResult.status === "fulfilled" && historyResult.status === "fulfilled") {
+          state.exportSettings = settingsResult.value;
+          state.exportHistory = historyResult.value;
+          renderExportSettings();
+          return true;
+        }
+        renderExportSettingsUnavailable(settingsResult.status === "rejected" ? settingsResult.reason.message : historyResult.reason.message);
+        return false;
+      }),
     ]);
-    if (wifiResult.status === "fulfilled") {
-      state.wifi = wifiResult.value;
-      renderWiFiSettings(state.wifi);
-    } else {
-      renderWiFiUnavailable(wifiResult.reason.message);
-    }
-    if (apResult.status === "fulfilled") {
-      state.ap = apResult.value;
-      renderAPSettings(state.ap);
-    } else {
-      renderAPUnavailable(apResult.reason.message);
-    }
-    if (storageResult.status === "fulfilled") {
-      state.storage = storageResult.value;
-      renderStorageDevices(state.storage);
-    } else {
-      renderStorageUnavailable(storageResult.reason.message);
-    }
-    if (updateResult.status === "fulfilled") {
-      state.update = updateResult.value;
-      renderUpdate(state.update);
-    } else {
-      renderUpdateUnavailable(updateResult.reason.message);
-    }
-    if (maintenanceResult.status === "fulfilled") {
-      state.maintenance = maintenanceResult.value;
-      renderMaintenanceSettings(state.maintenance);
-    } else {
-      renderMaintenanceUnavailable(maintenanceResult.reason.message);
-    }
-    if (reserveResult.status === "fulfilled") renderSnapshotReserveStatus(reserveResult.value);
-    if (fanResult.status === "fulfilled") {
-      state.fan = fanResult.value;
-      renderFanSettings();
-    } else renderFanUnavailable(fanResult.reason.message);
-    if (exportSettingsResult.status === "fulfilled" && exportHistoryResult.status === "fulfilled") {
-      state.exportSettings = exportSettingsResult.value;
-      state.exportHistory = exportHistoryResult.value;
-      renderExportSettings();
-    } else {
-      renderExportSettingsUnavailable(exportSettingsResult.status === "rejected" ? exportSettingsResult.reason.message : exportHistoryResult.reason.message);
-    }
-    if (wifiResult.status === "fulfilled" && apResult.status === "fulfilled" && storageResult.status === "fulfilled" && updateResult.status === "fulfilled") setSettingsNotice("设置已更新", false, false);
+    if (!current()) return;
+    if (results.slice(0, 4).every(Boolean)) setSettingsNotice("设置已更新", false, false);
     else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
-  });
+  } finally {
+    releaseRefresh();
+  }
 }
 
 async function loadExportSettings() {
@@ -1834,17 +1814,33 @@ function renderUpdate(update) {
   $("update-current-version").textContent = update.current_version || "dev";
   $("update-latest-version").textContent = update.latest_version || "—";
   $("update-target-label").firstChild.textContent = update.selected_action === "rollback" ? "回退目标" : "最新版本";
+  const channels = Array.isArray(update.channels) ? update.channels : [];
+  const selectedChannel = update.channel || "stable";
+  const selectedOption = channels.find((option) => option.id === selectedChannel);
   const detail = update.configured
-    ? `更新通道：${update.channel || "stable"}${update.current_commit && update.current_commit !== "unknown" ? ` · 提交 ${update.current_commit.slice(0, 12)}` : ""}`
+    ? `更新通道：${selectedOption?.label || selectedChannel}${update.current_commit && update.current_commit !== "unknown" ? ` · 提交 ${update.current_commit.slice(0, 12)}` : ""}`
     : "尚未配置 Gitee 更新清单地址和设备公钥。";
   const installDetail = update.install_result === "success" ? "上次更新已成功安装。" : "";
-  $("update-version-detail").textContent = update.error || installDetail || detail;
+  $("update-version-detail").textContent = update.error || update.message || installDetail || detail;
   $("update-release-notes").hidden = !update.release_notes;
   renderReleaseNotes($("update-release-notes"), update.release_notes);
   const downloading = update.state === "downloading";
   $("update-progress-wrap").hidden = !downloading;
   $("update-progress").value = Number(update.progress_percent || 0);
   $("update-progress-detail").textContent = `${Number(update.progress_percent || 0)}% · ${formatBytes(update.downloaded_bytes || 0)} / ${formatBytes(update.total_bytes || 0)}`;
+  const channelBusy = ["checking", "downloading", "downloaded", "installing"].includes(update.state);
+  const fallbackChannels = [
+    {id:"stable", label:"稳定版", description:"只接收维护者正式发布并签名的版本。", available:true},
+    {id:"beta", label:"内测版", description:"可接收维护者发布的预览版本，可能包含尚未覆盖全部场景的改动。", available:false},
+  ];
+  const usableChannels = channels.length ? channels : fallbackChannels;
+  usableChannels.forEach((option) => {
+    const button = $(option.id === "beta" ? "update-channel-beta" : "update-channel-stable");
+    button.classList.toggle("active", option.id === selectedChannel);
+    button.disabled = !update.configured || !option.available || channelBusy;
+    button.title = option.available ? option.description : "该更新源尚未配置";
+  });
+  $("update-channel-detail").textContent = selectedOption?.description || "稳定版只接收正式发布；内测版可接收预览更新。";
   $("update-check").disabled = !update.configured || ["checking", "downloading", "installing"].includes(update.state);
   $("update-download").hidden = update.state !== "available";
   $("update-install").hidden = update.state !== "downloaded";
@@ -1855,11 +1851,36 @@ function renderUpdate(update) {
   else clearUpdatePoll();
 }
 
+async function setUpdateChannel(channel) {
+  if (state.update?.channel === channel) return;
+  if (channel === "beta") {
+    const confirmed = await askConfirmation(
+      "切换到内测版",
+      "内测版会显示维护者签名的预览更新，可能包含尚未覆盖全部车辆和存储场景的改动。稳定版只接收正式发布。切换后需要重新检查更新。",
+      "确认切换到内测版",
+      true,
+    );
+    if (!confirmed) return;
+  }
+  try {
+    state.update = await postJSON("/api/v1/update/channel", {channel});
+    state.updateHistory = null;
+    $("update-history-list").hidden = true;
+    $("update-history-detail").hidden = true;
+    renderUpdate(state.update);
+    setUpdateNotice(`已切换到${channel === "beta" ? "内测版" : "稳定版"}，请重新检查更新。`, false);
+  } catch (error) {
+    setUpdateNotice(error.message, true);
+  }
+}
+
 function renderUpdateUnavailable(message) {
   clearUpdatePoll();
   $("update-status").textContent = "不可用";
   $("update-status").className = "badge error";
   $("update-version-detail").textContent = message;
+  $("update-channel-stable").disabled = true;
+  $("update-channel-beta").disabled = true;
   $("update-check").disabled = true;
   $("update-download").hidden = true;
   $("update-install").hidden = true;
@@ -1926,7 +1947,7 @@ function renderUpdateHistory(history) {
   const list = $("update-history-list");
   const releases = Array.isArray(history.releases) ? history.releases : [];
   detail.hidden = false;
-  detail.textContent = history.generated_at ? `版本目录更新于 ${formatDate(history.generated_at)}` : "历史版本目录已校验";
+  detail.textContent = history.message || (history.generated_at ? `版本目录更新于 ${formatDate(history.generated_at)}` : "历史版本目录已校验");
   list.replaceChildren();
   if (!releases.length) {
     detail.textContent = "没有可直接安装的历史版本。维护者需要把兼容版本加入签名目录。";
@@ -2915,7 +2936,11 @@ function renderStatus(storage) {
     const usbSemantics = enumerationComplete && !storage.gadget_paused ? "内核可能保留该枚举状态" : "";
     $("usb-detail").textContent = [gadget.udc_state || "状态未知", storage.phase || "UNKNOWN", usbSemantics].filter(Boolean).join(" · ");
   }
-  $("video-count").textContent = `${formatNumber(storage.video_count || 0)} 个`;
+  const scan = storage.scan_progress;
+  storageScanActive = Boolean(scan);
+  $("video-count").textContent = storage.media_snapshot ? `${formatNumber(storage.video_count || 0)} 个`
+    : storage.cached_index_at ? `${formatNumber(storage.cached_video_count || 0)} 个`
+    : scan?.stage === "scanning" && scan.discovered > 0 ? `${formatNumber(scan.discovered)} 个` : "—";
 
   const outerSpace = storage.snapshot_space || {};
   const liveVolumeSpace = storage.media_snapshot?.volume_space || {};
@@ -2925,20 +2950,43 @@ function renderStatus(storage) {
   const hasVolumeSpace = Number(volumeSpace.total_bytes || 0) > 0;
   const freePercent = Number(volumeSpace.free_percent || 0);
   $("space-value").textContent = hasVolumeSpace ? formatBytes(volumeSpace.free_bytes || 0) : "—";
-  $("space-progress").style.width = `${Math.max(0, Math.min(100, 100-freePercent))}%`;
+  $("space-progress").classList.toggle("is-loading", !hasVolumeSpace);
+  $("space-progress").style.width = hasVolumeSpace ? `${Math.max(0, Math.min(100, 100-freePercent))}%` : "30%";
   $("space-progress").style.background = freePercent < 10 ? "var(--warning)" : "var(--ok)";
   const outerPercent = Number(outerSpace.free_percent || 0);
   const sampledAt = storage.media_volume_space_updated_at ? formatDate(storage.media_volume_space_updated_at) : "";
   const volumeLabel = hasLiveVolumeSpace ? "exFAT" : `exFAT 上次采样${sampledAt ? `于 ${sampledAt}` : ""}`;
+  const outerLabel = Number(outerSpace.total_bytes) > 0 ? ` · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）` : "";
   $("space-detail").textContent = hasVolumeSpace
-    ? `${volumeLabel} · 可用 ${freePercent.toFixed(1)}% · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`
-    : `正在读取车机虚拟盘空间 · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）`;
+    ? `${volumeLabel} · 可用 ${freePercent.toFixed(1)}%${outerLabel}`
+    : `正在读取车机虚拟盘空间，完成后自动显示${outerLabel}`;
 
   const snapshot = storage.media_snapshot;
+  const snapshotSpaceProtected = !snapshot && Boolean(storage.cached_index_at) &&
+    String(storage.snapshot_error || "").includes("快照空间不足");
+  recordingSnapshotSpaceBlocked = snapshotSpaceProtected;
   $("snapshot-state").className = "badge";
-  $("snapshot-state").textContent = snapshot ? "可播放" : "尚未建立";
-  $("snapshot-state").classList.add(snapshot ? "ok" : "error");
-  $("snapshot-detail").textContent = storage.snapshot_error || (snapshot ? `当前快照内的单路 MP4 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照");
+  if (scan) {
+    $("snapshot-state").textContent = snapshot ? "更新中 · 旧索引可用" : "正在建立";
+    $("snapshot-detail").textContent = scan.stage === "scanning"
+      ? `已发现 ${formatNumber(scan.discovered)} 个单路 MP4 · 扫描完成后发布索引`
+      : scan.stage === "repairing" ? "正在修复快照副本，随后重新统计" : "正在准备只读快照，随后开始统计";
+  } else if (storage.snapshot_error) {
+    $("snapshot-state").textContent = snapshot ? "旧索引可播放" : snapshotSpaceProtected ? "历史索引 · 空间保护" : "等待重试";
+    const updatedAt = snapshot?.created_at ? `上次成功快照于 ${formatDate(snapshot.created_at)}`
+      : storage.cached_index_at ? `历史索引保存于 ${formatDate(storage.cached_index_at)}` : "索引尚未完成";
+    const retryAt = storage.snapshot_retry_at ? ` · 下次重试 ${formatDate(storage.snapshot_retry_at)}` : "";
+    $("snapshot-detail").textContent = snapshotSpaceProtected
+      ? `${updatedAt} · 当前只读快照因外层空间不足已回收；释放空间后自动核对并恢复时长与播放${retryAt}`
+      : `${updatedAt} · ${storage.snapshot_error}${retryAt}`;
+  } else if (!snapshot && storage.cached_index_at) {
+    $("snapshot-state").textContent = "历史索引 · 待核对";
+    $("snapshot-detail").textContent = `上次保存于 ${formatDate(storage.cached_index_at)} · 当前录像核对完成后可播放`;
+  } else {
+    $("snapshot-state").textContent = snapshot ? "可播放" : "尚未建立";
+    $("snapshot-state").classList.add(snapshot ? "ok" : "error");
+    $("snapshot-detail").textContent = snapshot ? `当前快照内的单路 MP4 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照";
+  }
 }
 
 function renderSystemStatus(system) {
@@ -3007,48 +3055,107 @@ function renderPercent(prefix, value) {
   $(`${prefix}-progress`).style.background = percent >= 90 ? "var(--danger)" : percent >= 75 ? "var(--warning)" : "var(--ok)";
 }
 
+let recordingIndexCached = false;
+let recordingSnapshotSpaceBlocked = false;
+
 async function loadSessions(silent = false, automatic = false) {
   if (state.loading) return;
   const operation = async () => {
     state.loading = true;
     if (!silent) {
-      timelineList.replaceChildren();
       setNotice("正在整理完整录像时间轴…", false, false);
     }
     try {
-      const archiveParams = new URLSearchParams({ limit: "1000" });
+      const archiveParams = new URLSearchParams({ limit: "50", clip_type: "archive" });
+      // 页面定时刷新只读取当前内存结果，不能因为浏览器轮询反复触发快照建立或索引同步。
+      if (automatic) archiveParams.set("metadata_only", "true");
       for (const id of ["clip-type", "date", "event"]) {
         const value = $(id).value.trim();
         if (value) archiveParams.set(id.replace("-", "_"), value);
       }
-      const [recentPayload, archivePayload] = await Promise.all([
-        request("/api/v1/video-sessions?clip_type=recent&limit=1000", {loading: !silent}),
-        request(`/api/v1/video-sessions?${archiveParams}`, {loading: !silent}),
+      const recentParams = new URLSearchParams({clip_type: "recent", limit: "1000"});
+      if (automatic) recentParams.set("metadata_only", "true");
+      const [recentPayload, archivePayloads] = await Promise.all([
+        request(`/api/v1/video-sessions?${recentParams}`, {loading: !silent}),
+        (async () => {
+          const pages = [];
+          for (let page = 0; page < archivePages; page++) {
+            archiveParams.set("offset", String(page * 50));
+            const payload = await request(`/api/v1/video-sessions?${archiveParams}`, {loading: !silent});
+            if (pages.length && payload.snapshot_id !== pages[0].snapshot_id) throw new Error("录像正在更新，请稍后重试");
+            pages.push(payload);
+            if ((page + 1) * 50 >= payload.total) break;
+          }
+          return pages;
+        })(),
       ]);
       // 自动请求开始后用户可能进入删除选择；此时保留原列表，避免已选卡片被重建。
       if (automatic && recordingInteractionActive()) return;
-      recentSessions = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
-      archivedSessions = (archivePayload.items || []).filter((session) => ["saved", "sentry"].includes(session.clip_type));
+      if (archivePayloads.length && recentPayload.snapshot_id !== archivePayloads[0].snapshot_id) throw new Error("录像正在更新，请稍后重试");
+      const nextRecent = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
+      const nextArchive = archivePayloads.flatMap((payload) => payload.items || []);
+      const unchanged = JSON.stringify(recentSessions) === JSON.stringify(nextRecent) && JSON.stringify(archivedSessions) === JSON.stringify(nextArchive);
+      recentSessions = nextRecent;
+      archivedSessions = nextArchive;
+      const wasCachedIndex = recordingIndexCached;
+      recordingIndexCached = Boolean(recentPayload.cached || archivePayloads.some(payload => payload.cached));
+      if (wasCachedIndex && !recordingIndexCached) void loadStatus();
+      archiveTotal = archivePayloads[0]?.total || 0;
       reconcileRecordingSelection();
       state.total = archivedSessions.length;
-      renderArchiveTimeline();
-      $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
-      $("load-more").hidden = true;
+      if (!automatic || !unchanged) renderArchiveTimeline();
+      $("result-count").textContent = `${formatNumber(archiveTotal)} 段已保存/哨兵录像`;
+      $("load-more").hidden = archivedSessions.length >= archiveTotal;
       if (!silent) setNotice(archivedSessions.length === 0 ? "当前筛选条件下没有已保存或哨兵录像" : "", false, false);
     } catch (error) {
-      if (silent) console.warn("后台刷新录像索引失败", error);
+      if (automatic) console.warn("后台刷新录像索引失败", error);
       else setNotice(error.message, true);
     } finally {
       state.loading = false;
     }
   };
-  if (silent) return operation();
-  return withPageLoading("正在整理完整录像时间轴…", operation);
+  return operation();
 }
 
 function normalizeRecordingRefreshSeconds(value) {
   const seconds = Number.parseInt(String(value), 10);
   return [0, 15, 30, 60].includes(seconds) ? seconds : 60;
+}
+
+let durationRefreshInFlight = false;
+
+// 仅合并同一快照的时长字段，不重建卡片或修改正在播放的详情。
+async function refreshRecordingDurations() {
+  if (durationRefreshInFlight || appView.hidden || document.hidden || state.page !== "dashboard") return;
+  const pending = [...recentSessions, ...archivedSessions].filter(session => !session.cached && (session.duration_pending || session.duration_state === "estimated"));
+  if (!pending.length) return;
+  durationRefreshInFlight = true;
+  try {
+    // 分批限制 URL 长度；一批失败不阻断其他批次，并由下一轮重试。
+    for (let offset = 0; offset < pending.length; offset += 50) {
+      const batch = pending.slice(offset, offset + 50);
+      const params = new URLSearchParams({metadata_only: "true", limit: "50"});
+      batch.forEach(session => params.append("session_id", session.id));
+      try {
+        const payload = await request(`/api/v1/video-sessions?${params}`, {loading: false});
+        for (const updated of payload.items || []) {
+          const session = batch.find(item => item.id === updated.id);
+          if (!session || !session.snapshot_id || session.snapshot_id !== payload.snapshot_id ||
+              ![...recentSessions, ...archivedSessions].includes(session)) continue;
+          session.duration_state = updated.duration_state;
+          session.duration_pending = updated.duration_pending;
+          session.duration_seconds = updated.duration_seconds;
+          session.end_at = updated.end_at;
+          for (const card of document.querySelectorAll(".session-card")) {
+            if (card.dataset.sessionId !== session.id) continue;
+            card.querySelector(".duration-pill").textContent = sessionDurationLabel(session);
+            card.querySelector(".session-duration-text").textContent = sessionDurationLabel(session);
+            card.querySelector(".session-title").textContent = formatSessionRange(session.start_at, session.end_at);
+          }
+        }
+      } catch (error) { console.warn("后台更新录像时长失败", error); }
+    }
+  } finally { durationRefreshInFlight = false; }
 }
 
 function recordingInteractionActive() {
@@ -3077,7 +3184,9 @@ function renderArchiveTimeline() {
   const recentSection = $("recent-recordings-section");
   const recentList = $("recent-video-grid");
   recentList.replaceChildren();
-  recentSessions.forEach((session) => recentList.append(createSessionTimeline(session)));
+  if (recentSessions.length) {
+    recentSessions.forEach((session) => recentList.append(createSessionTimeline(session)));
+  }
   recentSection.hidden = recentSessions.length === 0;
 
   timelineList.replaceChildren();
@@ -3100,6 +3209,7 @@ function renderArchiveTimeline() {
 function createSessionTimeline(session) {
   const card = document.createElement("article");
   card.className = `session-card clip-${clipTypeClass(session.clip_type)}`;
+  card.dataset.sessionId = session.id;
   const selectable = isSelectableRecordingSession(session);
   const selected = recordingDeleteMode && selectable && selectedRecordingSessions.has(session.id);
   card.classList.toggle("selection-enabled", recordingDeleteMode && selectable);
@@ -3144,10 +3254,13 @@ function createSessionTimeline(session) {
   const clipBadge = document.createElement("span");
   clipBadge.className = `clip-badge clip-${clipTypeClass(session.clip_type)}`;
   clipBadge.textContent = clipLabel(session.clip_type);
-  meta.append(clipBadge, document.createTextNode(`完整时长 ${formatDuration(session.duration_seconds)}${session.event && !session.event_metadata ? ` · ${session.event}` : ""}`));
+  const durationText = document.createElement("span");
+  durationText.className = "session-duration-text";
+  durationText.textContent = sessionDurationLabel(session);
+  meta.append(clipBadge, durationText, document.createTextNode(session.event && !session.event_metadata ? ` · ${session.event}` : ""));
   const duration = document.createElement("span");
   duration.className = "duration-pill";
-  duration.textContent = formatDuration(session.duration_seconds);
+  duration.textContent = sessionDurationLabel(session);
   const aside = document.createElement("div");
   aside.className = "session-head-aside";
   const asideMeta = document.createElement("div");
@@ -3169,6 +3282,10 @@ function createSessionTimeline(session) {
   open.className = "primary session-open";
   open.type = "button";
   open.textContent = "打开完整录像";
+  if (session.cached) {
+    open.disabled = true;
+    open.textContent = recordingSnapshotSpaceBlocked ? "空间不足 · 暂不可播放" : "历史索引 · 等待核对";
+  }
   open.addEventListener("click", () => {
     const display = state.view === "multi" ? "composite" : "single";
     openSessionPlayer(session, preferredCamera(session), 0, display);
@@ -3181,6 +3298,7 @@ function createSessionTimeline(session) {
     remove.className = "ghost session-delete";
     remove.type = "button";
     remove.disabled = recordingDeleteInProgress;
+    if (session.cached) remove.disabled = true;
     remove.textContent = "删除此段最近录像";
     remove.addEventListener("click", () => deleteRecordingSession(session, remove));
     actions.append(remove);
@@ -3298,7 +3416,7 @@ async function deleteRecordingSessions(sessions, button) {
 }
 
 function isSelectableRecordingSession(session) {
-  return session.clip_type === "saved" || session.clip_type === "sentry";
+  return !session.cached && (session.clip_type === "saved" || session.clip_type === "sentry");
 }
 
 function selectableRecordingSessions() {
@@ -3369,12 +3487,13 @@ function createTrackRow(session, labelText, camera) {
   segment.type = "button";
   segment.className = `track-segment continuous${hasCamera ? "" : " missing"}${session.complete ? "" : " incomplete"}`;
   segment.title = "点击时间轴可跳转到对应录像位置";
+  if (session.cached) { segment.disabled = true; segment.title = "历史索引，正在核对当前录像"; }
   segment.setAttribute("aria-label", segment.title);
   segment.addEventListener("click", (event) => {
     const bounds = track.getBoundingClientRect();
     const ratio = bounds.width > 0 ? Math.max(0, Math.min(1, (event.clientX-bounds.left)/bounds.width)) : 0;
     const position = Number(session.duration_seconds || 0)*ratio;
-    openSessionPlayer(session, camera || preferredCamera(session), position, camera ? "single" : "composite");
+    openSessionPlayer(session, camera || preferredCamera(session), position, camera ? "single" : "composite", (detail) => Number(detail.duration_seconds || 0)*ratio);
   });
   track.append(segment);
   const eventPosition = sessionEventPosition(session);
@@ -3382,12 +3501,13 @@ function createTrackRow(session, labelText, camera) {
   if (eventPosition !== null && (!camera || eventCamera === camera)) {
     const marker = document.createElement("button");
     marker.type = "button";
+    if (session.cached) marker.disabled = true;
     marker.className = "event-track-marker";
     marker.style.left = `${Math.max(.5, Math.min(99.5, eventPosition/session.duration_seconds*100))}%`;
     marker.title = eventMarkerTitle(session.event_metadata);
     marker.setAttribute("aria-label", marker.title);
     marker.addEventListener("click", () => {
-      openSessionPlayer(session, camera || preferredCamera(session), eventPosition, camera ? "single" : "composite");
+    openSessionPlayer(session, camera || preferredCamera(session), eventPosition, camera ? "single" : "composite", sessionEventPosition);
     });
     track.append(marker);
   }
@@ -3395,10 +3515,24 @@ function createTrackRow(session, labelText, camera) {
   return row;
 }
 
-async function openSessionPlayer(summary, camera, position, display) {
-  try {
-    const session = await request(`/api/v1/video-sessions/${encodeURIComponent(summary.id)}`);
-    closePlayerMedia();
+function sessionMediaURL(url) {
+  if (!activeSession?.snapshot_id) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}snapshot_id=${encodeURIComponent(activeSession.snapshot_id || "")}`;
+}
+
+async function openSessionPlayer(summary, camera, position, display, resolvePosition, autoplay = false) {
+	if (summary.cached) { setNotice("正在核对当前录像，完成后即可播放", false, false); return; }
+	const sequence = ++sessionOpenSequence;
+	sessionOpening = true;
+	sessionOpenController?.abort();
+	sessionOpenController = new AbortController();
+	try {
+		const snapshotQuery = summary.snapshot_id ? `?snapshot_id=${encodeURIComponent(summary.snapshot_id)}` : "";
+		const session = await request(`/api/v1/video-sessions/${encodeURIComponent(summary.id)}${snapshotQuery}`, {loading:false, signal:sessionOpenController.signal});
+		if (sequence !== sessionOpenSequence) return;
+		if (typeof resolvePosition === "function") position = resolvePosition(session);
+		position = Math.max(0, Math.min(Number(position) || 0, Number(session.duration_seconds) || 0));
+		closePlayerMedia();
     activeSession = session;
     playbackWasPlaying = false;
     activeCamera = session.cameras.includes(camera) ? camera : preferredCamera(session);
@@ -3418,9 +3552,30 @@ async function openSessionPlayer(summary, camera, position, display) {
     document.body.style.overflow = "hidden";
     resetPlaybackDiagnostics();
     startPlaybackDiagnostics();
-    await loadSessionPosition(position, false);
-  } catch (error) {
-    setNotice(`无法打开录像：${error.message}`, true);
+    await loadSessionPosition(position, autoplay);
+	} catch (error) {
+    if (sequence !== sessionOpenSequence || error.name === "AbortError") return;
+    if (error.status === 409) {
+      await loadSessions(true, true);
+      if (sequence !== sessionOpenSequence) return;
+      const refreshed = [...recentSessions, ...archivedSessions].find((session) =>
+        session.id === summary.id ||
+        (summary.clip_type !== "recent" && session.clip_type === summary.clip_type && session.event && session.event === summary.event)
+      );
+      if (refreshed && refreshed.snapshot_id !== summary.snapshot_id) {
+        return openSessionPlayer(refreshed, camera, position, display, resolvePosition, autoplay);
+      }
+      if (refreshed) {
+        setNotice("录像索引正在更新，请稍后再试", false, false);
+        return;
+      }
+      setNotice("该录像已被删除", false);
+      return;
+    }
+    if (!playerModal.hidden) showPlayerMessage(`无法打开录像：${error.message}`);
+    else setNotice(`无法打开录像：${error.message}`, true);
+  } finally {
+    if(sequence===sessionOpenSequence)sessionOpening=false;
   }
 }
 
@@ -3453,7 +3608,14 @@ function renderPlayerMeta(session) {
   const badge = document.createElement("span");
   badge.className = `clip-badge clip-${clipTypeClass(session.clip_type)}`;
   badge.textContent = clipLabel(session.clip_type);
-  meta.replaceChildren(badge, document.createTextNode(`${session.segment_count} 个片段 · 完整时长 ${formatDuration(session.duration_seconds)}`));
+	meta.replaceChildren(badge, document.createTextNode(`${session.segment_count} 个片段 · ${sessionDurationLabel(session)}`));
+  const unreadable = sessionUnreadableVideoCount(session);
+  if (unreadable > 0) {
+    const warning = document.createElement("span");
+    warning.className = "session-warning";
+    warning.textContent = `${unreadable} 个文件暂不可读取，可能尚未写完、已损坏或已由车机移除`;
+    meta.append(warning);
+  }
   if (session.event_metadata) {
     const context = document.createElement("span");
     context.className = "player-event-context";
@@ -3462,6 +3624,27 @@ function renderPlayerMeta(session) {
     context.append(dot, document.createTextNode(eventMetadataText(session.event_metadata)));
     meta.append(context);
   }
+}
+
+function sessionDurationLabel(session) {
+  // 历史核对结果对用户就是录像时长，不暴露“缓存”等内部实现状态。
+  if (session.duration_state === "cached") return formatDuration(session.duration_seconds);
+  if (session.duration_state === "verified") return formatDuration(session.duration_seconds);
+  if (session.duration_state === "unavailable") return "部分文件不可读取";
+  if (session.cached && recordingSnapshotSpaceBlocked) return "待释放空间后核对";
+  if (session.cached) return "待当前录像核对";
+  if (Number(session.duration_seconds) > 0) return `约 ${formatDuration(session.duration_seconds)}`;
+  return "正在读取时长";
+}
+
+function sessionUnreadableVideoCount(session) {
+  let count = 0;
+  session?.moments?.forEach((moment) => {
+    moment.videos?.forEach((video) => {
+      if (video.duration_state === "unavailable") count++;
+    });
+  });
+  return count;
 }
 
 function renderSegmentMarkers() {
@@ -3519,8 +3702,8 @@ async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1
     resetPlaybackTelemetryLoad();
     if (usesServerTranscode()) return await loadServerSingle(selection, autoplay, token);
     $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
-    $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
-    const source = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`;
+    $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
+    const source = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`);
     delete sessionVideo.dataset.compositeKey;
     if (sessionVideo.dataset.videoId !== activeVideo.id || sessionVideo.getAttribute("src") !== source ||
         sessionVideo.readyState < 1 || sessionVideo.error) {
@@ -3625,7 +3808,7 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
   compositeTracks = nextTracks;
   startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
-  $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
+  $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`);
   renderCameraSwitcher();
   if (autoplay) await playCompositeTracks();
   return true;
@@ -3634,7 +3817,7 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
 async function loadServerComposite(selection, layout, masterVideo, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
   const streamStart = Math.max(0, selection.localTime);
-  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`;
+  const source = sessionMediaURL(`/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=${encodeURIComponent(activeDisplay)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`);
   const sourceKey = `${selection.moment.id}:${activeDisplay}:${effectivePlaybackQuality}:${streamStart.toFixed(3)}`;
   if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
     sessionVideo.pause();
@@ -3660,7 +3843,7 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
   compositeTracks = new Map([[masterVideo.camera, {element:sessionVideo, video:masterVideo, lastHardSync:0}]]);
   startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
-  $("download-link").href = `/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`;
+  $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`);
   applyDisplayState();
   applyServerCompositeFrameGeometry();
   renderCameraSwitcher();
@@ -3671,7 +3854,7 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
 async function loadServerSingle(selection, autoplay, token) {
   releaseCompositeAuxiliaryTracks();
   const streamStart = Math.max(0, selection.localTime);
-  const source = `/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=single&camera=${encodeURIComponent(activeCamera)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`;
+  const source = sessionMediaURL(`/api/v1/video-groups/${encodeURIComponent(selection.moment.id)}/composite?layout=single&camera=${encodeURIComponent(activeCamera)}&quality=${encodeURIComponent(effectivePlaybackQuality)}&start_seconds=${encodeURIComponent(streamStart.toFixed(3))}`);
   const sourceKey = `${selection.moment.id}:single:${activeCamera}:${effectivePlaybackQuality}:${streamStart.toFixed(3)}`;
   delete sessionVideo.dataset.videoId;
   if (sessionVideo.dataset.compositeKey !== sourceKey || sessionVideo.readyState < 1 || sessionVideo.error) {
@@ -3699,7 +3882,7 @@ async function loadServerSingle(selection, autoplay, token) {
   compositeTracks = new Map([[activeCamera, {element:sessionVideo, video:activeVideo, lastHardSync:0}]]);
   startPlaybackTelemetryLoad(activeVideo);
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)} · ${qualityLabel(effectivePlaybackQuality)}`;
-  $("download-link").href = `/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`;
+  $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
   applyDisplayState();
   if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
   return true;
@@ -3798,7 +3981,7 @@ function reportCompositeLoadFailures(failedTracks) {
 }
 
 async function prepareVideoElement(element, video, absolute, token) {
-  const source = `/api/v1/videos/${encodeURIComponent(video.id)}/content`;
+  const source = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(video.id)}/content`);
   if (element.dataset.videoId !== video.id || element.getAttribute("src") !== source ||
       element.readyState < 1 || element.error) {
     element.pause();
@@ -3845,6 +4028,7 @@ function selectVideoAtPosition(session, camera, position, preferredMomentIndex =
 function videoCoversAbsolutePosition(video, absolute) {
   const recordedAt = new Date(video?.recorded_at).getTime();
   const duration = Number(video?.duration_seconds);
+  if (video?.duration_state === "unavailable") return false;
   if (!Number.isFinite(recordedAt) || !Number.isFinite(absolute)) return false;
   // 旧索引可能没有时长，继续交给浏览器探测，避免升级后误判已有录像不可播放。
   if (!Number.isFinite(duration) || duration <= 0) return true;
@@ -3934,6 +4118,10 @@ function resetPlaybackTelemetryLoad() {
   renderPlaybackTelemetry();
 }
 
+function telemetryCacheKey(video) {
+  return `${activeSession?.snapshot_id || ""}:${video.id}`;
+}
+
 function cachePlaybackTelemetry(videoID, timeline) {
   if (telemetryByVideo.size >= 24 && !telemetryByVideo.has(videoID)) {
     telemetryByVideo.delete(telemetryByVideo.keys().next().value);
@@ -3944,16 +4132,17 @@ function cachePlaybackTelemetry(videoID, timeline) {
 
 function requestPlaybackTelemetry(video, signal) {
   if (!video?.id) return Promise.reject(new Error("缺少 SEI 视频标识"));
-  const cached = telemetryByVideo.get(video.id);
+  const key = telemetryCacheKey(video);
+  const cached = telemetryByVideo.get(key);
   if (cached) return Promise.resolve(cached);
-  const pending = telemetryRequestsByVideo.get(video.id);
+  const pending = telemetryRequestsByVideo.get(key);
   if (pending) return pending;
-  const promise = request(`/api/v1/videos/${encodeURIComponent(video.id)}/sei`, {signal, loading:false})
-    .then((timeline) => cachePlaybackTelemetry(video.id, timeline))
+  const promise = request(sessionMediaURL(`/api/v1/videos/${encodeURIComponent(video.id)}/sei`), {signal, loading:false})
+    .then((timeline) => cachePlaybackTelemetry(key, timeline))
     .finally(() => {
-      if (telemetryRequestsByVideo.get(video.id) === promise) telemetryRequestsByVideo.delete(video.id);
+      if (telemetryRequestsByVideo.get(key) === promise) telemetryRequestsByVideo.delete(key);
     });
-  telemetryRequestsByVideo.set(video.id, promise);
+  telemetryRequestsByVideo.set(key, promise);
   return promise;
 }
 
@@ -3970,7 +4159,7 @@ function scheduleAdjacentTelemetryPrefetch() {
       const moment = session.moments?.[index];
       const video = moment?.videos?.find((item) => item.camera === camera) ||
         moment?.videos?.find((item) => item.camera === "front") || moment?.videos?.[0];
-      if (!video?.id || telemetryByVideo.has(video.id)) continue;
+      if (!video?.id || telemetryByVideo.has(telemetryCacheKey(video))) continue;
       try {
         await requestPlaybackTelemetry(video);
       } catch (_) {
@@ -3986,7 +4175,7 @@ function startPlaybackTelemetryLoad(video) {
     renderPlaybackTelemetry();
     return;
   }
-  const cached = telemetryByVideo.get(video.id);
+  const cached = telemetryByVideo.get(telemetryCacheKey(video));
   if (cached) {
     activeTelemetry = cached;
     renderPlaybackTelemetry();
@@ -4114,7 +4303,7 @@ function formatRecordingTimestamp(recordedAt, seconds) {
 
 function advanceToNextSegment() {
   // 换源和拖动会产生旧媒体的迟到 ended；此时推进会把用户刚选中的短尾片段覆盖掉。
-  if (!activeSession || timelinePositionPending || sessionVideo.seeking) return;
+  if (!activeSession || sessionOpening || timelinePositionPending || sessionVideo.seeking) return;
   const next = activeMomentIndex+1;
   if (next >= activeSession.moments.length) {
     $("session-timeline").value = String(activeSession.duration_seconds);
@@ -4194,7 +4383,7 @@ function openExportModal() {
   }
   exportTask = null;
   const position = Math.min(currentSessionPosition(), Math.max(0, activeSession.duration_seconds-1));
-  initializeExportRange(position, Math.min(activeSession.duration_seconds, position+60));
+  initializeExportRange(position, Math.min(exportTimeBounds().duration, position+60));
   $("export-layout").value = isCompositeDisplay(activeDisplay) ? activeDisplay : "single";
   $("export-camera").value = activeCamera;
   $("export-quality").value = effectivePlaybackQuality === "original" && !isCompositeDisplay(activeDisplay) ? "original" : "high";
@@ -4230,9 +4419,15 @@ function restoreExportSelection(request) {
   (request.cameras || []).forEach((camera) => sourceExportCameras.add(camera));
 }
 
+function exportTimeBounds() {
+  const start=Date.parse(activeSession?.start_at);
+  const duration=Number(activeSession?.duration_seconds)||0;
+  return {start,end:start+duration*1000,duration};
+}
+
 function initializeExportRange(start, end) {
   if (!activeSession) return;
-  const maximum = Math.max(1, Number(activeSession.duration_seconds || 0));
+  const maximum = Math.max(1, exportTimeBounds().duration);
   for (const input of [$("export-range-start"), $("export-range-end")]) {
     input.min = "0";
     input.max = String(maximum);
@@ -4253,7 +4448,7 @@ function initializeExportRange(start, end) {
 
 function setExportRange(start, end) {
   if (!activeSession) return;
-  const maximum = Math.max(1, Number(activeSession.duration_seconds || 0));
+  const maximum = Math.max(1, exportTimeBounds().duration);
   start = Math.max(0, Math.min(Number(start) || 0, maximum-1));
   end = Math.max(start+1, Math.min(Number(end) || start+1, maximum));
   $("export-range-start").value = start.toFixed(1);
@@ -4274,13 +4469,13 @@ function updateExportRangeFromSlider(changed) {
 function updateExportRangeFromTime(changed) {
   if (!activeSession) return;
   const input = changed === "start" ? $("export-start-time") : $("export-end-time");
-  const instant = new Date(input.value).getTime();
-  const sessionStart = new Date(activeSession.start_at).getTime();
-  if (!Number.isFinite(instant) || !Number.isFinite(sessionStart)) {
-    renderExportRange(Number($("export-range-start").value), Number($("export-range-end").value), Number(activeSession.duration_seconds));
+  const seconds = parseExportPosition(input.value);
+  if (!Number.isFinite(seconds)) {
+    $("export-error").textContent = "请输入 时:分:秒，例如 00:03:25.5";
+    renderExportRange(Number($("export-range-start").value), Number($("export-range-end").value), exportTimeBounds().duration);
     return;
   }
-  const seconds = (instant-sessionStart)/1000;
+  $("export-error").textContent = "";
   const start = changed === "start" ? seconds : Number($("export-range-start").value);
   const end = changed === "end" ? seconds : Number($("export-range-end").value);
   setExportRange(start, end);
@@ -4288,10 +4483,14 @@ function updateExportRangeFromTime(changed) {
 
 function adjustExportRange(value) {
   const [edge, deltaText] = String(value || "").split(":");
-  const delta = Number(deltaText);
+  const step = Number($("export-adjust-step").value);
+  if (![1,3,5,10,15,30,60].includes(step)) return;
+  const delta = Number(deltaText)*step;
   if (!Number.isFinite(delta)) return;
-  const start = Number($("export-range-start").value)+(edge === "start" ? delta : 0);
-  const end = Number($("export-range-end").value)+(edge === "end" ? delta : 0);
+  const currentStart = Number($("export-range-start").value);
+  const currentEnd = Number($("export-range-end").value);
+  const start = edge === "start" ? Math.min(currentEnd-1, currentStart+delta) : currentStart;
+  const end = edge === "end" ? Math.max(currentStart+1, currentEnd+delta) : currentEnd;
   setExportRange(start, end);
 }
 
@@ -4300,12 +4499,19 @@ function renderExportRange(start, end, maximum) {
   const endPercent = Math.max(startPercent, Math.min(100, end/maximum*100));
   $("export-range-track").style.setProperty("--range-start", `${startPercent}%`);
   $("export-range-track").style.setProperty("--range-end", `${endPercent}%`);
-  $("export-range-duration").textContent = `已选择 ${formatDuration(end-start)} · ${start.toFixed(1)}s — ${end.toFixed(1)}s`;
-  const base = new Date(activeSession.start_at).getTime();
-  if (Number.isFinite(base)) {
-    $("export-start-time").value = localDateTimeInput(new Date(base+start*1000));
-    $("export-end-time").value = localDateTimeInput(new Date(base+end*1000));
-  }
+  $("export-range-duration").textContent = `已选择 ${formatDuration(end-start)} · 总时长 ${formatDuration(maximum)}`;
+  $("export-start-time").value = formatExportPosition(start);
+  $("export-end-time").value = formatExportPosition(end);
+}
+
+function formatExportPosition(seconds) {
+  const ticks = Math.round(Math.max(0, seconds)*10);
+  return `${String(Math.floor(ticks/36000)).padStart(2,"0")}:${String(Math.floor(ticks/600)%60).padStart(2,"0")}:${String(Math.floor(ticks/10)%60).padStart(2,"0")}.${ticks%10}`;
+}
+
+function parseExportPosition(value) {
+  const match = /^(\d+):([0-5]\d):([0-5]\d)(?:\.(\d))?$/.exec(String(value).trim());
+  return match ? Number(match[1])*3600+Number(match[2])*60+Number(match[3])+Number(match[4] || 0)/10 : NaN;
 }
 
 function localDateTimeInput(value) {
@@ -4520,7 +4726,7 @@ function downloadSourceFiles() {
   const anchors = [];
   videos.forEach((video) => {
     const anchor = document.createElement("a");
-    anchor.href = `/api/v1/videos/${encodeURIComponent(video.id)}/download`;
+    anchor.href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(video.id)}/download`);
     anchor.download = "";
     anchor.hidden = true;
     document.body.append(anchor);
@@ -4550,7 +4756,7 @@ async function createExportTask(event) {
     try {
       exportTask = await request("/api/v1/exports", {
         method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({mode:"source", session_id:activeSession.id, moment_ids:[...sourceExportMomentIDs], cameras:[...sourceExportCameras]}),
+        body: JSON.stringify({mode:"source", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, moment_ids:[...sourceExportMomentIDs], cameras:[...sourceExportCameras]}),
       });
       renderExportTask(exportTask);
       scheduleExportPoll(500);
@@ -4570,7 +4776,7 @@ async function createExportTask(event) {
     $("export-error").textContent = "请至少选择一个摄像头视角";
     return;
   }
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || duration < 1 || end > activeSession.duration_seconds+.01) {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || duration < 1 || end > exportTimeBounds().duration+.01) {
     $("export-error").textContent = "导出范围必须位于当前完整录像内，且结束时间必须晚于开始时间至少 1 秒";
     return;
   }
@@ -4584,7 +4790,7 @@ async function createExportTask(event) {
     exportTask = await request("/api/v1/exports", {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({
-        mode:"clip", session_id:activeSession.id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
+        mode:"clip", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
         burn_timestamp:$("export-burn-timestamp").checked, burn_sei:$("export-burn-sei").checked,
         overlay_mode:document.querySelector('input[name="export-overlay-mode"]:checked')?.value || "",
       }),
@@ -5296,6 +5502,9 @@ function finishSessionVideoLoad(token) {
 }
 
 function closePlayer() {
+  sessionOpening = false;
+  sessionOpenSequence++;
+  sessionOpenController?.abort();
   closeExportModal();
   if (isPlayerFullscreen()) void exitPlayerFullscreen();
   closePlayerMedia();
@@ -5727,6 +5936,22 @@ function formatUptime(value) {
   return `${minutes} 分钟`;
 }
 
+let storageScanActive = false;
+let storageProgressLoading = false;
+// 进度查询只读取内存状态，不触发快照或重复采样系统指标。
+window.setInterval(async () => {
+  if (appView.hidden || document.hidden || state.page !== "dashboard" || storageProgressLoading || !(storageScanActive || state.loading)) return;
+  storageProgressLoading = true;
+  try { renderStatus(await request("/api/v1/storage", {loading:false})); }
+  catch (error) { console.warn("读取索引进度失败", error); }
+  finally { storageProgressLoading = false; }
+}, 2000);
 window.setInterval(() => { if (!appView.hidden) loadStatus(); }, 10000);
+// 校准只更新当前索引的显示结果，不触发车机盘快照刷新。
+window.setInterval(() => {
+  if (!appView.hidden && !document.hidden && state.page === "dashboard" && !recordingInteractionActive() &&
+      recordingIndexCached) { loadSessions(true, true); return; }
+  refreshRecordingDurations();
+}, 5000);
 scheduleRecordingRefresh();
 initialize();

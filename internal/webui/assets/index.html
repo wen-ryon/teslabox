@@ -53,14 +53,6 @@
     <div id="network-loading" class="network-loading" role="status" aria-live="polite" aria-atomic="true" hidden>
       <i class="loading-spinner" aria-hidden="true"></i><span id="network-loading-message">正在与 TeslaBox 通信…</span>
     </div>
-    <div id="page-loading" class="page-loading" role="status" aria-live="polite" aria-atomic="true" hidden>
-      <div class="page-loading-card">
-        <i class="loading-spinner large" aria-hidden="true"></i>
-        <strong id="page-loading-message">正在读取设备状态…</strong>
-        <small>数据仍在加载，请勿重复操作。</small>
-      </div>
-    </div>
-
     <div id="nav-backdrop" class="nav-backdrop" hidden></div>
     <aside id="nav-drawer" class="nav-drawer" aria-label="主导航" hidden>
       <div class="drawer-head"><span class="brand-mark static"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
@@ -328,6 +320,10 @@
             <div><h3>TeslaBox 程序</h3><p id="update-version-detail">正在读取当前版本…</p></div>
             <div class="update-versions"><span>当前版本<strong id="update-current-version">—</strong></span><span id="update-target-label">最新版本<strong id="update-latest-version">—</strong></span></div>
           </div>
+          <div class="update-channel-row">
+            <div><h4>更新通道</h4><p id="update-channel-detail">稳定版只接收正式发布；内测版可接收预览更新。</p></div>
+            <div class="segmented-control" role="group" aria-label="更新通道"><button id="update-channel-stable" type="button">稳定版</button><button id="update-channel-beta" type="button">内测版</button></div>
+          </div>
           <div id="update-progress-wrap" class="update-progress" hidden><progress id="update-progress" max="100" value="0"></progress><span id="update-progress-detail">0%</span></div>
           <div id="update-release-notes" class="update-release-notes update-release-markdown" hidden></div>
           <p id="update-notice" class="notice" role="status" aria-live="polite" hidden></p>
@@ -560,19 +556,18 @@
         <button id="export-mode-source" type="button" role="tab" aria-selected="false">多路原画</button>
       </div>
       <div id="export-clip-options">
-        <p class="muted">拖动时间线两端选择需要保留的范围；后台按绝对录像时间分段处理，不再受分钟文件边界限制。</p>
+        <p class="muted">分别调节开始和结束位置，按累计播放时长选择范围，可跨多个录像片段。</p>
         <section class="export-range-editor" aria-labelledby="export-range-title">
           <div class="export-range-heading"><strong id="export-range-title">导出时间范围</strong><span id="export-range-duration">—</span></div>
           <div id="export-range-track" class="export-range-track">
             <div id="export-range-markers" class="export-range-markers" aria-hidden="true"></div>
-            <input id="export-range-start" type="range" min="0" step="0.1" aria-label="导出开始位置">
-            <input id="export-range-end" type="range" min="0" step="0.1" aria-label="导出结束位置">
           </div>
           <div class="form-grid export-range-grid">
-            <label>开始时间<input id="export-start-time" type="datetime-local" step="1" required></label>
-            <label>结束时间<input id="export-end-time" type="datetime-local" step="1" required></label>
+            <label>开始位置 · 时:分:秒<input id="export-start-time" type="text" placeholder="00:00:00.0" required><input id="export-range-start" type="range" min="0" step="0.1" aria-label="导出开始位置"><span class="export-edge-buttons"><button type="button" data-export-adjust="start:-1">开始 −</button><button type="button" data-export-adjust="start:1">开始 +</button></span></label>
+            <label>结束位置 · 时:分:秒<input id="export-end-time" type="text" placeholder="00:00:00.0" required><input id="export-range-end" type="range" min="0" step="0.1" aria-label="导出结束位置"><span class="export-edge-buttons"><button type="button" data-export-adjust="end:-1">结束 −</button><button type="button" data-export-adjust="end:1">结束 +</button></span></label>
           </div>
-          <div class="export-range-adjustments"><button type="button" data-export-adjust="start:-1">开始 −1 秒</button><button type="button" data-export-adjust="start:1">开始 +1 秒</button><button type="button" data-export-adjust="end:-1">结束 −1 秒</button><button type="button" data-export-adjust="end:1">结束 +1 秒</button></div>
+          <div class="export-step-label"><span>微调步长 · 秒</span><input id="export-adjust-step" type="hidden" value="1"><div class="export-step-options" role="group" aria-label="导出范围调节步长"><button type="button" data-export-step="1" aria-pressed="true">1</button><button type="button" data-export-step="3" aria-pressed="false">3</button><button type="button" data-export-step="5" aria-pressed="false">5</button><button type="button" data-export-step="10" aria-pressed="false">10</button><button type="button" data-export-step="15" aria-pressed="false">15</button><button type="button" data-export-step="30" aria-pressed="false">30</button><button type="button" data-export-step="60" aria-pressed="false">60</button></div></div>
+          <p class="muted">位置按视频累计播放时长计算，不是拍摄日期；录像之间的时间空档不计入。</p>
         </section>
         <div class="form-grid export-view-grid">
           <label>导出视角<select id="export-layout"><option value="composite6">六路合成</option><option value="composite4a">四路合成 A</option><option value="composite4b">四路合成 B</option><option value="composite3">三路合成</option><option value="single">单路视角</option></select></label>

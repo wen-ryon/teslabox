@@ -1,0 +1,12 @@
+[Unit]
+Description=TeslaBox early PWM fan stop
+DefaultDependencies=no
+After=systemd-udev-trigger.service
+Before=basic.target teslabox.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/teslabox-fan-early.sh
+
+[Install]
+WantedBy=basic.target

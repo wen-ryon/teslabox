@@ -95,6 +95,8 @@ type MaintenanceLocker interface {
 
 // Snapshot 是数据盘、backing store、Gadget 和媒体索引的一致性只读视图。
 type Snapshot struct {
+	MediaContext        context.Context `json:"-"`
+	indexIdentity       string
 	Phase               Phase                     `json:"phase"`
 	DataDrive           *storage.Device           `json:"data_drive,omitempty"`
 	Backing             backing.Status            `json:"backing"`
@@ -106,6 +108,9 @@ type Snapshot struct {
 	MediaVolumeSpace    mediasnapshot.VolumeSpace `json:"media_volume_space"`
 	MediaVolumeSpaceAt  *time.Time                `json:"media_volume_space_updated_at,omitempty"`
 	VideoCount          int                       `json:"video_count"`
+	ScanProgress        *ScanProgress             `json:"scan_progress,omitempty"`
+	CachedIndexAt       *time.Time                `json:"cached_index_at,omitempty"`
+	CachedVideoCount    int                       `json:"cached_video_count,omitempty"`
 	Videos              []teslacam.Video          `json:"-"`
 	LastRefreshAt       *time.Time                `json:"last_refresh_at,omitempty"`
 	LastError           string                    `json:"last_error,omitempty"`
@@ -129,12 +134,20 @@ type Manager struct {
 	maintenanceLocker MaintenanceLocker
 
 	refreshMu           sync.Mutex
+	spaceGuard          spaceGuardState
+	indexMu             sync.Mutex
+	cachedIndex         CachedMediaIndex
+	cachedDevice        string
+	indexRefreshCh      chan struct{}
+	scanProgress        *ScanProgress
+	runContext          context.Context
 	stateMu             sync.RWMutex
 	state               Snapshot
 	triggerCh           chan struct{}
 	cleanupCh           chan struct{}
 	retired             []mediasnapshot.View
 	mediaLeases         map[string]int
+	calibratedSnapshot  string
 	mediaActiveUntil    time.Time
 	snapshotRecovered   bool
 	snapshotFailures    int
@@ -197,6 +210,7 @@ func NewManager(
 		logger:              logger,
 		state:               Snapshot{Phase: PhaseStarting, GadgetPaused: gadgetPaused, GadgetResumePending: resumePending},
 		triggerCh:           make(chan struct{}, 1),
+		indexRefreshCh:      make(chan struct{}, 1),
 		cleanupCh:           make(chan struct{}, 1),
 		mediaLeases:         make(map[string]int),
 		gadgetPaused:        gadgetPaused,
@@ -253,7 +267,13 @@ func resolveGadgetGuard(bootID string, guard gadgetGuardState, loadErr error) (p
 
 // Run 通过低频轮询串行管理数据盘、快照与 Gadget 生命周期，避免事件风暴并发触碰 UDC。
 func (m *Manager) Run(ctx context.Context) {
+	m.stateMu.Lock()
+	m.runContext = ctx
+	m.stateMu.Unlock()
+	go m.calibrateDurations(ctx)
+	go m.runSpaceGuard(ctx)
 	m.refreshWithTimeout(ctx)
+	go m.runIndexCache(ctx)
 	pollTicker := time.NewTicker(m.cfg.PollInterval)
 	defer pollTicker.Stop()
 	scanTicker := time.NewTicker(m.cfg.ScanInterval)
@@ -271,6 +291,93 @@ func (m *Manager) Run(ctx context.Context) {
 			m.refreshWithTimeout(ctx)
 		case <-m.cleanupCh:
 			m.cleanupWithTimeout(ctx)
+		case <-m.indexRefreshCh:
+			if err := m.ActivateMedia(ctx); err != nil && !errors.Is(err, ErrSnapshotUnavailable) {
+				m.logger.Warn("核对历史录像索引失败", "error", err)
+			}
+		}
+	}
+}
+
+// calibrateDurations 每次只借用一个文件的快照，避免后台校准阻止旧快照回收。
+func (m *Manager) calibrateDurations(ctx context.Context) {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	var snapshotID string
+	index := 0
+	remaining := 0
+	lastPath := ""
+	turn := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		m.stateMu.Lock()
+		view := m.state.MediaSnapshot
+		if view == nil || !m.state.SnapshotSpace.Ready || m.mediaLeases[view.ID] > 0 {
+			m.stateMu.Unlock()
+			continue
+		}
+		if snapshotID != view.ID {
+			snapshotID, index = view.ID, 0
+			// 轮换只重建文件清单，继续上次轮询位置，避免旧录像一直排在新增录像之后。
+			for i := range m.state.Videos {
+				if m.state.Videos[i].Path == lastPath {
+					index = (i + 1) % len(m.state.Videos)
+					break
+				}
+			}
+			remaining = len(m.state.Videos)
+		}
+		selected, priority := teslacam.TakePriorityDuration(m.state.Videos)
+		turn++
+		if priority && turn%4 == 0 {
+			teslacam.PrioritizeDurations(m.state.Videos[selected : selected+1])
+			priority = false
+		}
+		if !priority && remaining == 0 {
+			m.calibratedSnapshot = view.ID
+			m.stateMu.Unlock()
+			ticker.Reset(250 * time.Millisecond)
+			continue
+		}
+		if !priority {
+			for skipped := 0; remaining > 0 && skipped < 256 && teslacam.DurationKnown(m.state.Videos[index]); skipped++ {
+				lastPath = m.state.Videos[index].Path
+				index = (index + 1) % len(m.state.Videos)
+				remaining--
+			}
+			if remaining == 0 {
+				m.stateMu.Unlock()
+				continue
+			}
+			selected = index
+			index = (index + 1) % len(m.state.Videos)
+			remaining--
+			lastPath = m.state.Videos[selected].Path
+		}
+		video := m.state.Videos[selected]
+		id, root := view.ID, view.MountPath
+		m.mediaLeases[id]++
+		m.stateMu.Unlock()
+		started := time.Now()
+		teslacam.RefineVideoDurations(root, []teslacam.Video{video})
+		// 慢读取后主动让出时间，不依据假定的车机码率瓜分带宽。
+		ticker.Reset(max(5*time.Millisecond, min(250*time.Millisecond, 3*time.Since(started))))
+		m.stateMu.Lock()
+		m.mediaLeases[id]--
+		if m.mediaLeases[id] == 0 {
+			delete(m.mediaLeases, id)
+		}
+		retired := m.state.MediaSnapshot == nil || m.state.MediaSnapshot.ID != id
+		m.stateMu.Unlock()
+		if retired {
+			select {
+			case m.cleanupCh <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -451,6 +558,9 @@ func (m *Manager) Scan(ctx context.Context) error {
 func (m *Manager) ActivateMedia(ctx context.Context) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	now := m.now()
 	wasActive := now.Before(m.mediaActiveUntil)
@@ -462,26 +572,87 @@ func (m *Manager) ActivateMedia(ctx context.Context) error {
 	if wasActive || snapshotFresh {
 		return nil
 	}
-	return m.refreshSnapshotLocked(ctx)
+	// 请求断开不应取消共享快照工作；服务退出和扫描超时仍能终止它。
+	m.stateMu.RLock()
+	parent := m.runContext
+	m.stateMu.RUnlock()
+	if parent == nil {
+		parent = context.WithoutCancel(ctx)
+	}
+	timeout := m.cfg.SnapshotTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	scanCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	return m.refreshSnapshotLocked(scanCtx)
 }
 
 // Snapshot 返回防御性拷贝，避免 API 修改内部设备和媒体状态。
 func (m *Manager) Snapshot() Snapshot {
 	m.stateMu.RLock()
 	defer m.stateMu.RUnlock()
-	return cloneSnapshot(m.state)
+	result := cloneSnapshot(m.state)
+	result.ScanProgress = nil
+	if m.scanProgress != nil {
+		progress := *m.scanProgress
+		result.ScanProgress = &progress
+	}
+	result.CachedIndexAt = nil
+	result.CachedVideoCount = 0
+	m.indexMu.Lock()
+	if result.MediaSnapshot == nil && m.cachedIndex.ID != "" && m.cachedDevice == deviceIndexKey(result) {
+		at := m.cachedIndex.SavedAt
+		result.CachedIndexAt = &at
+		result.CachedVideoCount = len(m.cachedIndex.Videos)
+	}
+	m.indexMu.Unlock()
+	return result
+}
+
+// ScanProgress 是正在构建的候选索引进度，与已发布的可播放索引分开。
+type ScanProgress struct {
+	Stage      string `json:"stage"`
+	Discovered int    `json:"discovered"`
+}
+
+func (m *Manager) setScanProgress(stage string, count int) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	if stage == "" {
+		m.scanProgress = nil
+		return
+	}
+	m.scanProgress = &ScanProgress{Stage: stage, Discovered: count}
 }
 
 // AcquireMediaSnapshot 把媒体视图借给一次请求，防止播放期间的定时轮换卸载底层 loop 设备。
 func (m *Manager) AcquireMediaSnapshot() (Snapshot, func()) {
+	m.spaceGuard.mu.Lock()
+	blocked := m.spaceGuard.blocked
 	m.stateMu.Lock()
 	result := cloneSnapshot(m.state)
 	leaseID := ""
+	var cancelMedia context.CancelFunc
+	var leaseToken uint64
 	if result.MediaSnapshot != nil {
-		leaseID = result.MediaSnapshot.ID
-		m.mediaLeases[leaseID]++
+		if result.SnapshotSpace.Ready && !blocked {
+			leaseID = result.MediaSnapshot.ID
+			m.mediaLeases[leaseID]++
+			result.MediaContext, cancelMedia = context.WithCancel(context.Background())
+			if m.spaceGuard.leases == nil {
+				m.spaceGuard.leases = make(map[uint64]context.CancelFunc)
+			}
+			m.spaceGuard.nextLease++
+			leaseToken = m.spaceGuard.nextLease
+			m.spaceGuard.leases[leaseToken] = cancelMedia
+		} else {
+			// 预留空间已经失守时不再把旧快照借给新请求，让既有租约尽快自然结束并触发回收。
+			result.MediaSnapshot = nil
+		}
 	}
 	m.stateMu.Unlock()
+	m.spaceGuard.mu.Unlock()
 
 	var once sync.Once
 	return result, func() {
@@ -489,6 +660,10 @@ func (m *Manager) AcquireMediaSnapshot() (Snapshot, func()) {
 			if leaseID == "" {
 				return
 			}
+			m.spaceGuard.mu.Lock()
+			delete(m.spaceGuard.leases, leaseToken)
+			m.spaceGuard.mu.Unlock()
+			cancelMedia()
 			m.stateMu.Lock()
 			if m.mediaLeases[leaseID] <= 1 {
 				delete(m.mediaLeases, leaseID)
@@ -592,6 +767,9 @@ func (m *Manager) refreshWithTimeout(parent context.Context) {
 
 	ctx, cancel := context.WithTimeout(parent, m.cfg.OperationTimeout)
 	defer cancel()
+	if err := m.protectSnapshotSpaceLocked(ctx); err != nil && !isContextTermination(ctx, err) {
+		m.logger.Warn("保护车端录像预留空间失败", "error", err)
+	}
 	if err := m.reconcileLocked(ctx); err != nil &&
 		!errors.Is(err, storage.ErrDeviceNotFound) &&
 		!errors.Is(err, ErrDataDriveDisconnected) &&
@@ -717,6 +895,15 @@ func (m *Manager) reconcileLocked(ctx context.Context) error {
 			LastError:           backingStatus.Reason,
 		}, previous)
 		return nil
+	}
+	// 数据盘已经挂载且 backing store 已确认后，必须先清理上一次进程或异常断电遗留的 reflink。
+	// 如果把回收推迟到首次浏览录像，车机可能在无人打开页面时持续覆盖共享 extent，最终耗尽外层 XFS。
+	if !m.snapshotRecovered {
+		if err := m.snapshotter.Recover(ctx); err != nil {
+			return m.storeTransientFault(previous, fmt.Errorf("启动前回收遗留 TeslaCam 快照: %w", err))
+		}
+		m.snapshotRecovered = true
+		m.logger.Info("启动前已回收遗留 TeslaCam 快照")
 	}
 	gadgetEnvironment, err := m.prober.Probe()
 	if err != nil {
@@ -925,6 +1112,8 @@ func canRefreshMediaSnapshot(state Snapshot) bool {
 }
 
 func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
+	ctx, stopSpaceWatch := m.watchSnapshotSpace(ctx)
+	defer stopSpaceWatch()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -936,6 +1125,15 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	}
 
 	creating := previous
+	// 绑定扫描开始时的镜像身份，避免换盘后把旧快照保存到新设备名下。
+	var indexIdentity string
+	if m.cfg.IndexCacheDir != "" {
+		if key, err := persistentIndexIdentity(previous, m.cfg.IndexCacheDir); err == nil {
+			indexIdentity = key + ":" + m.cfg.TeslaTimeZone
+		}
+	}
+	m.setScanProgress("preparing", 0)
+	defer m.setScanProgress("", 0)
 	creating.Phase = PhaseSnapshotCreating
 	creating.LastError = ""
 	m.store(creating)
@@ -970,10 +1168,13 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	if err != nil {
 		return m.storeSnapshotFailure(previous, fmt.Errorf("创建 TeslaCam 快照: %w", err))
 	}
-	videos, err := m.scanner.Scan(view.MountPath)
+	m.setScanProgress("scanning", 0)
+	reportProgress := func(count int) { m.setScanProgress("scanning", count) }
+	videos, err := scanVideos(ctx, m.scanner, view.MountPath, reportProgress)
 	if err != nil && isRepairableSnapshotScanError(err) {
 		firstScanErr := err
-		if cleanupErr := m.snapshotter.Remove(ctx, view); cleanupErr != nil {
+		m.setScanProgress("repairing", 0)
+		if cleanupErr := m.removeFailedSnapshot(ctx, view); cleanupErr != nil {
 			return m.storeSnapshotFailure(previous, errors.Join(
 				fmt.Errorf("扫描 TeslaCam 快照: %w", firstScanErr),
 				fmt.Errorf("清理扫描异常快照: %w", cleanupErr),
@@ -986,7 +1187,8 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 				fmt.Errorf("创建修复后的 TeslaCam 快照副本: %w", err),
 			))
 		}
-		videos, err = m.scanner.Scan(view.MountPath)
+		m.setScanProgress("scanning", 0)
+		videos, err = scanVideos(ctx, m.scanner, view.MountPath, reportProgress)
 		if err == nil {
 			m.logger.Warn(
 				"TeslaCam 快照扫描 EIO 后已修复副本并重试成功",
@@ -997,7 +1199,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		cleanupErr := m.snapshotter.Remove(ctx, view)
+		cleanupErr := m.removeFailedSnapshot(ctx, view)
 		cause := fmt.Errorf("扫描 TeslaCam 快照: %w", err)
 		if cleanupErr != nil {
 			cause = errors.Join(cause, fmt.Errorf("清理不可用快照: %w", cleanupErr))
@@ -1006,6 +1208,7 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	}
 
 	ready := previous
+	ready.indexIdentity = indexIdentity
 	ready.Phase = PhaseSnapshotReady
 	ready.MediaSnapshot = &view
 	ready.MediaVolumeSpace = view.VolumeSpace
@@ -1049,6 +1252,18 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 
 func isRepairableSnapshotScanError(err error) bool {
 	return errors.Is(err, syscall.EIO)
+}
+
+// removeFailedSnapshot 使用独立超时回收失败副本，未完成的回收交给后续任务重试。
+// 调用方持有 refreshMu，副本尚未发布，不存在新租约。
+func (m *Manager) removeFailedSnapshot(ctx context.Context, view mediasnapshot.View) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := m.snapshotter.Remove(cleanupCtx, view); err != nil {
+		m.retired = append(m.retired, view)
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) storeSnapshotFailure(previous Snapshot, cause error) error {
@@ -1147,6 +1362,91 @@ func (m *Manager) releaseIdleMediaSnapshotLocked(ctx context.Context, now time.T
 		return fmt.Errorf("删除空闲 TeslaCam 快照 %s: %w", view.ID, err)
 	}
 	m.logger.Info("媒体浏览已空闲，已释放 TeslaCam reflink 快照", "snapshot_id", view.ID, "video_count", state.VideoCount)
+	return nil
+}
+
+// protectSnapshotSpaceLocked 在外层 XFS 触及预留线时主动撤销媒体快照，优先保证车机继续写入。
+// 调用方必须持有 refreshMu；仍有播放或导出租约时先禁止续租，最后一个租约释放后由 cleanupCh 完成回收。
+func (m *Manager) protectSnapshotSpaceLocked(ctx context.Context) error {
+	state := m.Snapshot()
+	if state.DataDrive == nil {
+		return nil
+	}
+	space, err := m.snapshotter.Space()
+	if err != nil {
+		return fmt.Errorf("检查媒体快照预留空间: %w", err)
+	}
+	state.SnapshotSpace = space
+	if state.MediaSnapshot == nil {
+		m.store(state)
+		return nil
+	}
+	if space.Ready {
+		m.store(state)
+		return nil
+	}
+
+	m.mediaActiveUntil = time.Time{}
+	m.stateMu.Lock()
+	state = m.state
+	if state.MediaSnapshot == nil {
+		m.stateMu.Unlock()
+		return nil
+	}
+	state.SnapshotSpace = space
+	view := *state.MediaSnapshot
+	previousPhase := state.Phase
+	if m.mediaLeases[view.ID] > 0 {
+		shouldWarn := state.SnapshotError != space.Reason
+		state.Phase = PhaseDegraded
+		state.SnapshotError = space.Reason
+		state.LastError = space.Reason
+		m.state = state
+		m.stateMu.Unlock()
+		if previousPhase != state.Phase {
+			m.logger.Info("TeslaUSB 状态已切换", "from", previousPhase, "to", state.Phase)
+		}
+		if shouldWarn {
+			m.logger.Warn(
+				"媒体快照已触及车端录像预留空间，等待当前播放或导出结束后回收",
+				"snapshot_id", view.ID,
+				"free_bytes", space.FreeBytes,
+				"required_bytes", space.RequiredBytes,
+			)
+		}
+		return nil
+	}
+
+	state.MediaSnapshot = nil
+	switch {
+	case state.GadgetPaused && !state.GadgetStatus.Bound:
+		state.Phase = PhaseReadyForGadget
+	case state.GadgetStatus.Bound:
+		state.Phase = PhaseGadgetActive
+	default:
+		state.Phase = PhaseDegraded
+	}
+	state.SnapshotError = space.Reason
+	state.LastError = space.Reason
+	m.lastSnapshotAt = time.Time{}
+	m.snapshotFailures = 0
+	m.snapshotRetryAt = time.Time{}
+	m.state = state
+	m.stateMu.Unlock()
+	if previousPhase != state.Phase {
+		m.logger.Info("TeslaUSB 状态已切换", "from", previousPhase, "to", state.Phase)
+	}
+	if err := m.snapshotter.Remove(ctx, view); err != nil {
+		m.retired = append(m.retired, view)
+		return fmt.Errorf("紧急回收 TeslaCam 快照 %s: %w", view.ID, err)
+	}
+	m.logger.Warn(
+		"媒体快照已触及车端录像预留空间并完成紧急回收",
+		"snapshot_id", view.ID,
+		"from_phase", previousPhase,
+		"free_bytes", space.FreeBytes,
+		"required_bytes", space.RequiredBytes,
+	)
 	return nil
 }
 
@@ -1319,6 +1619,8 @@ func isContextTermination(ctx context.Context, err error) bool {
 }
 
 func (m *Manager) store(snapshot Snapshot, mediaSource ...Snapshot) {
+	// 进度由独立字段管理，不随旧状态合并重新发布。
+	snapshot.ScanProgress = nil
 	if len(mediaSource) > 0 {
 		snapshot = preserveMedia(snapshot, mediaSource[0])
 	}
@@ -1336,6 +1638,7 @@ func (m *Manager) store(snapshot Snapshot, mediaSource ...Snapshot) {
 }
 
 func preserveMedia(target, source Snapshot) Snapshot {
+	target.indexIdentity = source.indexIdentity
 	if source.MediaSnapshot != nil {
 		view := *source.MediaSnapshot
 		target.MediaSnapshot = &view

@@ -88,6 +88,10 @@ func TestLoadDerivesSignedCatalogFromManifest(t *testing.T) {
 	if cfg.UpdateCatalogURL != "https://gitee.example/repository/raw/master/stable/history.json" {
 		t.Fatalf("UpdateCatalogURL = %q", cfg.UpdateCatalogURL)
 	}
+	if cfg.UpdateBetaManifestURL != "https://gitee.example/repository/raw/master/beta/latest.json" ||
+		cfg.UpdateBetaCatalogURL != "https://gitee.example/repository/raw/master/beta/history.json" {
+		t.Fatalf("derived beta URLs = %q, %q", cfg.UpdateBetaManifestURL, cfg.UpdateBetaCatalogURL)
+	}
 
 	t.Setenv("TESLABOX_UPDATE_CATALOG_URL", "https://updates.example/custom/catalog.json")
 	cfg, err = Load()
@@ -96,6 +100,20 @@ func TestLoadDerivesSignedCatalogFromManifest(t *testing.T) {
 	}
 	if cfg.UpdateCatalogURL != "https://updates.example/custom/catalog.json" {
 		t.Fatalf("explicit UpdateCatalogURL = %q", cfg.UpdateCatalogURL)
+	}
+}
+
+func TestBetaManifestURLForStableRejectsUnrelatedOrInsecureURL(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"",
+		"http://gitee.example/repository/raw/master/stable/latest.json",
+		"https://gitee.example/repository/raw/master/latest.json",
+		"https://gitee.example/repository/raw/master/stable/release.json",
+	} {
+		if got := betaManifestURLForStable(value); got != "" {
+			t.Fatalf("betaManifestURLForStable(%q) = %q", value, got)
+		}
 	}
 }
 

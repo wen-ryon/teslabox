@@ -2,12 +2,28 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 )
+
+type lsblkFallbackRunner struct {
+	calls []string
+}
+
+func (r *lsblkFallbackRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
+	if name == "lsblk" && strings.Contains(strings.Join(args, " "), "MOUNTPOINTS") {
+		return nil, errors.New("lsblk: unknown column: MOUNTPOINTS")
+	}
+	if name == "lsblk" {
+		return []byte("sda disk 116G xfs /var/lib/teslabox USB Disk usb"), nil
+	}
+	return nil, nil
+}
 
 type fakeRunner struct {
 	name            string
@@ -187,6 +203,8 @@ func TestManagerBundleIncludesStateLogsAndRedaction(t *testing.T) {
 	content := string(bundle.Content)
 	for _, expected := range []string{
 		"TeslaBox 诊断报告",
+		"TeslaBox 数据盘字节统计",
+		"当前启动存储与 USB 关键故障日志",
 		"TeslaBox 服务状态",
 		"当前启动日志: media",
 		"上一次启动关键故障日志",
@@ -202,6 +220,40 @@ func TestManagerBundleIncludesStateLogsAndRedaction(t *testing.T) {
 	}
 	if strings.Contains(content, "owner-token") || !strings.HasSuffix(bundle.Filename, ".txt") {
 		t.Fatalf("bundle filename = %q, content = %s", bundle.Filename, content)
+	}
+}
+
+func TestBundleBlockDevicesFallsBackForOldLsblk(t *testing.T) {
+	t.Parallel()
+	runner := &lsblkFallbackRunner{}
+	var report strings.Builder
+	writeBlockDevicesSection(t.Context(), runner, &report)
+	if len(runner.calls) != 2 || !strings.Contains(runner.calls[0], "MOUNTPOINTS") ||
+		!strings.Contains(runner.calls[1], "MOUNTPOINT,") {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	if !strings.Contains(report.String(), "/var/lib/teslabox") || strings.Contains(report.String(), "无法读取") {
+		t.Fatalf("report = %q", report.String())
+	}
+}
+
+func TestIncidentJournalIncludesStorageFailureKeywords(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: strings.Join([]string{
+		"kernel: harmless message",
+		"kernel: XFS (sda1): log I/O error -5",
+		"kernel: blk_update_request: I/O error, dev sda",
+		"teslabox: write failed: no space left on device",
+	}, "\n")}
+	var report strings.Builder
+	writeIncidentJournalSection(t.Context(), runner, &report, "故障", "-1")
+	content := report.String()
+	if strings.Contains(content, "harmless") || !strings.Contains(content, "XFS") ||
+		!strings.Contains(content, "blk_update_request") || !strings.Contains(content, "no space left") {
+		t.Fatalf("report = %q", content)
+	}
+	if !strings.Contains(strings.Join(runner.args, " "), "--boot=-1") {
+		t.Fatalf("args = %#v", runner.args)
 	}
 }
 

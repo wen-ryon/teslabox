@@ -32,6 +32,7 @@ const (
 	defaultUpdateDir                = "/var/lib/teslabox-system/updates"
 	defaultUpdateRequest            = "/var/lib/teslabox-system/update-request.json"
 	defaultUpdateResult             = "/var/lib/teslabox-system/update-result.json"
+	defaultUpdateChannelState       = "/var/lib/teslabox-system/update-channel.json"
 	defaultGadgetPausePath          = "/var/lib/teslabox-system/gadget-paused"
 	defaultMaintenanceLockPath      = "/run/teslabox/storage-maintenance.lock"
 	defaultMaintenanceOperationPath = "/var/lib/teslabox-system/storage-maintenance.json"
@@ -71,6 +72,7 @@ type Config struct {
 	StatePath                   string
 	ExportPath                  string
 	ExportStatePath             string
+	IndexCacheDir               string
 	RegistryPath                string
 	WebAuthStatePath            string
 	MaintenanceStatePath        string
@@ -78,8 +80,11 @@ type Config struct {
 	TeslaTimeZone               string
 	UpdateManifestURL           string
 	UpdateCatalogURL            string
+	UpdateBetaManifestURL       string
+	UpdateBetaCatalogURL        string
 	UpdatePublicKey             string
 	UpdateChannel               string
+	UpdateChannelStatePath      string
 	UpdateBoard                 string
 	UpdateDownloadDir           string
 	UpdateRequestPath           string
@@ -186,6 +191,14 @@ func Load() (Config, error) {
 	if updateCatalogURL == "" {
 		updateCatalogURL = catalogURLForManifest(updateManifestURL)
 	}
+	updateBetaManifestURL := strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_BETA_MANIFEST_URL"))
+	if updateBetaManifestURL == "" {
+		updateBetaManifestURL = betaManifestURLForStable(updateManifestURL)
+	}
+	updateBetaCatalogURL := strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_BETA_CATALOG_URL"))
+	if updateBetaCatalogURL == "" {
+		updateBetaCatalogURL = catalogURLForManifest(updateBetaManifestURL)
+	}
 
 	cfg := Config{
 		HTTPAddr:                    envString("TESLABOX_HTTP_ADDR", defaultHTTPAddr),
@@ -199,6 +212,7 @@ func Load() (Config, error) {
 		StatePath:                   envString("TESLABOX_STATE_PATH", defaultStatePath),
 		ExportPath:                  envString("TESLABOX_EXPORT_PATH", defaultExportPath),
 		ExportStatePath:             envString("TESLABOX_EXPORT_STATE", defaultExportStatePath),
+		IndexCacheDir:               envString("TESLABOX_INDEX_CACHE_DIR", "/var/lib/teslabox-system/index-cache"),
 		RegistryPath:                envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		WebAuthStatePath:            envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
 		MaintenanceStatePath:        envString("TESLABOX_MAINTENANCE_STATE", defaultMaintenancePath),
@@ -206,8 +220,11 @@ func Load() (Config, error) {
 		TeslaTimeZone:               envString("TESLABOX_TESLA_TIME_ZONE", defaultTeslaTimeZone),
 		UpdateManifestURL:           updateManifestURL,
 		UpdateCatalogURL:            updateCatalogURL,
+		UpdateBetaManifestURL:       updateBetaManifestURL,
+		UpdateBetaCatalogURL:        updateBetaCatalogURL,
 		UpdatePublicKey:             strings.TrimSpace(os.Getenv("TESLABOX_UPDATE_PUBLIC_KEY")),
 		UpdateChannel:               envString("TESLABOX_UPDATE_CHANNEL", "stable"),
+		UpdateChannelStatePath:      envString("TESLABOX_UPDATE_CHANNEL_STATE", defaultUpdateChannelState),
 		UpdateBoard:                 envString("TESLABOX_UPDATE_BOARD", "radxa-rock-3a"),
 		UpdateDownloadDir:           defaultUpdateDir,
 		UpdateRequestPath:           defaultUpdateRequest,
@@ -259,6 +276,17 @@ func catalogURLForManifest(manifestURL string) string {
 		return ""
 	}
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/latest.json") + "/history.json"
+	parsed.RawPath = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func betaManifestURLForStable(manifestURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(manifestURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || !strings.HasSuffix(parsed.Path, "/stable/latest.json") {
+		return ""
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/stable/latest.json") + "/beta/latest.json"
 	parsed.RawPath = ""
 	parsed.Fragment = ""
 	return parsed.String()
@@ -334,6 +362,12 @@ func (c Config) Validate() error {
 		if !isSafeAbsolutePath(value) {
 			return fmt.Errorf("%s 必须是非根目录的绝对路径", name)
 		}
+	}
+	if c.IndexCacheDir != "" && !isSafeAbsolutePath(c.IndexCacheDir) {
+		return fmt.Errorf("TESLABOX_INDEX_CACHE_DIR 必须是非根目录的绝对路径")
+	}
+	if c.UpdateChannelStatePath != "" && !isSafeAbsolutePath(c.UpdateChannelStatePath) {
+		return fmt.Errorf("TESLABOX_UPDATE_CHANNEL_STATE 必须是非根目录的绝对路径")
 	}
 	if c.UpdateMaxBytes <= 0 {
 		return fmt.Errorf("更新包大小上限必须大于零")

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -27,6 +28,29 @@ type fakeController struct {
 	acquired  func()
 	released  func()
 	activated func()
+}
+
+type fakeThumbnailController struct {
+	fakeController
+	thumbnails map[string][]byte
+}
+
+func (c *fakeThumbnailController) CachedThumbnail(id string) ([]byte, time.Time, bool) {
+	data, ok := c.thumbnails[id]
+	return append([]byte(nil), data...), time.Unix(1000, 0), ok
+}
+
+func (c *fakeThumbnailController) HasCachedThumbnail(id string) bool {
+	_, ok := c.thumbnails[id]
+	return ok
+}
+
+func (c *fakeThumbnailController) StoreCachedThumbnail(id string, data []byte) error {
+	if c.thumbnails == nil {
+		c.thumbnails = make(map[string][]byte)
+	}
+	c.thumbnails[id] = append([]byte(nil), data...)
+	return nil
 }
 
 func (c fakeController) Snapshot() service.Snapshot {
@@ -389,6 +413,34 @@ func TestThumbnailEndpoint(t *testing.T) {
 	}
 }
 
+func TestThumbnailEndpointCachesSnapshotAndServesHistory(t *testing.T) {
+	root := t.TempDir()
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "thumb.png"))
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("thumbnail"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeThumbnailController{fakeController: fakeController{state: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot", MountPath: root},
+		Videos:        []teslacam.Video{{ThumbnailID: "1111111111111111", ThumbnailPath: relative}},
+	}}}
+	handler := NewHandler(controller, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/v1/thumbnails/1111111111111111", nil))
+	if first.Code != http.StatusOK || string(controller.thumbnails["1111111111111111"]) != "thumbnail" {
+		t.Fatalf("snapshot response = %d cache=%q", first.Code, controller.thumbnails["1111111111111111"])
+	}
+	controller.state.MediaSnapshot = nil
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/api/v1/thumbnails/1111111111111111", nil))
+	if second.Code != http.StatusOK || second.Body.String() != "thumbnail" {
+		t.Fatalf("cached response = %d %q", second.Code, second.Body.String())
+	}
+}
+
 func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 7, 16, 10, 30, 0, 0, time.Local)
@@ -437,9 +489,13 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	detailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/video-sessions/"+session.ID, nil)
 	detailResponse := httptest.NewRecorder()
 	handler.ServeHTTP(detailResponse, detailRequest)
-	if detailResponse.Code != http.StatusOK {
+	if detailResponse.Code != http.StatusServiceUnavailable {
 		t.Fatalf("detail status = %d", detailResponse.Code)
 	}
+	// 旧清单仍可列出，但无快照时不能把估算时间轴交给播放器。
+	detailResponse = httptest.NewRecorder()
+	detailRequest.SetPathValue("id", session.ID)
+	writeVideoSession(detailResponse, detailRequest, videos, t.TempDir())
 	var detail videoSession
 	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
 		t.Fatal(err)
@@ -447,6 +503,60 @@ func TestVideoSessionListReturnsCompleteTimeline(t *testing.T) {
 	if len(detail.Moments) != 2 || detail.EventMetadata == nil || detail.EventMetadata.Reason != "sentry_aware_accel_0.8" {
 		t.Fatalf("detail = %#v", detail)
 	}
+}
+
+func TestVideoSessionDetailRefinesIndexedFilesForAccurateTimeline(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	relative := filepath.ToSlash(filepath.Join("TeslaCam", "RecentClips", "2026-07-16_10-00-00-front.mp4"))
+	name := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, videoDurationFixture(17_500), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	video := teslacam.Video{
+		ID: "video-1", Path: relative, ClipType: "recent", Camera: "front",
+		RecordedAt: time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC), Duration: 60, DurationState: "estimated",
+	}
+	session := groupVideoSessions(groupVideos([]teslacam.Video{video}, videoGroupTolerance), sessionContinuityGap)[0]
+	handler := NewHandler(fakeController{state: service.Snapshot{
+		MediaSnapshot: &mediasnapshot.View{ID: "snapshot-1", MountPath: root},
+		Videos:        []teslacam.Video{video},
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/video-sessions/"+session.ID, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var detail videoSession
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Moments) != 1 || len(detail.Moments[0].Videos) != 1 {
+		t.Fatalf("detail = %#v", detail)
+	}
+	indexed := detail.Moments[0].Videos[0]
+	if math.Abs(indexed.Duration-17.5) > 0.001 || indexed.DurationState != "verified" || math.Abs(detail.Duration-17.5) > 0.001 {
+		t.Fatalf("refined video = %#v", indexed)
+	}
+}
+
+func videoDurationFixture(duration uint32) []byte {
+	payload := make([]byte, 20)
+	binary.BigEndian.PutUint32(payload[12:16], 1_000)
+	binary.BigEndian.PutUint32(payload[16:20], duration)
+	mvhd := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint32(mvhd[:4], uint32(len(mvhd)))
+	copy(mvhd[4:8], "mvhd")
+	copy(mvhd[8:], payload)
+	moov := make([]byte, 8+len(mvhd))
+	binary.BigEndian.PutUint32(moov[:4], uint32(len(moov)))
+	copy(moov[4:8], "moov")
+	copy(moov[8:], mvhd)
+	return moov
 }
 
 func TestGroupVideosDoesNotCreateToleranceChain(t *testing.T) {

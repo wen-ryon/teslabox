@@ -31,42 +31,55 @@ const (
 
 // Status 不暴露板端文件路径或内部命令输出，只返回管理页面需要的信息。
 type Status struct {
-	Configured        bool   `json:"configured"`
-	CurrentVersion    string `json:"current_version"`
-	CurrentCommit     string `json:"current_commit"`
-	Channel           string `json:"channel"`
-	State             State  `json:"state"`
-	LatestVersion     string `json:"latest_version,omitempty"`
-	PublishedAt       string `json:"published_at,omitempty"`
-	ReleaseNotes      string `json:"release_notes,omitempty"`
-	SelectedAction    string `json:"selected_action,omitempty"`
-	HistoryConfigured bool   `json:"history_configured"`
-	Available         bool   `json:"available"`
-	ProgressPercent   int    `json:"progress_percent"`
-	DownloadedBytes   int64  `json:"downloaded_bytes,omitempty"`
-	TotalBytes        int64  `json:"total_bytes,omitempty"`
-	Error             string `json:"error,omitempty"`
-	LastCheckedAt     string `json:"last_checked_at,omitempty"`
-	InstallResult     string `json:"install_result,omitempty"`
+	Configured        bool            `json:"configured"`
+	CurrentVersion    string          `json:"current_version"`
+	CurrentCommit     string          `json:"current_commit"`
+	Channel           string          `json:"channel"`
+	Channels          []ChannelOption `json:"channels,omitempty"`
+	State             State           `json:"state"`
+	LatestVersion     string          `json:"latest_version,omitempty"`
+	PublishedAt       string          `json:"published_at,omitempty"`
+	ReleaseNotes      string          `json:"release_notes,omitempty"`
+	SelectedAction    string          `json:"selected_action,omitempty"`
+	HistoryConfigured bool            `json:"history_configured"`
+	Available         bool            `json:"available"`
+	ProgressPercent   int             `json:"progress_percent"`
+	DownloadedBytes   int64           `json:"downloaded_bytes,omitempty"`
+	TotalBytes        int64           `json:"total_bytes,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	LastCheckedAt     string          `json:"last_checked_at,omitempty"`
+	InstallResult     string          `json:"install_result,omitempty"`
+	Message           string          `json:"message,omitempty"`
+}
+
+// ChannelOption 描述设备可切换的更新通道；可用性仅代表本机已配置对应签名源。
+type ChannelOption struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Available   bool   `json:"available"`
 }
 
 // Config 定义在线更新功能的本地策略，私钥永远不属于设备配置。
 type Config struct {
-	ManifestURL    string
-	CatalogURL     string
-	PublicKey      string
-	Channel        string
-	Board          string
-	Arch           string
-	CurrentVersion string
-	CurrentCommit  string
-	DownloadDir    string
-	RequestPath    string
-	ResultPath     string
-	MaximumSize    int64
-	Logger         *slog.Logger
-	CanInstall     func() error
-	AutoReboot     func() bool
+	ManifestURL      string
+	CatalogURL       string
+	BetaManifestURL  string
+	BetaCatalogURL   string
+	PublicKey        string
+	Channel          string
+	ChannelStatePath string
+	Board            string
+	Arch             string
+	CurrentVersion   string
+	CurrentCommit    string
+	DownloadDir      string
+	RequestPath      string
+	ResultPath       string
+	MaximumSize      int64
+	Logger           *slog.Logger
+	CanInstall       func() error
+	AutoReboot       func() bool
 }
 
 // ServiceStarter 只允许启动预先安装的固定 systemd 单元，避免把远程字段拼进命令。
@@ -78,6 +91,7 @@ type ServiceStarter interface {
 type Manager struct {
 	config      Config
 	client      *Client
+	clients     map[string]*Client
 	starter     ServiceStarter
 	logger      *slog.Logger
 	stateMu     sync.RWMutex
@@ -87,10 +101,17 @@ type Manager struct {
 	opMu        sync.Mutex
 }
 
+type channelSelection struct {
+	Channel string `json:"channel"`
+}
+
 // New 创建更新管理器；未同时配置清单地址和公钥时功能保持禁用而不阻止主服务启动。
 func New(config Config, starter ServiceStarter) (*Manager, error) {
 	if config.Channel == "" {
 		config.Channel = "stable"
+	}
+	if !validChannel(config.Channel) {
+		return nil, errors.New("更新通道仅支持 stable 或 beta")
 	}
 	if config.Board == "" {
 		config.Board = "radxa-rock-3a"
@@ -107,10 +128,10 @@ func New(config Config, starter ServiceStarter) (*Manager, error) {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	manager := &Manager{config: config, starter: starter, logger: config.Logger}
+	manager := &Manager{config: config, starter: starter, logger: config.Logger, clients: make(map[string]*Client)}
 	manager.state = Status{
 		Configured: false, CurrentVersion: config.CurrentVersion, CurrentCommit: config.CurrentCommit,
-		Channel: config.Channel, State: StateDisabled,
+		Channel: config.Channel, Channels: manager.channelOptions(), State: StateDisabled,
 	}
 	manifestURL := strings.TrimSpace(config.ManifestURL)
 	publicKeyValue := strings.TrimSpace(config.PublicKey)
@@ -123,23 +144,77 @@ func New(config Config, starter ServiceStarter) (*Manager, error) {
 	if !filepath.IsAbs(config.RequestPath) || !filepath.IsAbs(config.ResultPath) {
 		return nil, errors.New("更新请求和结果路径必须是绝对路径")
 	}
+	if config.ChannelStatePath != "" && (!filepath.IsAbs(config.ChannelStatePath) || filepath.Clean(config.ChannelStatePath) == string(filepath.Separator)) {
+		return nil, errors.New("更新通道状态路径必须是非根目录的绝对路径")
+	}
 	publicKey, err := parsePublicKey(publicKeyValue)
 	if err != nil {
 		return nil, err
 	}
-	client, err := NewClient(ClientConfig{
-		ManifestURL: manifestURL, CatalogURL: config.CatalogURL, PublicKey: publicKey, Channel: config.Channel,
-		Board: config.Board, Arch: config.Arch, DownloadDir: config.DownloadDir,
-		MaximumSize: config.MaximumSize,
-	})
-	if err != nil {
+	if err := manager.addClient(config.Channel, manifestURL, config.CatalogURL, publicKey); err != nil {
 		return nil, err
 	}
-	manager.client = client
+	betaManifestURL := strings.TrimSpace(config.BetaManifestURL)
+	betaCatalogURL := strings.TrimSpace(config.BetaCatalogURL)
+	if (betaManifestURL == "") != (betaCatalogURL == "") {
+		return nil, errors.New("内测更新清单地址和历史目录地址必须同时配置")
+	}
+	if betaManifestURL != "" {
+		if err := manager.addClient("beta", betaManifestURL, betaCatalogURL, publicKey); err != nil {
+			return nil, err
+		}
+	}
+	selectedChannel := config.Channel
+	if saved, ok := readChannelSelection(config.ChannelStatePath); ok && manager.clients[saved] != nil {
+		selectedChannel = saved
+	}
+	manager.config.Channel = selectedChannel
+	manager.client = manager.clients[selectedChannel]
 	manager.state.Configured = true
-	manager.state.HistoryConfigured = client.HasCatalog()
+	manager.state.Channel = selectedChannel
+	manager.state.Channels = manager.channelOptions()
+	manager.state.HistoryConfigured = manager.client.HasCatalog()
 	manager.state.State = StateIdle
 	return manager, nil
+}
+
+func (m *Manager) addClient(channel, manifestURL, catalogURL string, publicKey []byte) error {
+	client, err := NewClient(ClientConfig{
+		ManifestURL: manifestURL, CatalogURL: catalogURL, PublicKey: publicKey, Channel: channel,
+		Board: m.config.Board, Arch: m.config.Arch, DownloadDir: m.config.DownloadDir,
+		MaximumSize: m.config.MaximumSize,
+	})
+	if err != nil {
+		return err
+	}
+	m.clients[channel] = client
+	return nil
+}
+
+func (m *Manager) channelOptions() []ChannelOption {
+	return []ChannelOption{
+		{ID: "stable", Label: "稳定版", Description: "只接收维护者正式发布并签名的版本。", Available: m.clients["stable"] != nil},
+		{ID: "beta", Label: "内测版", Description: "可接收维护者发布的预览版本，可能包含尚未覆盖全部场景的改动。", Available: m.clients["beta"] != nil},
+	}
+}
+
+func validChannel(channel string) bool {
+	return channel == "stable" || channel == "beta"
+}
+
+func readChannelSelection(path string) (string, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var selection channelSelection
+	if json.Unmarshal(content, &selection) != nil || !validChannel(selection.Channel) {
+		return "", false
+	}
+	return selection.Channel, true
 }
 
 // Status 返回线程安全的更新快照，并合并独立安装助手留下的最终结果。
@@ -171,15 +246,61 @@ func (m *Manager) Status() Status {
 	return status
 }
 
-// Check 获取并验签最新清单，签名失败时不会保留清单供后续下载。
-func (m *Manager) Check(ctx context.Context) (Status, error) {
-	if m.client == nil {
-		return m.Status(), errors.New("在线更新尚未配置")
+// SetChannel 切换更新来源并持久保存选择。切换后必须重新检查，旧通道的候选包不会被继续安装。
+func (m *Manager) SetChannel(channel string) (Status, error) {
+	channel = strings.TrimSpace(channel)
+	if !validChannel(channel) {
+		return m.Status(), errors.New("更新通道仅支持稳定版或内测版")
 	}
 	if !m.opMu.TryLock() {
 		return m.Status(), errors.New("已有更新操作正在进行")
 	}
 	defer m.opMu.Unlock()
+	if m.client == nil {
+		return m.Status(), errors.New("在线更新尚未配置")
+	}
+	client := m.clients[channel]
+	if client == nil {
+		return m.Status(), errors.New("内测更新源尚未配置")
+	}
+	current := m.Status()
+	if current.State == StateDownloading || current.State == StateDownloaded || current.State == StateInstalling {
+		return current, errors.New("请先完成或放弃当前更新，再切换更新通道")
+	}
+	if channel == m.config.Channel {
+		return current, nil
+	}
+	if m.config.ChannelStatePath != "" {
+		if err := writeJSONAtomic(m.config.ChannelStatePath, channelSelection{Channel: channel}, 0o600); err != nil {
+			return current, fmt.Errorf("保存更新通道: %w", err)
+		}
+	}
+	m.config.Channel = channel
+	m.client = client
+	m.manifest = nil
+	m.packagePath = ""
+	m.updateState(func(status *Status) {
+		status.Channel = channel
+		status.Channels = m.channelOptions()
+		status.State, status.Error, status.Message = StateIdle, "", ""
+		status.HistoryConfigured = client.HasCatalog()
+		status.LatestVersion, status.PublishedAt, status.ReleaseNotes = "", "", ""
+		status.SelectedAction, status.Available = "", false
+		status.ProgressPercent, status.DownloadedBytes, status.TotalBytes = 0, 0, 0
+		status.LastCheckedAt = ""
+	})
+	return m.Status(), nil
+}
+
+// Check 获取并验签最新清单，签名失败时不会保留清单供后续下载。
+func (m *Manager) Check(ctx context.Context) (Status, error) {
+	if !m.opMu.TryLock() {
+		return m.Status(), errors.New("已有更新操作正在进行")
+	}
+	defer m.opMu.Unlock()
+	if m.client == nil {
+		return m.Status(), errors.New("在线更新尚未配置")
+	}
 	m.updateState(func(status *Status) {
 		status.State, status.Error = StateChecking, ""
 	})
@@ -187,6 +308,17 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 	defer cancel()
 	manifest, err := m.client.FetchManifest(checkCtx)
 	if err != nil {
+		if m.noBetaRelease(err) {
+			m.updateState(func(status *Status) {
+				status.State, status.Error = StateCurrent, ""
+				status.LatestVersion, status.PublishedAt, status.ReleaseNotes = "", "", ""
+				status.SelectedAction, status.Available = "", false
+				status.ProgressPercent, status.DownloadedBytes, status.TotalBytes = 0, 0, 0
+				status.LastCheckedAt = time.Now().Format(time.RFC3339)
+				status.Message = "内测通道暂未发布可用版本。"
+			})
+			return m.Status(), nil
+		}
 		m.fail("检查更新失败", err)
 		return m.Status(), err
 	}
@@ -217,27 +349,30 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 			status.SelectedAction = "upgrade"
 		}
 		status.ProgressPercent, status.DownloadedBytes, status.TotalBytes = 0, 0, manifest.Size
-		status.LastCheckedAt, status.Error = now, ""
+		status.LastCheckedAt, status.Error, status.Message = now, "", ""
 	})
 	return m.Status(), nil
 }
 
 // History 返回维护者签名且与当前程序兼容的可选历史版本；未配置目录时保持普通更新可用。
 func (m *Manager) History(ctx context.Context) (ReleaseHistory, error) {
+	if !m.opMu.TryLock() {
+		return ReleaseHistory{}, errors.New("已有更新操作正在进行")
+	}
+	defer m.opMu.Unlock()
 	if m.client == nil {
 		return ReleaseHistory{}, errors.New("在线更新尚未配置")
 	}
 	if !m.client.HasCatalog() {
 		return ReleaseHistory{Configured: false}, nil
 	}
-	if !m.opMu.TryLock() {
-		return ReleaseHistory{}, errors.New("已有更新操作正在进行")
-	}
-	defer m.opMu.Unlock()
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	catalog, err := m.client.FetchCatalog(checkCtx)
 	if err != nil {
+		if m.noBetaRelease(err) {
+			return ReleaseHistory{Configured: true, Message: "内测通道暂未发布可选版本。"}, nil
+		}
 		return ReleaseHistory{}, err
 	}
 	releases := make([]Release, 0, len(catalog.Manifests))
@@ -260,12 +395,6 @@ func (m *Manager) History(ctx context.Context) (ReleaseHistory, error) {
 
 // Select 从刚刚验签的历史目录中选择一个准确版本；客户端提交的版本号从不携带下载地址。
 func (m *Manager) Select(ctx context.Context, version string) (Status, error) {
-	if m.client == nil {
-		return m.Status(), errors.New("在线更新尚未配置")
-	}
-	if !m.client.HasCatalog() {
-		return m.Status(), errors.New("历史版本目录尚未配置")
-	}
 	version = strings.TrimSpace(version)
 	if _, err := parseStableVersion(version); err != nil {
 		return m.Status(), errors.New("请选择有效的稳定版本")
@@ -274,6 +403,12 @@ func (m *Manager) Select(ctx context.Context, version string) (Status, error) {
 		return m.Status(), errors.New("已有更新操作正在进行")
 	}
 	defer m.opMu.Unlock()
+	if m.client == nil {
+		return m.Status(), errors.New("在线更新尚未配置")
+	}
+	if !m.client.HasCatalog() {
+		return m.Status(), errors.New("历史版本目录尚未配置")
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	catalog, err := m.client.FetchCatalog(checkCtx)
@@ -305,11 +440,12 @@ func (m *Manager) Select(ctx context.Context, version string) (Status, error) {
 
 // StartDownload 在后台下载已验签的清单目标，避免慢速公网连接占住浏览器请求。
 func (m *Manager) StartDownload() (Status, error) {
-	if m.client == nil {
-		return m.Status(), errors.New("在线更新尚未配置")
-	}
 	if !m.opMu.TryLock() {
 		return m.Status(), errors.New("已有更新操作正在进行")
+	}
+	if m.client == nil {
+		m.opMu.Unlock()
+		return m.Status(), errors.New("在线更新尚未配置")
 	}
 	if m.manifest == nil || !m.Status().Available {
 		m.opMu.Unlock()
@@ -394,13 +530,13 @@ func versionLess(left, right [3]uint64) bool {
 
 // Install 写入只含可信本地文件名和摘要的请求，再启动固定的一次性安装服务。
 func (m *Manager) Install(ctx context.Context) (Status, error) {
-	if m.client == nil || m.starter == nil {
-		return m.Status(), errors.New("在线安装尚未配置")
-	}
 	if !m.opMu.TryLock() {
 		return m.Status(), errors.New("已有更新操作正在进行")
 	}
 	defer m.opMu.Unlock()
+	if m.client == nil || m.starter == nil {
+		return m.Status(), errors.New("在线安装尚未配置")
+	}
 	if m.manifest == nil || m.packagePath == "" || m.Status().State != StateDownloaded {
 		return m.Status(), errors.New("请先完成更新下载")
 	}
@@ -441,6 +577,10 @@ func (m *Manager) fail(message string, err error) {
 	m.updateState(func(status *Status) {
 		status.State, status.Error = StateFailed, message+"："+err.Error()
 	})
+}
+
+func (m *Manager) noBetaRelease(err error) bool {
+	return m.config.Channel == "beta" && strings.Contains(err.Error(), "更新服务器返回 HTTP 404")
 }
 
 func versionAtLeast(current, minimum string) (bool, error) {

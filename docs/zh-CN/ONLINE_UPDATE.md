@@ -86,12 +86,39 @@ systemctl cat teslabox-update.service
 TESLABOX_UPDATE_MANIFEST_URL=https://gitee.com/你的账号/teslabox/releases/download/latest/latest.json
 # 可选：维护者签名的历史主程序目录
 TESLABOX_UPDATE_CATALOG_URL=https://gitee.com/你的账号/teslabox-releases/raw/main/stable/history.json
+# 内测版使用独立目录；稳定版不会读取或安装其中的任何包。
+TESLABOX_UPDATE_BETA_MANIFEST_URL=https://gitee.com/你的账号/teslabox-releases/raw/main/beta/latest.json
+TESLABOX_UPDATE_BETA_CATALOG_URL=https://gitee.com/你的账号/teslabox-releases/raw/main/beta/history.json
 TESLABOX_UPDATE_PUBLIC_KEY=这里填写Base64公钥
 TESLABOX_UPDATE_CHANNEL=stable
+TESLABOX_UPDATE_CHANNEL_STATE=/var/lib/teslabox-system/update-channel.json
 TESLABOX_UPDATE_BOARD=radxa-rock-3a
 ```
 
 如果 Gitee 无法为固定 `latest` 标签提供稳定附件地址，可以维护一个固定分支中的 `latest.json` 原始文件地址；包体仍放在带版本号的 Release 中。两种地址都必须使用 HTTPS。
+
+## 稳定版与内测版
+
+设置中心默认选择“稳定版”，它只读取 `stable/latest.json` 和 `stable/history.json`，并且设备会拒绝 `channel` 不是 `stable` 的清单。选择“内测版”后，设备才会读取 `beta/latest.json` 和 `beta/history.json`；切换会保存到系统盘、清空旧通道的待安装候选，并要求重新检查。下载中、已下载或安装中的更新不能切换通道。
+
+发布预览包时，继续使用同一套离线私钥，但必须明确签为 `beta`，上传附件后把固定清单推送到 `teslabox-releases` 仓库的 `beta/` 目录：
+
+```powershell
+.\scripts\build-update-release.ps1 `
+  -Version 0.1.30 `
+  -Channel beta `
+  -PackageUrl "https://gitee.com/你的账号/teslabox-releases/releases/download/v0.1.30-beta/teslabox-linux-arm64" `
+  -PrivateKey D:\TeslaBoxSecrets\update-private.key `
+  -NotesFile .\release-notes\0.1.30-beta.md
+
+go run .\cmd\teslabox-update-catalog `
+  -private-key D:\TeslaBoxSecrets\update-private.key `
+  -channel beta `
+  -manifest .\release-manifests\manifest-0.1.30-beta.json `
+  -output .\dist\update\history.json
+```
+
+将本次 `latest.json` 和 `history.json` 分别放到 `beta/latest.json`、`beta/history.json`。正式发布时重新用 `-Channel stable` 为同一已验证包生成稳定清单，并更新 `stable/`；不要把 beta 清单复制到 stable 目录，也不要让稳定通道抓取 Gitee 的预览列表。
 
 ## 指定版本与回退
 
@@ -112,6 +139,29 @@ go run .\cmd\teslabox-update-catalog `
 将 `history.json` 上传到一个固定 HTTPS 地址，例如 `teslabox-releases` 仓库的 `stable/history.json`。更新板子的 `TESLABOX_UPDATE_CATALOG_URL` 后重启 `teslabox.service`；设置中心点击“查看历史版本”即可查看、选择、下载并安装指定版本。`history.json`、其中每条清单和程序包会依次校验签名/摘要；维护者新增、删除或调整目录顺序后都必须重新生成并签名。
 
 回退与普通更新共用 Gadget 自动维护流程：下载不影响车机，点击“回退并重启”才会暂时断开 USB Gadget，健康检查通过后自动重启恢复。回退前会保留当前主程序用于本次健康检查失败自动恢复。
+
+## Gitee Release 附件留存
+
+Gitee Release 附件有容量上限。稳定通道只保留最近 **5** 个可安装版本的附件；更早版本保留 Git Tag 和发布说明，但删除主程序、校验文件、固定清单和首装包附件。不要只删除附件而保留旧版 `history.json` 条目，否则页面会给用户展示无法下载的回退版本。
+
+每次新版本通过测试后按下列顺序执行：
+
+1. 上传新 Release 附件并完成公网下载校验。
+2. 使用最近 5 个版本的固定 manifest 重新生成、签名并推送 `stable/history.json`，再更新 `stable/latest.json`。
+3. 先运行预览，确认候选删除版本和附件无误：
+
+```powershell
+$env:GITEE_ACCESS_TOKEN = "<仅保存在当前终端的 Gitee Token>"
+.\scripts\prune-gitee-release-assets.ps1
+```
+
+4. 预览无误后才执行删除；这个操作不可恢复：
+
+```powershell
+.\scripts\prune-gitee-release-assets.ps1 -Apply -Confirm:$false
+```
+
+脚本会再次读取本地 `stable/history.json`。只要待删除版本仍在历史目录中，它就会拒绝删除，避免发布顺序错误造成回退入口失效。
 
 ## 暂不支持
 

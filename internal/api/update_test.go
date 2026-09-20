@@ -18,6 +18,11 @@ type fakeUpdateAdmin struct {
 
 func (f *fakeUpdateAdmin) Status() updater.Status { return f.status }
 
+func (f *fakeUpdateAdmin) SetChannel(channel string) (updater.Status, error) {
+	f.status.Channel = channel
+	return f.status, nil
+}
+
 func (f *fakeUpdateAdmin) Check(context.Context) (updater.Status, error) {
 	f.status.State = updater.StateCurrent
 	return f.status, nil
@@ -54,6 +59,7 @@ func TestUpdateRoutesExposeStatusAndActions(t *testing.T) {
 		want   int
 	}{
 		{method: http.MethodGet, path: "/api/v1/update", want: http.StatusOK},
+		{method: http.MethodPost, path: "/api/v1/update/channel", body: `{"channel":"beta"}`, want: http.StatusOK},
 		{method: http.MethodPost, path: "/api/v1/update/check", want: http.StatusOK},
 		{method: http.MethodGet, path: "/api/v1/update/history", want: http.StatusOK},
 		{method: http.MethodPost, path: "/api/v1/update/select", want: http.StatusBadRequest},

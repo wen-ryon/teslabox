@@ -330,7 +330,7 @@ func TestCreateExportTransfersSnapshotLeaseAndBuildsSessionSource(t *testing.T) 
 			if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+			if err := os.WriteFile(name, videoDurationFixture(60_000), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			videos = append(videos, teslacam.Video{
@@ -377,7 +377,7 @@ func TestCreateExportReactivatesMediaSnapshot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+	if err := os.WriteFile(name, videoDurationFixture(60_000), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	videos := []teslacam.Video{{
@@ -409,7 +409,7 @@ func TestCreateOriginalExportUsesProbedVideoCanvas(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(name, []byte("video"), 0o600); err != nil {
+	if err := os.WriteFile(name, videoDurationFixture(60_000), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	videos := []teslacam.Video{{

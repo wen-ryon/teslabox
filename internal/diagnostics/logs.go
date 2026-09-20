@@ -47,7 +47,9 @@ var (
 	}
 	incidentKeywords = append(append([]string{}, usbKeywords...), append(mediaKeywords,
 		"panic", "oops", "call trace", "segfault", "reboot", "shutdown", "reset",
-		"voltage", "undervoltage", "regulator", "i/o error", "filesystem error")...)
+		"voltage", "undervoltage", "regulator", "i/o error", "filesystem error",
+		"xfs", "enospc", "no space left", "read-only file system", "sda", "scsi",
+		"blk_update", "buffer i/o", "end_request", "device offline", "rejecting i/o")...)
 )
 
 // Report 是日志中心可以安全展示的有界日志结果。
@@ -153,10 +155,13 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 
 	commands := []diagnosticCommand{
 		{title: "内核与系统", name: "uname", args: []string{"-a"}},
+		{title: "启动标识", name: "cat", args: []string{"/proc/sys/kernel/random/boot_id"}},
+		{title: "可用启动日志", name: "journalctl", args: []string{"--no-pager", "--quiet", "--list-boots"}},
 		{title: "运行时间与负载", name: "uptime"},
 		{title: "内存", name: "free", args: []string{"-h"}},
 		{title: "文件系统", name: "df", args: []string{"-hT"}},
-		{title: "块设备", name: "lsblk", args: []string{"-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN"}},
+		{title: "TeslaBox 数据盘字节统计", name: "df", args: []string{"-B1", "/var/lib/teslabox"}},
+		{title: "TeslaBox 数据盘 inode", name: "df", args: []string{"-i", "/var/lib/teslabox"}},
 		{title: "TeslaBox 挂载点", name: "findmnt", args: []string{
 			"-rn", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS",
 		}, keywords: []string{"teslabox", "loop"}},
@@ -179,19 +184,28 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 		{title: "Gadget 控制器运行时电源", name: "cat", args: []string{"/sys/class/udc/fcc00000.dwc3/device/power/runtime_status"}},
 		{title: "DWC3 中断计数", name: "cat", args: []string{"/proc/interrupts"}, keywords: []string{"dwc3", "fcc00000"}},
 		{title: "数据盘与快照块统计", name: "cat", args: []string{"/proc/diskstats"}, keywords: []string{"sda", "loop"}},
+		{title: "数据盘设备状态", name: "cat", args: []string{"/sys/block/sda/device/state"}},
+		{title: "数据盘扇区数", name: "cat", args: []string{"/sys/block/sda/size"}},
+		{title: "镜像与快照实际占用", name: "du", args: []string{"-B1", "-s", "/var/lib/teslabox/images", "/var/lib/teslabox/snapshots"}},
 		{title: "LUN 后端文件", name: "cat", args: []string{"/sys/kernel/config/usb_gadget/teslabox/functions/mass_storage.0/lun.0/file"}},
 		{title: "TeslaCam 镜像活动时间", name: "stat", args: []string{"--format=%y %s %n", "/var/lib/teslabox/images/teslacam.img"}},
 		{title: "Mass Storage STALL 策略", name: "cat", args: []string{"/sys/kernel/config/usb_gadget/teslabox/functions/mass_storage.0/stall"}},
 		{title: "LUN nofua", name: "cat", args: []string{"/sys/kernel/config/usb_gadget/teslabox/functions/mass_storage.0/lun.0/nofua"}},
 		{title: "LUN 只读状态", name: "cat", args: []string{"/sys/kernel/config/usb_gadget/teslabox/functions/mass_storage.0/lun.0/ro"}},
 		{title: "LUN 可移动状态", name: "cat", args: []string{"/sys/kernel/config/usb_gadget/teslabox/functions/mass_storage.0/lun.0/removable"}},
+		{title: "空间保护重启标记", name: "stat", args: []string{"--format=%y %s %n", "/var/lib/teslabox-system/space-recovery.once"}},
+		{title: "崩溃持久化日志索引", name: "find", args: []string{"/sys/fs/pstore", "-maxdepth", "1", "-type", "f", "-printf", "%TY-%Tm-%TdT%TH:%TM:%TS %s %p\n"}},
+		{title: "崩溃持久化日志正文", name: "find", args: []string{"/sys/fs/pstore", "-maxdepth", "1", "-type", "f", "-exec", "head", "-c", "65536", "{}", ";"}},
 	}
+	writeBlockDevicesSection(ctx, m.runner, &report)
 	for _, command := range commands {
 		writeCommandSection(ctx, m.runner, &report, command)
 		if report.Len() >= maximumBundle {
 			break
 		}
 	}
+	writeIncidentJournalSection(ctx, m.runner, &report, "当前启动存储与 USB 关键故障日志", "0")
+	writeIncidentJournalSection(ctx, m.runner, &report, "上一次启动关键故障日志", "-1")
 
 	for _, source := range []string{SourceUSB, SourceMedia, SourceApplication, SourceNetwork} {
 		writeLogSection(ctx, m, &report, source)
@@ -199,7 +213,6 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 			break
 		}
 	}
-	writePreviousBootSection(ctx, m.runner, &report)
 
 	content := report.String()
 	if len(content) > maximumBundle {
@@ -379,10 +392,10 @@ func writeLogSection(ctx context.Context, manager *Manager, report *strings.Buil
 	}
 }
 
-func writePreviousBootSection(ctx context.Context, runner system.Runner, report *strings.Builder) {
-	report.WriteString("\n===== 上一次启动关键故障日志 =====\n")
+func writeIncidentJournalSection(ctx context.Context, runner system.Runner, report *strings.Builder, title, boot string) {
+	fmt.Fprintf(report, "\n===== %s =====\n", title)
 	args := []string{
-		"--no-pager", "--quiet", "--boot=-1", "--output=short-iso-precise", "--lines", "5000",
+		"--no-pager", "--quiet", "--boot=" + boot, "--output=short-iso-precise", "--lines", "10000",
 	}
 	output, err := runner.Run(ctx, "journalctl", args...)
 	if err != nil {
@@ -393,6 +406,26 @@ func writePreviousBootSection(ctx context.Context, runner system.Runner, report 
 	if count == 0 {
 		report.WriteString("[没有匹配日志]\n")
 	}
+}
+
+func writeBlockDevicesSection(ctx context.Context, runner system.Runner, report *strings.Builder) {
+	report.WriteString("\n===== 块设备 =====\n")
+	variants := [][]string{
+		{"-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN"},
+		{"-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,TRAN"},
+		{"-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT"},
+	}
+	var lastErr error
+	for _, args := range variants {
+		output, err := runner.Run(ctx, "lsblk", args...)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		writeSanitizedLines(report, string(output), nil, 500)
+		return
+	}
+	fmt.Fprintf(report, "[无法读取] %s\n", redactLine(sanitizeLine(lastErr.Error())))
 }
 
 func writeSanitizedLines(report *strings.Builder, output string, keywords []string, limit int) int {
