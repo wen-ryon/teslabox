@@ -559,6 +559,62 @@ func TestUpdateAPClosesActiveHotspotAfterResponseDelay(t *testing.T) {
 	}
 }
 
+func TestUpdateAPClosesActiveHotspotWhenAutoConnectAlreadyDisabled(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:no\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:connected\n",
+		"/usr/sbin/iw dev ap0 info": "Interface ap0\n\tssid TeslaBox-5G\n\ttype AP\n\tchannel 161\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var scheduled func()
+	manager.schedule = func(_ time.Duration, operation func()) { scheduled = operation }
+
+	if err := manager.UpdateAP(context.Background(), APUpdate{
+		Enabled: false, SSID: "TeslaBox-5G", Band: "a", Channel: 161,
+	}); err != nil {
+		t.Fatalf("UpdateAP() error = %v", err)
+	}
+	if scheduled == nil {
+		t.Fatal("临时热点关闭操作没有被调度")
+	}
+	scheduled()
+	if !containsCall(runner.calls, "nmcli --wait 15 connection down uuid "+apUUID) {
+		t.Fatalf("临时热点未被关闭: calls = %v", runner.calls)
+	}
+}
+
+func TestSetAPRuntimeClosesTemporaryHotspotSynchronously(t *testing.T) {
+	t.Parallel()
+	const apUUID = "11111111-1111-1111-1111-111111111111"
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show":                                                                                                                  "TeslaBox-5G:" + apUUID + ":802-11-wireless:ap0:no\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + apUUID: "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+		"nmcli -g connection.interface-name connection show uuid " + apUUID:                                                                                                                           "ap0\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status":                                                                                                                                    "ap0:wifi:connected\n",
+		"/usr/sbin/iw dev ap0 info": "Interface ap0\n\tssid TeslaBox-5G\n\ttype AP\n\tchannel 161\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager.schedule = func(_ time.Duration, _ func()) {
+		t.Fatal("SetAPRuntime(false) 不应调度延迟关闭")
+	}
+
+	if err := manager.SetAPRuntime(context.Background(), false); err != nil {
+		t.Fatalf("SetAPRuntime() error = %v", err)
+	}
+	if !containsCall(runner.calls, "nmcli --wait 15 connection down uuid "+apUUID) {
+		t.Fatalf("临时热点未被同步关闭: calls = %v", runner.calls)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "connection.autoconnect") && strings.Contains(call, "connection modify") {
+			t.Fatalf("运行态关闭不得修改开机策略: calls = %v", runner.calls)
+		}
+	}
+}
+
 func TestUpdateAPClearsChannelForAutomaticSelection(t *testing.T) {
 	t.Parallel()
 	const apUUID = "11111111-1111-1111-1111-111111111111"

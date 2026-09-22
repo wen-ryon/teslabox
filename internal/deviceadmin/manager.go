@@ -1790,6 +1790,13 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 		if err != nil {
 			return err
 		}
+		if settings.ConcurrencyMode == "exclusive" && wifiStatus.CurrentConnection != "" {
+			return &APOperationError{
+				Code:       "ap_sta_concurrency_unsupported",
+				Message:    "当前无线设备不支持同时运行上游 WiFi 和 AP 热点",
+				Suggestion: "请先断开上游 WiFi，或接入独立的 AP 无线网卡。",
+			}
+		}
 	}
 	if update.Enabled && apRequiresSameChannel(settings.ConcurrencyMode) && wifiStatus.Interface != "" {
 		_, upstreamChannel := m.activeWirelessChannel(ctx, wifiStatus.Interface)
@@ -1844,7 +1851,7 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	}
 	m.apUpdateGeneration++
 	generation := m.apUpdateGeneration
-	if !update.Enabled && !settings.DesiredEnabled {
+	if !update.Enabled && !settings.DesiredEnabled && !settings.Enabled {
 		return nil
 	}
 	if !update.Enabled {
@@ -1879,6 +1886,154 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 			Message:    "NetworkManager 已接受热点配置，但无线接口没有正常广播 SSID",
 			Suggestion: "请检查页面显示的能力限制；系统不会把该状态误报为运行中。",
 		}
+	}
+	return nil
+}
+
+// ConfigureAPRadio 更新热点的持久频段和信道，并在热点运行时安全重启配置。
+// 单信道 AP+STA 设备不允许写入与当前上游 WiFi 冲突的运行信道，避免驱动异常或上游断连。
+func (m *Manager) ConfigureAPRadio(ctx context.Context, band string, channel int) (APSettings, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validBandChannel(band, channel) {
+		return APSettings{}, invalidInput("热点频段或信道无效")
+	}
+	settings, err := m.APSettings(ctx)
+	if err != nil {
+		return APSettings{}, err
+	}
+	if !settings.Available || !validUUID(settings.UUID) {
+		return APSettings{}, invalidInput("未找到可管理的 AP 配置")
+	}
+	capabilityInterface := settings.Interface
+	if channel > 0 {
+		if err := m.apChannelPreflight(ctx, capabilityInterface, channel); err != nil {
+			return APSettings{}, err
+		}
+	}
+	effectiveBand, effectiveChannel := band, channel
+	if settings.Enabled {
+		wifiStatus, statusErr := m.WiFiStatus(ctx)
+		if statusErr != nil {
+			return APSettings{}, statusErr
+		}
+		if settings.ConcurrencyMode == "exclusive" && wifiStatus.CurrentConnection != "" {
+			return APSettings{}, &APOperationError{
+				Code:       "ap_sta_concurrency_unsupported",
+				Message:    "当前无线设备不支持同时运行上游 WiFi 和 AP 热点",
+				Suggestion: "请先断开上游 WiFi，再修改热点频段和信道。",
+			}
+		}
+		if apRequiresSameChannel(settings.ConcurrencyMode) && wifiStatus.Interface != "" {
+			upstreamBand, upstreamChannel := m.activeWirelessChannel(ctx, wifiStatus.Interface)
+			if upstreamChannel > 0 {
+				if channel > 0 && channel != upstreamChannel {
+					return APSettings{}, &APOperationError{
+						Code:       "ap_sta_channel_conflict",
+						Message:    fmt.Sprintf("当前设备要求 AP 与上游 WiFi 使用同一信道；上游正在使用信道 %d", upstreamChannel),
+						Suggestion: fmt.Sprintf("请改用信道 %d、选择 auto，或先断开上游 WiFi。", upstreamChannel),
+					}
+				}
+				effectiveBand, effectiveChannel = upstreamBand, upstreamChannel
+			}
+		}
+		if effectiveChannel == 0 {
+			phyInfo, readErr := m.wirelessPHYInfo(ctx, capabilityInterface)
+			if readErr != nil {
+				return APSettings{}, &APOperationError{Code: "capability_unavailable", Message: "无法读取无线网卡的热点信道能力", Suggestion: "请检查无线网卡、驱动和 iw 工具是否正常。"}
+			}
+			var found bool
+			effectiveChannel, found = selectAllowedAPChannel(parseAPChannelCapabilities(phyInfo), effectiveBand)
+			if !found {
+				return APSettings{}, &APOperationError{Code: "no_allowed_channel", Message: "当前频段没有允许创建热点的信道", Suggestion: "请切换频段、更新无线监管数据库或检查网卡驱动。"}
+			}
+		}
+		if err := m.apChannelPreflight(ctx, capabilityInterface, effectiveChannel); err != nil {
+			return APSettings{}, err
+		}
+		if settings.Band == effectiveBand && settings.Channel == effectiveChannel && settings.ActiveChannel == effectiveChannel {
+			return settings, nil
+		}
+	}
+	channelValue := ""
+	if effectiveChannel > 0 {
+		channelValue = strconv.Itoa(effectiveChannel)
+	}
+	if _, err := m.run(ctx, "nmcli", "connection", "modify", "uuid", settings.UUID,
+		"802-11-wireless.band", effectiveBand,
+		"802-11-wireless.channel", channelValue,
+	); err != nil {
+		return APSettings{}, fmt.Errorf("保存热点频段和信道: %w", err)
+	}
+	if settings.Enabled {
+		rollback := func(cause error) error {
+			oldChannel := ""
+			if settings.Channel > 0 {
+				oldChannel = strconv.Itoa(settings.Channel)
+			}
+			if _, restoreErr := m.run(ctx, "nmcli", "connection", "modify", "uuid", settings.UUID,
+				"802-11-wireless.band", settings.Band,
+				"802-11-wireless.channel", oldChannel,
+			); restoreErr != nil {
+				return errors.Join(cause, fmt.Errorf("恢复热点原频段和信道: %w", restoreErr))
+			}
+			restoreArgs := []string{"--wait", "15", "connection", "up", "uuid", settings.UUID}
+			if settings.Interface != "" {
+				restoreArgs = append(restoreArgs, "ifname", settings.Interface)
+			}
+			if _, restoreErr := m.run(ctx, "nmcli", restoreArgs...); restoreErr != nil {
+				return errors.Join(cause, fmt.Errorf("重新拉起热点原配置: %w", restoreErr))
+			}
+			return cause
+		}
+		operationArgs := []string{"--wait", "15", "connection", "up", "uuid", settings.UUID}
+		if settings.Interface != "" {
+			operationArgs = append(operationArgs, "ifname", settings.Interface)
+		}
+		if _, err := m.run(ctx, "nmcli", operationArgs...); err != nil {
+			return APSettings{}, rollback(fmt.Errorf("应用热点频段和信道: %w", err))
+		}
+		runtime := m.activeAPRuntime(ctx, settings.Interface)
+		if runtime.Type != "AP" || runtime.SSID != settings.SSID || runtime.Channel != effectiveChannel {
+			return APSettings{}, rollback(&APOperationError{
+				Code:       "ap_not_broadcasting",
+				Message:    "热点配置已保存，但无线接口没有按目标信道正常广播",
+				Suggestion: "请查看热点能力说明并改用允许的信道。",
+			})
+		}
+	}
+	return m.APSettings(ctx)
+}
+
+// SetAPRuntime 只切换热点当前运行状态，不改变开机自动连接策略。
+// 本机自动化调用不依赖热点传输响应，因此关闭操作必须同步完成后再返回。
+func (m *Manager) SetAPRuntime(ctx context.Context, enabled bool) error {
+	if enabled {
+		settings, err := m.APSettings(ctx)
+		if err != nil {
+			return err
+		}
+		return m.UpdateAP(ctx, APUpdate{
+			Enabled: enabled, SSID: settings.SSID, Band: settings.Band, Channel: settings.Channel,
+			AutoConnect: settings.AutoConnect,
+		})
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	settings, err := m.APSettings(ctx)
+	if err != nil {
+		return err
+	}
+	if !settings.Available || !validUUID(settings.UUID) {
+		return invalidInput("未找到可管理的 AP 配置")
+	}
+	if !settings.Enabled {
+		return nil
+	}
+	m.apUpdateGeneration++
+	if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "down", "uuid", settings.UUID); err != nil && !isNMDeviceInactive(err) {
+		return fmt.Errorf("关闭无线热点: %w", err)
 	}
 	return nil
 }

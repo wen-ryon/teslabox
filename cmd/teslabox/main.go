@@ -13,6 +13,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/wen-ryon/teslabox/internal/api"
+	"github.com/wen-ryon/teslabox/internal/automation"
 	"github.com/wen-ryon/teslabox/internal/backing"
 	"github.com/wen-ryon/teslabox/internal/config"
 	"github.com/wen-ryon/teslabox/internal/datamount"
@@ -48,6 +49,12 @@ import (
 const teslaboxFSCKExFATPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
 
 func main() {
+	if filepath.Base(os.Args[0]) == "teslaboxctl" {
+		os.Exit(automation.RunCLI(context.Background(), automation.DefaultSocketPath, os.Args[1:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "automation" {
+		os.Exit(automation.RunCLI(context.Background(), automation.DefaultSocketPath, os.Args[2:], os.Stdout, os.Stderr))
+	}
 	processStartedAt := time.Now()
 	reloadCh, stopReloadSignals := subscribeReloadSignals()
 	defer stopReloadSignals()
@@ -109,6 +116,14 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
+	if shortcutErr := automation.EnsureCLIShortcut(automation.DefaultCLIPath, automation.DefaultTargetPath); shortcutErr != nil {
+		logger.Warn("无法安装 teslaboxctl 命令，兼容入口仍可使用", "error", shortcutErr)
+	}
+	automationGroupCtx, automationGroupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if groupErr := automation.EnsureAccessGroup(automationGroupCtx, runner); groupErr != nil {
+		logger.Warn("无法创建本机自动化用户组，接口将仅允许 root 使用", "error", groupErr)
+	}
+	automationGroupCancel()
 	fanMigrationCtx, fanMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	fanComponentsChanged, fanMigrationErr := hostmigration.EnsureFanEarlyComponents(
 		fanMigrationCtx,
@@ -276,6 +291,11 @@ func main() {
 		WiFiInterface: cfg.WiFiInterface,
 		APInterface:   cfg.APInterface,
 	})
+	automationService, err := automation.New(deviceAdmin, automation.Config{Logger: logger})
+	if err != nil {
+		logger.Error("初始化本机自动化接口失败", "error", err)
+		os.Exit(1)
+	}
 	mediaInspector, err := media.NewInspector(runner, media.Config{
 		FFmpegPath: cfg.FFmpegPath, FFprobePath: cfg.FFprobePath, Timeout: cfg.MediaProbeTimeout,
 	})
@@ -371,6 +391,11 @@ func main() {
 	)
 	handler := webui.NewHandler(apiHandler, authManager, logger)
 	go deviceAdmin.Run(ctx)
+	go func() {
+		if runErr := automationService.Run(ctx); runErr != nil && ctx.Err() == nil {
+			logger.Error("本机自动化接口异常退出", "error", runErr)
+		}
+	}()
 	go mediaExporter.Run(ctx)
 	go fanManager.Run(ctx)
 	watchReloadSignal(ctx, manager, reloadCh)

@@ -451,6 +451,9 @@ fi
 log "安装 TeslaBox 程序和诊断工具"
 install -d -m 0755 /usr/local/bin /usr/local/libexec /etc/teslabox /var/lib/teslabox-system
 chmod 0700 /var/lib/teslabox-system
+if ! getent group teslabox-automation >/dev/null 2>&1; then
+    groupadd --system teslabox-automation
+fi
 
 MAIN_BACKUP=""
 if [ -x /usr/local/bin/teslabox ]; then
