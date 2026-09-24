@@ -2,30 +2,34 @@
 set -eu
 
 INSTALLER_VERSION="0.1.28"
+INSTALL_CHANNEL="stable"
 RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.28"
 BOOTSTRAP_ARCHIVE="teslabox-bootstrap-debian11-arm64.tar.gz"
 BOOTSTRAP_SHA256="382964f928b9e894d602222d376f7bc99ac139c0a48daadaa112cd66ba2b4bd7"
-# MT7922 测试内核只使用已在 ROCK 3A 上验证的固定归档，首装主程序升级不应隐式更换内核基线。
-MT7922_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.16"
-MT7922_ARCHIVE="teslabox-mt7922-rock3a-5.10.160teslabox1.tar.gz"
-MT7922_SHA256="1cd88ca287eee7b2041684fe8d45f3fb84015ac8fd5cfbebb6e98b2323e9992c"
+# MT7922 首装使用已验证的 teslabox2 归档，避免依赖已下线的 teslabox1 附件。
 MT7922_BLUETOOTH_RELEASE_BASE="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.23"
 MT7922_BLUETOOTH_ARCHIVE="teslabox-mt7922-bluetooth-rock3a-5.10.160teslabox2.tar.gz"
 MT7922_BLUETOOTH_SHA256="482a41aadad95fa8bf3b3df06e42ea2e374c5788442d7be39449076500638fd5"
+MT7922_WIFI_FIRMWARE_KERNEL_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek"
+MT7922_WIFI_FIRMWARE_GITLAB_BASE="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20260916/mediatek"
+MT7922_WIFI_PATCH_SHA256="7fc9075d6d54b31e0539734614ca971fa52caf41b642a3000c8a4501591a4d98"
+MT7922_WIFI_RAM_SHA256="d100e5e04c324fc8da6302112d1e0b4fac952286447d2419eabcd8fb0a1f5b93"
 UPDATE_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/latest.json"
 UPDATE_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/history.json"
 UPDATE_BETA_MANIFEST_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/beta/latest.json"
 UPDATE_BETA_CATALOG_URL="https://gitee.com/TecheN1/teslabox-releases/raw/master/beta/history.json"
 UPDATE_PUBLIC_KEY="7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
-RADXA_KEYRING_VERSION="0.2.0"
-RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.0_all.deb"
-RADXA_KEYRING_SHA256="a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad"
+RADXA_KEYRING_VERSION="0.2.2"
+RADXA_KEYRING_DEB="radxa-archive-keyring_0.2.2_all.deb"
+RADXA_KEYRING_SHA256="3e3bb3d3150cf1dfa6c050d0c135f6a7f298b7638ff7e656fda711ababdb8a57"
 
 WORK_DIR=""
 AP_INITIAL_PASSWORD=""
 MT7922_MODE="ask"
 APT_SOURCE_BACKUP_DIR="/var/backups/teslabox/apt-sources"
 APT_SOURCE_BACKUP_TIMESTAMP=""
+DEBIAN_MAIN_MIRROR=""
+DEBIAN_SECURITY_MIRROR=""
 
 log() {
     printf '\n[TeslaBox] %s\n' "$*"
@@ -43,6 +47,71 @@ die() {
 cleanup() {
     if [ -n "${WORK_DIR}" ] && [ -d "${WORK_DIR}" ]; then
         find "${WORK_DIR}" -depth -delete 2>/dev/null || true
+    fi
+}
+
+probe_apt_release() {
+    mirror_url="$1"
+    suite="$2"
+    probe_file="${WORK_DIR}/apt-probe-${suite}.InRelease"
+
+    if ! curl --silent --show-error --fail --location --retry 1 --retry-delay 1 \
+        --connect-timeout 5 --max-time 20 \
+        --output "${probe_file}" "${mirror_url%/}/dists/${suite}/InRelease"; then
+        rm -f "${probe_file}"
+        return 1
+    fi
+
+    # HTTP 200 也可能是镜像站的拦截页面；写入 APT 配置前必须验证 Debian 签名。
+    if ! gpgv --keyring /usr/share/keyrings/debian-archive-keyring.gpg \
+        "${probe_file}" >/dev/null 2>&1; then
+        rm -f "${probe_file}"
+        return 1
+    fi
+
+    rm -f "${probe_file}"
+}
+
+select_debian_apt_mirrors() {
+    log "探测可用的 Debian Bullseye 软件源"
+
+    for candidate in \
+        "Debian 官方|https://deb.debian.org/debian" \
+        "中科大 USTC|https://mirrors.ustc.edu.cn/debian" \
+        "阿里云|https://mirrors.aliyun.com/debian" \
+        "清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian"; do
+        candidate_name="${candidate%%|*}"
+        candidate_url="${candidate#*|}"
+        if probe_apt_release "${candidate_url}" bullseye && \
+            probe_apt_release "${candidate_url}" bullseye-updates; then
+            DEBIAN_MAIN_MIRROR="${candidate_url}"
+            log "Debian 基础仓使用 ${candidate_name}：${DEBIAN_MAIN_MIRROR}"
+            break
+        fi
+        warn "Debian 基础仓 ${candidate_name} 不可用，尝试下一镜像。"
+    done
+
+    if [ -z "${DEBIAN_MAIN_MIRROR}" ]; then
+        die "所有 Debian Bullseye 基础仓镜像均不可用，请检查网络后重试。"
+    fi
+
+    for candidate in \
+        "Debian 官方|https://security.debian.org/debian-security" \
+        "中科大 USTC|https://mirrors.ustc.edu.cn/debian-security" \
+        "阿里云|https://mirrors.aliyun.com/debian-security" \
+        "清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian-security"; do
+        candidate_name="${candidate%%|*}"
+        candidate_url="${candidate#*|}"
+        if probe_apt_release "${candidate_url}" bullseye-security; then
+            DEBIAN_SECURITY_MIRROR="${candidate_url}"
+            log "Debian 安全仓使用 ${candidate_name}：${DEBIAN_SECURITY_MIRROR}"
+            break
+        fi
+        warn "Debian 安全仓 ${candidate_name} 不可用，尝试下一镜像。"
+    done
+
+    if [ -z "${DEBIAN_SECURITY_MIRROR}" ]; then
+        die "所有 Debian Bullseye 安全仓镜像均不可用，请检查网络后重试。"
     fi
 }
 
@@ -94,11 +163,12 @@ replace_apt_source_file() {
 
 rewrite_debian_list_file() {
     source_file="$1"
-    switch_to_tuna="$2"
     temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
 
-    # 仅处理 Debian 基础仓；Radxa 和其他第三方仓的路径不匹配，不会被改写。
-    awk -v switch_to_tuna="${switch_to_tuna}" '
+    # Debian 11 已进入旧版本阶段，固定使用仍提供 Bullseye 元数据的官方仓，
+    # 避免第三方镜像停止同步或拒绝访问时阻断整套首装。
+    awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
+        -v debian_security_mirror="${DEBIAN_SECURITY_MIRROR}" '
         function source_field_index(    field_no) {
             field_no = 2
             if ($2 ~ /^\[/) {
@@ -135,12 +205,10 @@ rewrite_debian_list_file() {
                     next
                 }
 
-                if (switch_to_tuna == "1") {
-                    if ((suite == "bullseye" || suite == "bullseye-updates") && is_debian_main_uri(uri)) {
-                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian"
-                    } else if (suite == "bullseye-security" && is_debian_security_uri(uri)) {
-                        $(source_index) = "https://mirrors.tuna.tsinghua.edu.cn/debian-security"
-                    }
+                if ((suite == "bullseye" || suite == "bullseye-updates") && is_debian_main_uri(uri)) {
+                    $(source_index) = debian_main_mirror
+                } else if (suite == "bullseye-security" && is_debian_security_uri(uri)) {
+                    $(source_index) = debian_security_mirror
                 }
             }
             print
@@ -152,10 +220,10 @@ rewrite_debian_list_file() {
 
 rewrite_debian_deb822_file() {
     source_file="$1"
-    switch_to_tuna="$2"
     temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
 
-    awk -v switch_to_tuna="${switch_to_tuna}" '
+    awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
+        -v debian_security_mirror="${DEBIAN_SECURITY_MIRROR}" '
         BEGIN {
             RS = ""
             ORS = "\n\n"
@@ -242,13 +310,11 @@ rewrite_debian_deb822_file() {
                 suites = field_value("Suites")
             }
 
-            if (switch_to_tuna == "1") {
-                uris = field_value("URIs")
-                if ((has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) && is_debian_main_uri(uris)) {
-                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian")
-                } else if (has_word(suites, "bullseye-security") && is_debian_security_uri(uris)) {
-                    set_field("URIs", "https://mirrors.tuna.tsinghua.edu.cn/debian-security")
-                }
+            uris = field_value("URIs")
+            if ((has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) && is_debian_main_uri(uris)) {
+                set_field("URIs", debian_main_mirror)
+            } else if (has_word(suites, "bullseye-security") && is_debian_security_uri(uris)) {
+                set_field("URIs", debian_security_mirror)
             }
             print
         }
@@ -258,36 +324,16 @@ rewrite_debian_deb822_file() {
 }
 
 configure_debian_apt_sources() {
-    log "配置 Debian APT 源"
-    printf '%s\n' '请选择 Debian 基础仓镜像：'
-    printf '%s\n' '  1) 切换到清华大学镜像源'
-    printf '%s\n' '  2) 保持当前镜像源'
-    printf '%s\n' '无论选择哪项，都会禁用系统镜像自带的失效 bullseye-backports。'
-
-    while :; do
-        printf '%s' '请输入 1 或 2 [2]：'
-        if ! IFS= read -r apt_mirror_choice; then
-            apt_mirror_choice="2"
-            printf '\n'
-        fi
-        case "${apt_mirror_choice}" in
-            1|2|"") break ;;
-            *) warn "请输入 1 或 2。" ;;
-        esac
-    done
-
-    case "${apt_mirror_choice:-2}" in
-        1) log "将 Debian 基础仓切换到清华大学镜像源" ;;
-        *) apt_mirror_choice="2"; log "保留当前 Debian 基础仓镜像" ;;
-    esac
+    select_debian_apt_mirrors
+    log "配置已验证的 Debian APT 源并禁用失效的 bullseye-backports"
 
     APT_SOURCE_BACKUP_TIMESTAMP="$(date +%Y%m%d%H%M%S)"
     apt_source_list="${WORK_DIR}/apt-source-files"
     apt_source_files >"${apt_source_list}"
     while IFS= read -r source_file; do
         case "${source_file}" in
-            *.list) rewrite_debian_list_file "${source_file}" "${apt_mirror_choice}" ;;
-            *.sources) rewrite_debian_deb822_file "${source_file}" "${apt_mirror_choice}" ;;
+            *.list) rewrite_debian_list_file "${source_file}" ;;
+            *.sources) rewrite_debian_deb822_file "${source_file}" ;;
         esac
     done <"${apt_source_list}"
 }
@@ -302,9 +348,8 @@ for argument in "$@"; do
 用法：sudo ./teslabox-install.sh [--skip-mt7922]
 
 默认安装 TeslaBox、FFmpeg/MPP/RGA、systemd、udev 和在线升级组件。
-安装 Debian 运行依赖前会询问是否切换到清华大学镜像源；两种选择都会禁用失效的 bullseye-backports。
-安装末尾会单独询问是否安装 MT7922 Wi-Fi 测试内核，默认不安装。
-只有确认安装 MT7922 后，才会再次询问是否安装蓝牙驱动，蓝牙同样默认不安装。
+安装 Debian 运行依赖前会自动验证并选择可用的 Bullseye 软件源；当前镜像不可用时会依次尝试备用镜像。
+安装末尾会单独询问是否安装 MT7922 Wi-Fi/蓝牙测试内核，默认不安装。
 EOF
             exit 0
             ;;
@@ -317,6 +362,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 command -v curl >/dev/null 2>&1 || die "缺少 curl；请先执行 sudo apt-get install curl ca-certificates。"
+command -v gpgv >/dev/null 2>&1 || die "缺少 gpgv，无法验证 Debian 软件源签名。"
 command -v sha256sum >/dev/null 2>&1 || die "缺少 sha256sum。"
 command -v tar >/dev/null 2>&1 || die "缺少 tar。"
 
@@ -418,7 +464,7 @@ for REQUIRED_PAYLOAD_FILE in \
     scripts/teslabox-ap-setup.sh \
     scripts/teslabox-fan-early.sh \
     scripts/install-media-toolchain.sh \
-    keyring/radxa-archive-keyring_0.2.0_all.deb \
+    keyring/radxa-archive-keyring_0.2.2_all.deb \
     media/teslabox-media-debian11-arm64.tar.gz \
     media/teslabox-media-debian11-arm64.tar.gz.sha256; do
     validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
@@ -437,8 +483,8 @@ log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
 install_radxa_archive_keyring
 configure_debian_apt_sources
-apt-get update
-apt-get install -y --no-install-recommends \
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
     dosfstools fonts-noto-cjk libass9 libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
 
@@ -488,7 +534,7 @@ awk '!/^TESLABOX_UPDATE_(MANIFEST_URL|CATALOG_URL|BETA_MANIFEST_URL|BETA_CATALOG
     printf '%s\n' "TESLABOX_UPDATE_BETA_MANIFEST_URL=${UPDATE_BETA_MANIFEST_URL}"
     printf '%s\n' "TESLABOX_UPDATE_BETA_CATALOG_URL=${UPDATE_BETA_CATALOG_URL}"
     printf '%s\n' "TESLABOX_UPDATE_PUBLIC_KEY=${UPDATE_PUBLIC_KEY}"
-    printf '%s\n' 'TESLABOX_UPDATE_CHANNEL=stable'
+    printf '%s\n' "TESLABOX_UPDATE_CHANNEL=${INSTALL_CHANNEL}"
     printf '%s\n' 'TESLABOX_UPDATE_CHANNEL_STATE=/var/lib/teslabox-system/update-channel.json'
     printf '%s\n' 'TESLABOX_UPDATE_BOARD=radxa-rock-3a'
     printf '%s\n' 'TESLABOX_EXPORT_MAX_DURATION=0s'
@@ -610,13 +656,40 @@ if [ "${HEALTHY}" != "true" ]; then
     die "TeslaBox 未通过启动健康检查。"
 fi
 
+prepare_mt7922_wifi_firmware() {
+    FIRMWARE_DIR="$1"
+    FIRMWARE_NAME="$2"
+    EXPECTED_FIRMWARE_SHA256="$3"
+    FIRMWARE_PATH="${FIRMWARE_DIR}/${FIRMWARE_NAME}"
+    if [ -s "${FIRMWARE_PATH}" ]; then
+        ACTUAL_FIRMWARE_SHA256="$(sha256sum "${FIRMWARE_PATH}" | awk '{print tolower($1)}')"
+        [ "${ACTUAL_FIRMWARE_SHA256}" = "${EXPECTED_FIRMWARE_SHA256}" ] || \
+            die "MT7922 Wi-Fi 固件校验失败：${FIRMWARE_NAME}。"
+        return
+    fi
+    # 旧公开附件漏打了 Wi-Fi 固件；新归档已内置，只有旧归档需要补取。
+    install -d -m 0755 "${FIRMWARE_DIR}"
+    for FIRMWARE_URL in \
+        "${MT7922_WIFI_FIRMWARE_KERNEL_BASE}/${FIRMWARE_NAME}?h=20260916" \
+        "${MT7922_WIFI_FIRMWARE_GITLAB_BASE}/${FIRMWARE_NAME}"; do
+        if curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            --output "${FIRMWARE_PATH}" "${FIRMWARE_URL}" && [ -s "${FIRMWARE_PATH}" ]; then
+            ACTUAL_FIRMWARE_SHA256="$(sha256sum "${FIRMWARE_PATH}" | awk '{print tolower($1)}')"
+            if [ "${ACTUAL_FIRMWARE_SHA256}" = "${EXPECTED_FIRMWARE_SHA256}" ]; then
+                return
+            fi
+        fi
+    done
+    die "MT7922 Wi-Fi 固件下载或校验失败：${FIRMWARE_NAME}。"
+}
+
 install_mt7922() {
     log "MT7922 可选测试内核"
     cat <<'EOF'
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-MT7922 支持会安装 TeslaBox 自编译的 5.10.160teslabox1 测试内核，
-以及与该内核绑定的 mt76/mt7921e backports 驱动和固件。
+MT7922 支持会安装 TeslaBox 自编译的 5.10.160teslabox2 测试内核，
+以及与该内核绑定的 Wi-Fi/蓝牙驱动和固件。
 
 它不是 Radxa 官方维护内核。现有无线网卡能正常工作时没有必要安装；
 安装后必须重启，原厂内核会保留，可在启动故障时回退。
@@ -624,7 +697,7 @@ MT7922 支持会安装 TeslaBox 自编译的 5.10.160teslabox1 测试内核，
 EOF
 
     if [ "${MT7922_PRESENT}" != "true" ]; then
-        warn "当前未检测到 PCI ID 14c3:0616；如不是准备稍后插入 MT7922，请直接回车跳过。"
+        warn "当前未检测到 MT7922 PCI ID 14c3:0616 或 14c3:7922；如不是准备稍后插入 MT7922，请直接回车跳过。"
     fi
 
     if [ "${MT7922_MODE}" = "skip" ]; then
@@ -643,69 +716,72 @@ EOF
         return
     fi
 
-    MT_PATH="${WORK_DIR}/${MT7922_ARCHIVE}"
-    MT_DIR="${WORK_DIR}/mt7922"
+    BT_PATH="${WORK_DIR}/${MT7922_BLUETOOTH_ARCHIVE}"
+    BT_DIR="${WORK_DIR}/mt7922-bluetooth"
     curl --fail --location --retry 3 --connect-timeout 15 \
-        --output "${MT_PATH}" "${MT7922_RELEASE_BASE}/${MT7922_ARCHIVE}"
-    ACTUAL_MT_SHA256="$(sha256sum "${MT_PATH}" | awk '{print tolower($1)}')"
-    if [ "${ACTUAL_MT_SHA256}" != "${MT7922_SHA256}" ]; then
-        die "MT7922 测试内核包 SHA-256 校验失败。"
+        --output "${BT_PATH}" "${MT7922_BLUETOOTH_RELEASE_BASE}/${MT7922_BLUETOOTH_ARCHIVE}"
+    if [ ! -s "${BT_PATH}" ]; then
+        die "MT7922 Wi-Fi/蓝牙驱动包为空。"
     fi
-    mkdir -p "${MT_DIR}"
-    tar -C "${MT_DIR}" -xzf "${MT_PATH}"
-    if [ ! -f "${MT_DIR}/SHA256SUMS" ]; then
-        die "MT7922 测试内核包缺少 SHA256SUMS。"
+    ACTUAL_BT_SHA256="$(sha256sum "${BT_PATH}" | awk '{print tolower($1)}')"
+    if [ "${ACTUAL_BT_SHA256}" != "${MT7922_BLUETOOTH_SHA256}" ]; then
+        die "MT7922 Wi-Fi/蓝牙驱动包 SHA-256 校验失败。"
     fi
-    normalize_checksum_file "${MT_DIR}/SHA256SUMS"
+    mkdir -p "${BT_DIR}"
+    tar -C "${BT_DIR}" -xzf "${BT_PATH}"
+    if [ ! -s "${BT_DIR}/SHA256SUMS" ] || \
+        [ ! -s "${BT_DIR}/linux-image-5.10.160teslabox2_5.10.160teslabox2-1_arm64.deb" ] || \
+        [ ! -s "${BT_DIR}/bluetooth/btusb.ko" ] || \
+        [ ! -s "${BT_DIR}/bluetooth/btrtl.ko" ] || \
+        [ ! -s "${BT_DIR}/bluetooth/BT_RAM_CODE_MT7922_1_1_hdr.bin" ] || \
+        [ ! -s "${BT_DIR}/wifi-updates/drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko" ]; then
+        die "MT7922 Wi-Fi/蓝牙驱动包结构不完整。"
+    fi
+    normalize_checksum_file "${BT_DIR}/SHA256SUMS"
     (
-        cd "${MT_DIR}"
+        cd "${BT_DIR}"
         sha256sum -c SHA256SUMS
     )
-    dpkg -i \
-        "${MT_DIR}/linux-image-5.10.160teslabox1_5.10.160teslabox1-2_arm64.deb" \
-        "${MT_DIR}/linux-mt7922-backports-5.10.160teslabox1_5.10.160teslabox1-2_arm64.deb"
-    depmod -a 5.10.160teslabox1
+    prepare_mt7922_wifi_firmware "${BT_DIR}/firmware/mediatek" \
+        "WIFI_MT7922_patch_mcu_1_1_hdr.bin" "${MT7922_WIFI_PATCH_SHA256}"
+    prepare_mt7922_wifi_firmware "${BT_DIR}/firmware/mediatek" \
+        "WIFI_RAM_CODE_MT7922_1.bin" "${MT7922_WIFI_RAM_SHA256}"
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bluez
+    dpkg -i "${BT_DIR}/linux-image-5.10.160teslabox2_5.10.160teslabox2-1_arm64.deb"
+    BT_KERNEL="5.10.160teslabox2"
+    install -d -m 0755 "/lib/modules/${BT_KERNEL}/updates" "/lib/modules/${BT_KERNEL}/updates/teslabox-bluetooth"
+    cp -a "${BT_DIR}/wifi-updates/." "/lib/modules/${BT_KERNEL}/updates/"
+    install -m 0644 "${BT_DIR}/bluetooth/btusb.ko" "/lib/modules/${BT_KERNEL}/updates/teslabox-bluetooth/btusb.ko"
+    install -m 0644 "${BT_DIR}/bluetooth/btrtl.ko" "/lib/modules/${BT_KERNEL}/updates/teslabox-bluetooth/btrtl.ko"
+    install -d -m 0755 /lib/firmware/mediatek
+    install -m 0644 "${BT_DIR}/bluetooth/BT_RAM_CODE_MT7922_1_1_hdr.bin" /lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin
+    install -m 0644 "${BT_DIR}/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin" /lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin
+    install -m 0644 "${BT_DIR}/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin" /lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin
+    if [ -s "${BT_DIR}/firmware/LICENCE.mediatek" ]; then
+        install -d -m 0755 /usr/share/doc/teslabox
+        install -m 0644 "${BT_DIR}/firmware/LICENCE.mediatek" /usr/share/doc/teslabox/LICENCE.mediatek
+    fi
+    depmod -a "${BT_KERNEL}"
+    update-initramfs -u -k "${BT_KERNEL}"
+    for BT_MODULE in btusb btrtl mt7921e; do
+        if ! modinfo -k "${BT_KERNEL}" "${BT_MODULE}" >/dev/null 2>&1; then
+            die "MT7922 安装后缺少内核模块：${BT_MODULE}。"
+        fi
+    done
+    if [ ! -s /lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ]; then
+        die "MT7922 安装后缺少蓝牙固件。"
+    fi
+    if [ ! -s /lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin ] || \
+        [ ! -s /lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin ]; then
+        die "MT7922 安装后缺少 Wi-Fi 固件。"
+    fi
     systemctl enable teslabox-ap.service >/dev/null
-
-    printf '是否继续安装 MT7922 蓝牙驱动？此操作会升级到已验证的 5.10.160teslabox2 内核 [y/N]：' >/dev/tty
-    IFS= read -r BT_CONFIRM </dev/tty || BT_CONFIRM=""
-    case "${BT_CONFIRM}" in
-        y|Y)
-            BT_PATH="${WORK_DIR}/${MT7922_BLUETOOTH_ARCHIVE}"
-            BT_DIR="${WORK_DIR}/mt7922-bluetooth"
-            curl --fail --location --retry 3 --connect-timeout 15 \
-                --output "${BT_PATH}" "${MT7922_BLUETOOTH_RELEASE_BASE}/${MT7922_BLUETOOTH_ARCHIVE}"
-            if [ ! -s "${BT_PATH}" ]; then
-                die "MT7922 蓝牙驱动包为空。"
-            fi
-            ACTUAL_BT_SHA256="$(sha256sum "${BT_PATH}" | awk '{print tolower($1)}')"
-            if [ "${ACTUAL_BT_SHA256}" != "${MT7922_BLUETOOTH_SHA256}" ]; then
-                die "MT7922 蓝牙驱动包 SHA-256 校验失败。"
-            fi
-            mkdir -p "${BT_DIR}"
-            tar -C "${BT_DIR}" -xzf "${BT_PATH}"
-            if [ ! -s "${BT_DIR}/install.sh" ] || [ ! -s "${BT_DIR}/SHA256SUMS" ]; then
-                die "MT7922 蓝牙驱动包结构不完整。"
-            fi
-            normalize_checksum_file "${BT_DIR}/SHA256SUMS"
-            (
-                cd "${BT_DIR}"
-                sha256sum -c SHA256SUMS
-            )
-            apt-get install -y --no-install-recommends bluez
-            sh "${BT_DIR}/install.sh"
-            warn "MT7922 Wi-Fi 与蓝牙驱动已安装。请确认没有车机 USB 写入后手工执行 sudo reboot。"
-            ;;
-        *)
-            warn "已跳过 MT7922 蓝牙驱动，仅安装 MT7922 Wi-Fi 测试内核。"
-            warn "请确认没有车机 USB 写入后手工执行 sudo reboot。"
-            ;;
-    esac
+    warn "MT7922 Wi-Fi/蓝牙驱动已安装。请确认没有车机 USB 写入后手工执行 sudo reboot。"
 }
 
 MT7922_PRESENT="false"
 if command -v lspci >/dev/null 2>&1; then
-    if lspci -Dn 2>/dev/null | sed -n '/14c3:0616/p' | read -r _; then
+    if lspci -Dn 2>/dev/null | awk 'tolower($0) ~ /14c3:(0616|7922)/ { found=1 } END { exit !found }'; then
         MT7922_PRESENT="true"
     fi
 fi

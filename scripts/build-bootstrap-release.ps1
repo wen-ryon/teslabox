@@ -3,7 +3,7 @@ param(
     [string]$MainBinary = "dist\update\teslabox-linux-arm64",
     [string]$UpdateHelper = "dist\update\teslabox-update-helper-linux-arm64",
     [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
-    [string]$RadxaKeyring = "dist\bootstrap-inputs\radxa-archive-keyring_0.2.0_all.deb",
+    [string]$RadxaKeyring = "dist\bootstrap-inputs\radxa-archive-keyring_0.2.2_all.deb",
     [string]$OutputDirectory = "dist\bootstrap",
     [switch]$AllowDirty
 )
@@ -51,7 +51,7 @@ if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
     throw "The media archive checksum is missing: $mediaChecksumPath"
 }
 $radxaKeyringHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $radxaKeyringPath).Hash.ToLowerInvariant()
-if ($radxaKeyringHash -ne "a37c3e1b659fcdba165273fb8d6a9114f3eb813da5aa0dbab42c27b95dbe31ad") {
+if ($radxaKeyringHash -ne "3e3bb3d3150cf1dfa6c050d0c135f6a7f298b7638ff7e656fda711ababdb8a57") {
     throw "The Radxa archive keyring checksum is unexpected: $radxaKeyringPath"
 }
 
@@ -145,7 +145,7 @@ foreach ($entry in $files.GetEnumerator()) {
 }
 Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
 Copy-Item -LiteralPath $mediaChecksumPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz.sha256")
-Copy-Item -LiteralPath $radxaKeyringPath -Destination (Join-Path $stage "keyring\radxa-archive-keyring_0.2.0_all.deb")
+Copy-Item -LiteralPath $radxaKeyringPath -Destination (Join-Path $stage "keyring\radxa-archive-keyring_0.2.2_all.deb")
 
 $info = @(
     "version=$Version",
