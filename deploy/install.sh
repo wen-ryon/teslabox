@@ -324,7 +324,9 @@ rewrite_debian_deb822_file() {
 }
 
 configure_debian_apt_sources() {
-    select_debian_apt_mirrors
+    if [ -z "${DEBIAN_MAIN_MIRROR}" ] || [ -z "${DEBIAN_SECURITY_MIRROR}" ]; then
+        select_debian_apt_mirrors
+    fi
     log "配置已验证的 Debian APT 源并禁用失效的 bullseye-backports"
 
     APT_SOURCE_BACKUP_TIMESTAMP="$(date +%Y%m%d%H%M%S)"
@@ -336,6 +338,41 @@ configure_debian_apt_sources() {
             *.sources) rewrite_debian_deb822_file "${source_file}" ;;
         esac
     done <"${apt_source_list}"
+}
+
+download_debian_dependencies() {
+    # 先把所有依赖下载到 APT 缓存；镜像元数据有效但 .deb 已下线时，此处会提前失败。
+    apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::http::No-Cache=true \
+        -o Acquire::https::No-Cache=true update &&
+        apt-get -o Acquire::Retries=3 install -y -d --no-install-recommends "$@"
+}
+
+install_debian_dependencies() {
+    if download_debian_dependencies "$@"; then
+        apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
+        return
+    fi
+
+    warn "当前 Debian 安全仓的包文件不可用，尝试其他已验证签名的镜像。"
+    for candidate in \
+        "中科大 USTC|https://mirrors.ustc.edu.cn/debian-security" \
+        "阿里云|https://mirrors.aliyun.com/debian-security" \
+        "清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian-security"; do
+        candidate_name="${candidate%%|*}"
+        candidate_url="${candidate#*|}"
+        if [ "${candidate_url}" = "${DEBIAN_SECURITY_MIRROR}" ] || \
+            ! probe_apt_release "${candidate_url}" bullseye-security; then
+            continue
+        fi
+        DEBIAN_SECURITY_MIRROR="${candidate_url}"
+        log "切换 Debian 安全仓至 ${candidate_name}：${DEBIAN_SECURITY_MIRROR}"
+        configure_debian_apt_sources
+        if download_debian_dependencies "$@"; then
+            apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
+            return
+        fi
+    done
+    die "Debian 依赖下载失败；已保留 APT 源备份，未开始安装 TeslaBox 程序。请检查软件源后重试。"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -483,8 +520,7 @@ log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
 install_radxa_archive_keyring
 configure_debian_apt_sources
-apt-get -o Acquire::Retries=3 update
-apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+install_debian_dependencies \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
     dosfstools fonts-noto-cjk libass9 libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
 
