@@ -15,12 +15,15 @@ $distRoot = [IO.Path]::GetFullPath((Join-Path $root "dist"))
 if (-not $outputPath.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The installer output must be inside dist."
 }
-if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$') {
     throw "Invalid release version: $Version"
+}
+if ($Channel -eq "stable" -and $Version.Contains("-rc.")) {
+    throw "Stable installers cannot use an RC version."
 }
 
 $tag = "v$Version"
-if ($Channel -eq "beta") {
+if ($Channel -eq "beta" -and -not $Version.Contains("-rc.")) {
     $tag += "-beta"
 }
 $bootstrapName = Split-Path -Leaf $bootstrapPath
@@ -41,7 +44,7 @@ if ($sourceBytes -contains 0x0D) {
 $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
 $lines = $utf8Strict.GetString($sourceBytes).TrimEnd("`n") -split "`n"
 $values = @{
-    INSTALLER_VERSION = if ($Channel -eq "beta") { "$Version-beta" } else { $Version }
+    INSTALLER_VERSION = if ($Channel -eq "beta" -and -not $Version.Contains("-rc.")) { "$Version-beta" } else { $Version }
     INSTALL_CHANNEL = $Channel
     RELEASE_BASE = "https://gitee.com/TecheN1/teslabox-releases/releases/download/$tag"
     BOOTSTRAP_ARCHIVE = $bootstrapName

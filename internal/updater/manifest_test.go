@@ -32,6 +32,37 @@ func TestManifestVerifyRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestManifestVerifyRCOnlyInBeta(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		channel string
+		version string
+		wantErr bool
+	}{
+		{name: "beta rc", channel: "beta", version: "0.1.31-rc.1"},
+		{name: "beta stable version", channel: "beta", version: "0.1.31"},
+		{name: "stable rc rejected", channel: "stable", version: "0.1.31-rc.1", wantErr: true},
+		{name: "zero rc rejected", channel: "beta", version: "0.1.31-rc.0", wantErr: true},
+		{name: "malformed rc rejected", channel: "beta", version: "0.1.31rc1", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := signedTestManifest(t, privateKey, "https://example.com/teslabox", []byte("program"))
+			manifest.Channel, manifest.Version = test.channel, test.version
+			if err := manifest.Sign(privateKey); err != nil {
+				t.Fatal(err)
+			}
+			err := manifest.Verify(publicKey, test.channel, "radxa-rock-3a", "arm64", 1024)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Verify() error = %v, want error %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestClientFetchAndDownloadVerifiedPackage(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -96,24 +127,34 @@ func TestParsePublicKey(t *testing.T) {
 
 func TestVersionComparison(t *testing.T) {
 	tests := []struct {
+		name      string
 		candidate string
 		current   string
 		want      bool
 	}{
-		{candidate: "0.2.0", current: "0.1.9", want: true},
-		{candidate: "1.0.0", current: "1.0.0", want: false},
-		{candidate: "1.0.0", current: "2.0.0", want: false},
-		{candidate: "0.1.0", current: "dev", want: true},
-		{candidate: "0.1.7", current: "candidate-20260723-ui-layout", want: true},
+		{name: "new patch", candidate: "0.2.0", current: "0.1.9", want: true},
+		{name: "same stable", candidate: "1.0.0", current: "1.0.0"},
+		{name: "older stable", candidate: "1.0.0", current: "2.0.0"},
+		{name: "development build", candidate: "0.1.0", current: "dev", want: true},
+		{name: "legacy build", candidate: "0.1.7", current: "candidate-20260723-ui-layout", want: true},
+		{name: "next rc", candidate: "0.1.31-rc.2", current: "0.1.31-rc.1", want: true},
+		{name: "rc numeric order", candidate: "0.1.31-rc.10", current: "0.1.31-rc.9", want: true},
+		{name: "older rc", candidate: "0.1.31-rc.1", current: "0.1.31-rc.2"},
+		{name: "same rc", candidate: "0.1.31-rc.1", current: "0.1.31-rc.1"},
+		{name: "rc below stable", candidate: "0.1.31-rc.1", current: "0.1.31"},
+		{name: "stable above rc", candidate: "0.1.31", current: "0.1.31-rc.2", want: true},
+		{name: "next base rc", candidate: "0.1.32-rc.1", current: "0.1.31", want: true},
 	}
 	for _, test := range tests {
-		got, err := newerVersion(test.candidate, test.current)
-		if err != nil {
-			t.Fatalf("newerVersion(%q, %q) error = %v", test.candidate, test.current, err)
-		}
-		if got != test.want {
-			t.Fatalf("newerVersion(%q, %q) = %v, want %v", test.candidate, test.current, got, test.want)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			got, err := newerVersion(test.candidate, test.current)
+			if err != nil {
+				t.Fatalf("newerVersion(%q, %q) error = %v", test.candidate, test.current, err)
+			}
+			if got != test.want {
+				t.Fatalf("newerVersion(%q, %q) = %v, want %v", test.candidate, test.current, got, test.want)
+			}
+		})
 	}
 }
 
@@ -134,8 +175,8 @@ func TestNonStableCurrentVersionCanInstallSignedStableRelease(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := isNonStableVersion(test.version); got != test.want {
-				t.Fatalf("isNonStableVersion(%q) = %v, want %v", test.version, got, test.want)
+			if got := isUnversionedBuild(test.version); got != test.want {
+				t.Fatalf("isUnversionedBuild(%q) = %v, want %v", test.version, got, test.want)
 			}
 			available, err := newerVersion("0.1.22", test.version)
 			if err != nil {
@@ -143,6 +184,32 @@ func TestNonStableCurrentVersionCanInstallSignedStableRelease(t *testing.T) {
 			}
 			if available != test.want {
 				t.Fatalf("newerVersion(0.1.22, %q) = %v, want %v", test.version, available, test.want)
+			}
+		})
+	}
+}
+
+func TestRCIsComparableBuild(t *testing.T) {
+	if isUnversionedBuild("0.1.31-rc.1") {
+		t.Fatal("RC 版本不应当被当作无法比较的旧测试构建")
+	}
+}
+
+func TestRCMinimumVersion(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		current string
+		minimum string
+		want    bool
+	}{
+		{name: "older minimum", current: "0.1.31-rc.1", minimum: "0.1.30", want: true},
+		{name: "same base stable minimum", current: "0.1.31-rc.1", minimum: "0.1.31"},
+		{name: "stable meets minimum", current: "0.1.31", minimum: "0.1.31", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := versionAtLeast(test.current, test.minimum)
+			if err != nil || got != test.want {
+				t.Fatalf("versionAtLeast(%q, %q) = %v, %v, want %v", test.current, test.minimum, got, err, test.want)
 			}
 		})
 	}

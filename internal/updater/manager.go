@@ -323,7 +323,7 @@ func (m *Manager) Check(ctx context.Context) (Status, error) {
 		return m.Status(), err
 	}
 	available, err := newerVersion(manifest.Version, m.config.CurrentVersion)
-	if err == nil && manifest.MinVersion != "" && !isNonStableVersion(m.config.CurrentVersion) {
+	if err == nil && manifest.MinVersion != "" && !isUnversionedBuild(m.config.CurrentVersion) {
 		var meetsMinimum bool
 		meetsMinimum, err = versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
 		if err == nil && !meetsMinimum {
@@ -396,8 +396,8 @@ func (m *Manager) History(ctx context.Context) (ReleaseHistory, error) {
 // Select 从刚刚验签的历史目录中选择一个准确版本；客户端提交的版本号从不携带下载地址。
 func (m *Manager) Select(ctx context.Context, version string) (Status, error) {
 	version = strings.TrimSpace(version)
-	if _, err := parseStableVersion(version); err != nil {
-		return m.Status(), errors.New("请选择有效的稳定版本")
+	if _, err := parseReleaseVersion(version); err != nil {
+		return m.Status(), errors.New("请选择有效的更新版本")
 	}
 	if !m.opMu.TryLock() {
 		return m.Status(), errors.New("已有更新操作正在进行")
@@ -485,13 +485,13 @@ func (m *Manager) manifestAction(manifest Manifest) (string, bool) {
 	if manifest.Version == m.config.CurrentVersion {
 		return "", false
 	}
-	if manifest.MinVersion != "" && !isNonStableVersion(m.config.CurrentVersion) {
+	if manifest.MinVersion != "" && !isUnversionedBuild(m.config.CurrentVersion) {
 		meetsMinimum, err := versionAtLeast(m.config.CurrentVersion, manifest.MinVersion)
 		if err != nil || !meetsMinimum {
 			return "", false
 		}
 	}
-	if isNonStableVersion(m.config.CurrentVersion) {
+	if isUnversionedBuild(m.config.CurrentVersion) {
 		return "install", true
 	}
 	isNewer, err := newerVersion(manifest.Version, m.config.CurrentVersion)
@@ -507,25 +507,16 @@ func (m *Manager) manifestAction(manifest Manifest) (string, bool) {
 func sortReleases(releases []Release) {
 	for left := range releases {
 		for right := left + 1; right < len(releases); right++ {
-			leftVersion, leftErr := parseStableVersion(releases[left].Version)
-			rightVersion, rightErr := parseStableVersion(releases[right].Version)
+			leftVersion, leftErr := parseReleaseVersion(releases[left].Version)
+			rightVersion, rightErr := parseReleaseVersion(releases[right].Version)
 			if leftErr != nil || rightErr != nil {
 				continue
 			}
-			if versionLess(leftVersion, rightVersion) {
+			if compareReleaseVersions(leftVersion, rightVersion) < 0 {
 				releases[left], releases[right] = releases[right], releases[left]
 			}
 		}
 	}
-}
-
-func versionLess(left, right [3]uint64) bool {
-	for index := range left {
-		if left[index] != right[index] {
-			return left[index] < right[index]
-		}
-	}
-	return false
 }
 
 // Install 写入只含可信本地文件名和摘要的请求，再启动固定的一次性安装服务。
@@ -584,7 +575,7 @@ func (m *Manager) noBetaRelease(err error) bool {
 }
 
 func versionAtLeast(current, minimum string) (bool, error) {
-	currentParts, err := parseStableVersion(current)
+	currentVersion, err := parseReleaseVersion(current)
 	if err != nil {
 		return false, err
 	}
@@ -592,12 +583,7 @@ func versionAtLeast(current, minimum string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for index := range currentParts {
-		if currentParts[index] != minimumParts[index] {
-			return currentParts[index] > minimumParts[index], nil
-		}
-	}
-	return true, nil
+	return compareReleaseVersions(currentVersion, releaseVersion{core: minimumParts}) >= 0, nil
 }
 
 func writeJSONAtomic(path string, value any, mode os.FileMode) error {

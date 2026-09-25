@@ -17,7 +17,12 @@ import (
 
 const manifestSchemaVersion = 1
 
-var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-rc\.([1-9][0-9]*))?$`)
+
+type releaseVersion struct {
+	core [3]uint64
+	rc   uint64
+}
 
 // Manifest 描述一个经过 Ed25519 签名的单文件 ARM64 更新。
 type Manifest struct {
@@ -49,8 +54,12 @@ func (m Manifest) Verify(publicKey ed25519.PublicKey, channel, board, arch strin
 	if m.SchemaVersion != manifestSchemaVersion {
 		return fmt.Errorf("不支持的更新清单版本 %d", m.SchemaVersion)
 	}
-	if _, err := parseStableVersion(m.Version); err != nil {
+	parsedVersion, err := parseReleaseVersion(m.Version)
+	if err != nil {
 		return fmt.Errorf("版本号无效: %w", err)
+	}
+	if m.Channel == "stable" && parsedVersion.rc != 0 {
+		return errors.New("稳定通道不接受预发布版本")
 	}
 	if m.MinVersion != "" {
 		if _, err := parseStableVersion(m.MinVersion); err != nil {
@@ -114,44 +123,75 @@ func parsePublicKey(value string) (ed25519.PublicKey, error) {
 }
 
 func newerVersion(candidate, current string) (bool, error) {
-	candidateParts, err := parseStableVersion(candidate)
+	candidateVersion, err := parseReleaseVersion(candidate)
 	if err != nil {
 		return false, err
 	}
-	if isNonStableVersion(current) {
+	if isUnversionedBuild(current) {
 		return true, nil
 	}
-	currentParts, err := parseStableVersion(current)
+	currentVersion, err := parseReleaseVersion(current)
 	if err != nil {
 		return false, err
 	}
-	for index := range candidateParts {
-		if candidateParts[index] != currentParts[index] {
-			return candidateParts[index] > currentParts[index], nil
-		}
-	}
-	return false, nil
+	return compareReleaseVersions(candidateVersion, currentVersion) > 0, nil
 }
 
-// isNonStableVersion 判断本地版本是否不能作为稳定版本比较的基准。
-// 测试构建可能采用任意命名；仍只允许安装通过签名、设备和校验和验证的稳定发布物。
-func isNonStableVersion(value string) bool {
-	_, err := parseStableVersion(value)
+// isUnversionedBuild 区分旧测试构建与可比较的 RC，避免把 RC 当作任意低版本。
+func isUnversionedBuild(value string) bool {
+	_, err := parseReleaseVersion(value)
 	return err != nil
 }
 
 func parseStableVersion(value string) ([3]uint64, error) {
-	matches := stableVersionPattern.FindStringSubmatch(strings.TrimSpace(value))
-	if matches == nil {
+	version, err := parseReleaseVersion(value)
+	if err != nil || version.rc != 0 {
 		return [3]uint64{}, errors.New("仅支持 x.y.z 格式的稳定版本")
 	}
-	var result [3]uint64
-	for index := range result {
+	return version.core, nil
+}
+
+func parseReleaseVersion(value string) (releaseVersion, error) {
+	matches := releaseVersionPattern.FindStringSubmatch(strings.TrimSpace(value))
+	if matches == nil {
+		return releaseVersion{}, errors.New("仅支持 x.y.z 或 x.y.z-rc.N 格式的版本")
+	}
+	var result releaseVersion
+	for index := range result.core {
 		parsed, err := strconv.ParseUint(matches[index+1], 10, 64)
 		if err != nil {
-			return [3]uint64{}, errors.New("版本号超出范围")
+			return releaseVersion{}, errors.New("版本号超出范围")
 		}
-		result[index] = parsed
+		result.core[index] = parsed
+	}
+	if matches[4] != "" {
+		parsed, err := strconv.ParseUint(matches[4], 10, 64)
+		if err != nil {
+			return releaseVersion{}, errors.New("RC 轮次超出范围")
+		}
+		result.rc = parsed
 	}
 	return result, nil
+}
+
+func compareReleaseVersions(left, right releaseVersion) int {
+	for index := range left.core {
+		if left.core[index] < right.core[index] {
+			return -1
+		}
+		if left.core[index] > right.core[index] {
+			return 1
+		}
+	}
+	if left.rc == right.rc {
+		return 0
+	}
+	// 同一基础版本的正式版始终高于所有 RC。
+	if left.rc == 0 {
+		return 1
+	}
+	if right.rc == 0 || left.rc < right.rc {
+		return -1
+	}
+	return 1
 }

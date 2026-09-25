@@ -111,7 +111,7 @@ func readInstallRequest(path string) (InstallRequest, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return InstallRequest{}, errors.New("安装请求包含多余内容")
 	}
-	if _, err := parseStableVersion(request.Version); err != nil {
+	if _, err := parseReleaseVersion(request.Version); err != nil {
 		return InstallRequest{}, errors.New("安装版本号无效")
 	}
 	if request.PackageName == "" || filepath.Base(request.PackageName) != request.PackageName || strings.ContainsAny(request.PackageName, `/\\`) {
