@@ -30,6 +30,8 @@ APT_SOURCE_BACKUP_DIR="/var/backups/teslabox/apt-sources"
 APT_SOURCE_BACKUP_TIMESTAMP=""
 DEBIAN_MAIN_MIRROR=""
 DEBIAN_SECURITY_MIRROR=""
+DEBIAN_SECURITY_SNAPSHOT="https://snapshot.debian.org/archive/debian-security/20260831T211304Z"
+DEBIAN_SECURITY_SNAPSHOT_INRELEASE_SHA256="96825d4c6ce395d11a6b410709764b665d6dda2620a3eb91c3aa0db2c7a72b3a"
 
 log() {
     printf '\n[TeslaBox] %s\n' "$*"
@@ -55,14 +57,21 @@ probe_apt_release() {
     suite="$2"
     probe_file="${WORK_DIR}/apt-probe-${suite}.InRelease"
 
-    if ! curl --silent --show-error --fail --location --retry 1 --retry-delay 1 \
-        --connect-timeout 5 --max-time 20 \
+    if ! curl --silent --show-error --fail --location --retry 2 --retry-delay 1 \
+        --connect-timeout 10 --max-time 60 \
         --output "${probe_file}" "${mirror_url%/}/dists/${suite}/InRelease"; then
         rm -f "${probe_file}"
         return 1
     fi
 
-    # HTTP 200 也可能是镜像站的拦截页面；写入 APT 配置前必须验证 Debian 签名。
+    # 快照固定到末次 LTS 归档，避免签名有效但 Packages 指向已删除的在线包。
+    if [ "${mirror_url}" = "${DEBIAN_SECURITY_SNAPSHOT}" ] && \
+        ! printf '%s  %s\n' "${DEBIAN_SECURITY_SNAPSHOT_INRELEASE_SHA256}" "${probe_file}" | sha256sum -c - >/dev/null 2>&1; then
+        rm -f "${probe_file}"
+        return 1
+    fi
+
+    # HTTP 200 也可能是拦截页面；写入 APT 配置前必须验证 Debian 签名。
     if ! gpgv --keyring /usr/share/keyrings/debian-archive-keyring.gpg \
         "${probe_file}" >/dev/null 2>&1; then
         rm -f "${probe_file}"
@@ -95,24 +104,12 @@ select_debian_apt_mirrors() {
         die "所有 Debian Bullseye 基础仓镜像均不可用，请检查网络后重试。"
     fi
 
-    for candidate in \
-        "Debian 官方|https://security.debian.org/debian-security" \
-        "中科大 USTC|https://mirrors.ustc.edu.cn/debian-security" \
-        "阿里云|https://mirrors.aliyun.com/debian-security" \
-        "清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian-security"; do
-        candidate_name="${candidate%%|*}"
-        candidate_url="${candidate#*|}"
-        if probe_apt_release "${candidate_url}" bullseye-security; then
-            DEBIAN_SECURITY_MIRROR="${candidate_url}"
-            log "Debian 安全仓使用 ${candidate_name}：${DEBIAN_SECURITY_MIRROR}"
-            break
-        fi
-        warn "Debian 安全仓 ${candidate_name} 不可用，尝试下一镜像。"
-    done
-
-    if [ -z "${DEBIAN_SECURITY_MIRROR}" ]; then
-        die "所有 Debian Bullseye 安全仓镜像均不可用，请检查网络后重试。"
+    # Bullseye LTS 结束后，在线安全仓的索引仍引用已删除的包；仅使用已核对的官方快照。
+    if ! probe_apt_release "${DEBIAN_SECURITY_SNAPSHOT}" bullseye-security; then
+        die "Debian Bullseye 安全仓快照不可用或签名/摘要不符，请检查网络后重试。"
     fi
+    DEBIAN_SECURITY_MIRROR="${DEBIAN_SECURITY_SNAPSHOT}"
+    log "Debian 安全仓使用官方固定快照：${DEBIAN_SECURITY_MIRROR}"
 }
 
 normalize_checksum_file() {
@@ -167,7 +164,7 @@ rewrite_debian_list_file() {
 
     # Debian 11 已进入旧版本阶段，固定使用仍提供 Bullseye 元数据的官方仓，
     # 避免第三方镜像停止同步或拒绝访问时阻断整套首装。
-    awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
+    if ! awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
         -v debian_security_mirror="${DEBIAN_SECURITY_MIRROR}" '
         function source_field_index(    field_no) {
             field_no = 2
@@ -185,7 +182,23 @@ rewrite_debian_list_file() {
         }
 
         function is_debian_security_uri(uri) {
-            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/ || \
+                uri ~ /^https?:\/\/snapshot\.debian\.org\/archive\/debian-security\/[0-9TZ]+\/?$/
+        }
+
+        function set_snapshot_validity_option(    field_no, closing_field) {
+            for (field_no = 2; field_no < source_index; field_no++) {
+                if ($field_no ~ /check-valid-until=/) {
+                    sub(/check-valid-until=[^]]*/, "check-valid-until=no", $field_no)
+                    return
+                }
+            }
+            if ($2 ~ /^\[/) {
+                closing_field = source_index - 1
+                sub(/\]$/, " check-valid-until=no]", $closing_field)
+            } else {
+                $2 = "[check-valid-until=no] " $2
+            }
         }
 
         {
@@ -209,11 +222,15 @@ rewrite_debian_list_file() {
                     $(source_index) = debian_main_mirror
                 } else if (suite == "bullseye-security" && is_debian_security_uri(uri)) {
                     $(source_index) = debian_security_mirror
+                    set_snapshot_validity_option()
                 }
             }
             print
         }
-    ' "${source_file}" >"${temporary_file}"
+    ' "${source_file}" >"${temporary_file}"; then
+        rm -f "${temporary_file}"
+        return 1
+    fi
 
     replace_apt_source_file "${source_file}" "${temporary_file}"
 }
@@ -222,7 +239,7 @@ rewrite_debian_deb822_file() {
     source_file="$1"
     temporary_file="$(mktemp "${source_file}.teslabox.XXXXXX")"
 
-    awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
+    if ! awk -v debian_main_mirror="${DEBIAN_MAIN_MIRROR}" \
         -v debian_security_mirror="${DEBIAN_SECURITY_MIRROR}" '
         BEGIN {
             RS = ""
@@ -288,7 +305,8 @@ rewrite_debian_deb822_file() {
         }
 
         function is_debian_security_uri(uri) {
-            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/
+            return uri ~ /^https?:\/\/[^\/:]+(:[0-9]+)?\/debian-security\/?$/ || \
+                uri ~ /^https?:\/\/snapshot\.debian\.org\/archive\/debian-security\/[0-9TZ]+\/?$/
         }
 
         {
@@ -314,11 +332,19 @@ rewrite_debian_deb822_file() {
             if ((has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) && is_debian_main_uri(uris)) {
                 set_field("URIs", debian_main_mirror)
             } else if (has_word(suites, "bullseye-security") && is_debian_security_uri(uris)) {
+                if (has_word(suites, "bullseye") || has_word(suites, "bullseye-updates")) {
+                    print "无法安全改写混合 Debian 基础仓与安全仓的 deb822 条目。" > "/dev/stderr"
+                    exit 1
+                }
                 set_field("URIs", debian_security_mirror)
+                set_field("Check-Valid-Until", "no")
             }
             print
         }
-    ' "${source_file}" >"${temporary_file}"
+    ' "${source_file}" >"${temporary_file}"; then
+        rm -f "${temporary_file}"
+        return 1
+    fi
 
     replace_apt_source_file "${source_file}" "${temporary_file}"
 }
@@ -348,31 +374,10 @@ download_debian_dependencies() {
 }
 
 install_debian_dependencies() {
-    if download_debian_dependencies "$@"; then
-        apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
-        return
+    if ! download_debian_dependencies "$@"; then
+        die "Debian 依赖下载失败；已保留 APT 源备份，未开始安装 TeslaBox 程序。请检查官方快照访问后重试。"
     fi
-
-    warn "当前 Debian 安全仓的包文件不可用，尝试其他已验证签名的镜像。"
-    for candidate in \
-        "中科大 USTC|https://mirrors.ustc.edu.cn/debian-security" \
-        "阿里云|https://mirrors.aliyun.com/debian-security" \
-        "清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian-security"; do
-        candidate_name="${candidate%%|*}"
-        candidate_url="${candidate#*|}"
-        if [ "${candidate_url}" = "${DEBIAN_SECURITY_MIRROR}" ] || \
-            ! probe_apt_release "${candidate_url}" bullseye-security; then
-            continue
-        fi
-        DEBIAN_SECURITY_MIRROR="${candidate_url}"
-        log "切换 Debian 安全仓至 ${candidate_name}：${DEBIAN_SECURITY_MIRROR}"
-        configure_debian_apt_sources
-        if download_debian_dependencies "$@"; then
-            apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
-            return
-        fi
-    done
-    die "Debian 依赖下载失败；已保留 APT 源备份，未开始安装 TeslaBox 程序。请检查软件源后重试。"
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -385,7 +390,7 @@ for argument in "$@"; do
 用法：sudo ./teslabox-install.sh [--skip-mt7922]
 
 默认安装 TeslaBox、FFmpeg/MPP/RGA、systemd、udev 和在线升级组件。
-安装 Debian 运行依赖前会自动验证并选择可用的 Bullseye 软件源；当前镜像不可用时会依次尝试备用镜像。
+安装 Debian 运行依赖前会验证官方 Bullseye 安全仓固定快照的签名和摘要，再预下载全部依赖。
 安装末尾会单独询问是否安装 MT7922 Wi-Fi/蓝牙测试内核，默认不安装。
 EOF
             exit 0

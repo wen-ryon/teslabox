@@ -3,7 +3,7 @@ set -eu
 
 # 供已安装 TeslaBox 的 ROCK 3A 单独补装 MT7922 内核与固件。
 ARCHIVE="teslabox-mt7922-bluetooth-rock3a-5.10.160teslabox2-fw20260916.tar.gz"
-URL="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.31-rc.2/${ARCHIVE}"
+URL="https://gitee.com/TecheN1/teslabox-releases/releases/download/v0.1.31-rc.3/${ARCHIVE}"
 SHA256="39ebb602bde400ce1baf93c61fee8bb17d0ad9535ac4ce736f2d5181054d7fad"
 WIFI_FIRMWARE_KERNEL_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek"
 WIFI_FIRMWARE_GITLAB_BASE="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20260916/mediatek"
