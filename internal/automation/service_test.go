@@ -18,9 +18,95 @@ import (
 )
 
 type fakeAPAdmin struct {
-	mu       sync.Mutex
-	settings deviceadmin.APSettings
-	updates  []deviceadmin.APUpdate
+	mu              sync.Mutex
+	settings        deviceadmin.APSettings
+	updates         []deviceadmin.APUpdate
+	wifiStatus      deviceadmin.WiFiStatus
+	wifiScan        []deviceadmin.AccessPoint
+	connectRequests []deviceadmin.ConnectRequest
+	autoUpdates     []deviceadmin.AutoConnectUpdate
+}
+
+func (a *fakeAPAdmin) WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.wifiStatus, nil
+}
+
+func (a *fakeAPAdmin) Scan(context.Context) ([]deviceadmin.AccessPoint, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.wifiScan, nil
+}
+
+func (a *fakeAPAdmin) Connect(_ context.Context, request deviceadmin.ConnectRequest) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.connectRequests = append(a.connectRequests, request)
+	return nil
+}
+
+func (a *fakeAPAdmin) SetAutoConnect(_ context.Context, update deviceadmin.AutoConnectUpdate) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.autoUpdates = append(a.autoUpdates, update)
+	return nil
+}
+
+func TestWiFiAutomationUsesDeviceManager(t *testing.T) {
+	admin := &fakeAPAdmin{
+		settings:   defaultAPSettings(false, false),
+		wifiStatus: deviceadmin.WiFiStatus{Available: true, SavedNetworks: []deviceadmin.SavedNetwork{{UUID: "550e8400-e29b-41d4-a716-446655440000", SSID: "Home"}}},
+		wifiScan:   []deviceadmin.AccessPoint{{SSID: "Home", Signal: 76}},
+	}
+	service := newTestService(t, admin, time.Now)
+	for _, test := range []struct {
+		name, method, path, body, contains string
+	}{
+		{"列表", http.MethodGet, "/v1/network/wifi/status", "", `"ssid":"Home"`},
+		{"扫描", http.MethodPost, "/v1/network/wifi/scan", "", `"signal":76`},
+		{"连接", http.MethodPost, "/v1/network/wifi/connect", `{"ssid":"Home","security":"wpa","password":"correct-password"}`, `"connected":true`},
+		{"关闭自动连接", http.MethodPut, "/v1/network/wifi/saved/550e8400-e29b-41d4-a716-446655440000/autoconnect", `{"enabled":false}`, `"updated":true`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			service.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.contains) {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if len(admin.connectRequests) != 1 || admin.connectRequests[0].SSID != "Home" {
+		t.Fatalf("连接请求 = %+v", admin.connectRequests)
+	}
+	if len(admin.autoUpdates) != 1 || admin.autoUpdates[0].Enabled || admin.autoUpdates[0].UUID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("自动连接请求 = %+v", admin.autoUpdates)
+	}
+}
+
+func TestWiFiAutomationRejectsInvalidRequests(t *testing.T) {
+	service := newTestService(t, &fakeAPAdmin{settings: defaultAPSettings(false, false)}, time.Now)
+	for _, test := range []struct {
+		name, path, body string
+	}{
+		{"缺少连接目标", "/v1/network/wifi/connect", `{}`},
+		{"同时提供两个目标", "/v1/network/wifi/connect", `{"uuid":"a","ssid":"b"}`},
+		{"未知字段", "/v1/network/wifi/connect", `{"ssid":"Home","command":"reboot"}`},
+		{"自动连接缺少布尔值", "/v1/network/wifi/saved/550e8400-e29b-41d4-a716-446655440000/autoconnect", `{}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			method := http.MethodPost
+			if strings.Contains(test.path, "autoconnect") {
+				method = http.MethodPut
+			}
+			response := httptest.NewRecorder()
+			service.Handler().ServeHTTP(response, httptest.NewRequest(method, test.path, strings.NewReader(test.body)))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
 }
 
 func (a *fakeAPAdmin) APSettings(context.Context) (deviceadmin.APSettings, error) {

@@ -4,6 +4,8 @@
 
 本功能从 TeslaBox `0.1.31` 开始提供。`teslaboxctl` 是正式入口，`/usr/local/bin/teslabox automation` 仅保留为兼容和诊断入口。
 
+WiFi 扫描、连接和自动连接开关的开发候选命令见 [本机 WiFi 自动化命令](TESLABOXCTL_WIFI_GUIDE.md)；它们不属于已公开的 `0.1.31-rc.1`。
+
 ## 一、工作原理
 
 自动化脚本不会直接执行 `nmcli`，也不需要保存 TeslaBox 管理页面密码。脚本通过板内 Unix Socket 向 TeslaBox 主服务申请 AP 租约：

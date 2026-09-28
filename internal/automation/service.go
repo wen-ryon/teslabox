@@ -35,11 +35,15 @@ const (
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
-// APAdmin 是自动化接口允许使用的最小热点管理能力。
-type APAdmin interface {
+// NetworkAdmin 是自动化接口允许使用的最小网络管理能力，不暴露任意系统命令。
+type NetworkAdmin interface {
 	APSettings(context.Context) (deviceadmin.APSettings, error)
 	ConfigureAPRadio(context.Context, string, int) (deviceadmin.APSettings, error)
 	SetAPRuntime(context.Context, bool) error
+	WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error)
+	Scan(context.Context) ([]deviceadmin.AccessPoint, error)
+	Connect(context.Context, deviceadmin.ConnectRequest) error
+	SetAutoConnect(context.Context, deviceadmin.AutoConnectUpdate) error
 }
 
 // Config 定义 Unix Socket、运行期状态和访问组。
@@ -63,7 +67,7 @@ type persistedState struct {
 
 // Service 管理自动化租约；同一时刻只允许一个热点状态变更。
 type Service struct {
-	admin      APAdmin
+	admin      NetworkAdmin
 	config     Config
 	mu         sync.Mutex
 	leases     map[string]time.Time
@@ -86,7 +90,7 @@ func EnsureAccessGroup(ctx context.Context, runner system.Runner) error {
 }
 
 // New 创建仅暴露白名单能力的本机自动化服务。
-func New(admin APAdmin, config Config) (*Service, error) {
+func New(admin NetworkAdmin, config Config) (*Service, error) {
 	if admin == nil {
 		return nil, errors.New("自动化 AP 管理器不能为空")
 	}
@@ -220,6 +224,10 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/network/ap/config", s.handleAPConfig)
 	mux.HandleFunc("PUT /v1/network/ap/leases/{owner}", s.handleAcquire)
 	mux.HandleFunc("DELETE /v1/network/ap/leases/{owner}", s.handleRelease)
+	mux.HandleFunc("GET /v1/network/wifi/status", s.handleWiFiStatus)
+	mux.HandleFunc("POST /v1/network/wifi/scan", s.handleWiFiScan)
+	mux.HandleFunc("POST /v1/network/wifi/connect", s.handleWiFiConnect)
+	mux.HandleFunc("PUT /v1/network/wifi/saved/{uuid}/autoconnect", s.handleWiFiAutoConnect)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -232,8 +240,78 @@ func (s *Service) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		"api_version": "v1",
 		"capabilities": []map[string]any{{
 			"name": "network.ap.lease", "actions": []string{"read", "acquire", "renew", "release"},
+		}, {
+			"name": "network.wifi", "actions": []string{"list", "scan", "connect", "set_autoconnect"},
 		}},
 	})
+}
+
+func (s *Service) handleWiFiStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.admin.WiFiStatus(r.Context())
+	if err != nil {
+		s.writeOperationError(w, "读取 WiFi 列表失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Service) handleWiFiScan(w http.ResponseWriter, r *http.Request) {
+	items, err := s.admin.Scan(r.Context())
+	if err != nil {
+		s.writeOperationError(w, "扫描 WiFi 失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) handleWiFiConnect(w http.ResponseWriter, r *http.Request) {
+	var input deviceadmin.ConnectRequest
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	if (input.UUID == "") == (input.SSID == "") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "必须且只能指定连接 UUID 或 SSID"})
+		return
+	}
+	if err := s.admin.Connect(r.Context(), input); err != nil {
+		s.writeOperationError(w, "连接 WiFi 失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+}
+
+func (s *Service) handleWiFiAutoConnect(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "必须指定 enabled"})
+		return
+	}
+	if err := s.admin.SetAutoConnect(r.Context(), deviceadmin.AutoConnectUpdate{
+		UUID: r.PathValue("uuid"), Enabled: *input.Enabled,
+	}); err != nil {
+		s.writeOperationError(w, "更新 WiFi 自动连接设置失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+}
+
+func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求参数无效"})
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求包含多余内容"})
+		return false
+	}
+	return true
 }
 
 func (s *Service) handleAPState(w http.ResponseWriter, r *http.Request) {
@@ -577,6 +655,17 @@ func (s *Service) writeOperationError(w http.ResponseWriter, message string, err
 	if errors.As(err, &inputError) {
 		status = http.StatusUnprocessableEntity
 		response["error"] = inputError.Error()
+	}
+	if errors.Is(err, deviceadmin.ErrAPActive) {
+		status = http.StatusConflict
+		response["error"] = "热点正在占用无线网卡，当前设备不支持 AP+STA 并发"
+	}
+	if errors.Is(err, deviceadmin.ErrWiFiUnavailable) {
+		response["error"] = deviceadmin.ErrWiFiUnavailable.Error()
+	}
+	if errors.Is(err, deviceadmin.ErrUnsupportedSecurity) {
+		status = http.StatusUnprocessableEntity
+		response["error"] = deviceadmin.ErrUnsupportedSecurity.Error()
 	}
 	var operationError *deviceadmin.APOperationError
 	if errors.As(err, &operationError) {
