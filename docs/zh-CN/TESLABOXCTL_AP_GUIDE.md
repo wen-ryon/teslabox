@@ -4,7 +4,7 @@
 
 本功能从 TeslaBox `0.1.31` 开始提供。`teslaboxctl` 是正式入口，`/usr/local/bin/teslabox automation` 仅保留为兼容和诊断入口。
 
-WiFi 扫描、连接和自动连接开关的开发候选命令见 [本机 WiFi 自动化命令](TESLABOXCTL_WIFI_GUIDE.md)；它们不属于已公开的 `0.1.31-rc.1`。
+`0.1.31` 正式版也包含 WiFi 扫描、连接和自动连接开关，详见 [本机 WiFi 自动化命令](TESLABOXCTL_WIFI_GUIDE.md)。
 
 ## 一、工作原理
 

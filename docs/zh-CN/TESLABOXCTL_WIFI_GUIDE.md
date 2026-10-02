@@ -1,6 +1,6 @@
 # TeslaBox 本机 WiFi 自动化命令
 
-本功能从 `0.1.31-rc.4` 内测版开始提供。安装后先运行 `teslaboxctl -v` 确认版本，再使用下列命令；稳定版须待真实用户验证后另行发布。
+本功能从 `0.1.31-rc.4` 内测版开始提供，并包含在 `0.1.31` 正式版中。安装后先运行 `teslaboxctl -v` 确认版本，再使用下列命令。
 
 `teslaboxctl` 通过板内 `/run/teslabox/automation/control.sock` 调用 TeslaBox 服务，不会把这些接口暴露到局域网或 FRP。仅 root 和 `teslabox-automation` 用户组可访问；该组成员也将获得 WiFi 扫描、连接及修改自动连接策略的权限，应只加入可信脚本账号。
 
