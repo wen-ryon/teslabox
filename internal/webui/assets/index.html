@@ -7,7 +7,11 @@
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css?v=20260906-2">
-  <script src="/app.js?v=20260906-1" defer></script>
+  <link rel="stylesheet" href="/settings-layout.css?v=20261010-cp-only-1">
+  <script src="/settings-layout.js?v=20261010-cp-only-1" defer></script>
+  <script src="/app.js?v=20261010-cp-only-1" defer></script>
+  <script src="/carplay-pairing.js?v=20261010-cp-only-1" defer></script>
+  <script src="/carplay-settings.js?v=20261010-cp-only-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -207,9 +211,13 @@
         <button id="settings-refresh" class="secondary" type="button">刷新设置</button>
       </section>
       <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
-      <nav id="settings-tabs" class="settings-tabs" aria-label="设置分类"></nav>
+      <div class="settings-layout">
+        <nav id="settings-tabs" class="settings-tabs" aria-label="设置分类"></nav>
+        <div id="settings-content" class="settings-content">
+          <div class="settings-detail-bar"><button id="settings-back" class="secondary compact" type="button">‹ 返回设置</button><h2 id="settings-detail-title">网络连接</h2></div>
+          <p id="settings-draft-notice" class="draft-notice" role="status" hidden>有未保存的修改，请在对应设置中保存。</p>
 
-      <section class="settings-section" aria-labelledby="wifi-settings-title">
+      <section id="settings-panel-1" class="settings-section" aria-labelledby="wifi-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">WIRELESS LAN</p><h2 id="wifi-settings-title">WiFi 无线局域网</h2></div></div>
         <div class="hardware-overview" aria-label="WiFi 硬件信息">
           <div><span>连接状态</span><strong id="wifi-status">读取中</strong></div>
@@ -230,7 +238,49 @@
         </article>
       </section>
 
-      <section class="settings-section" aria-labelledby="ap-settings-title">
+      <section id="carplay-settings-section" class="settings-section" aria-labelledby="carplay-settings-title">
+        <div class="settings-section-heading"><h2 id="carplay-settings-title">CarPlay</h2><button id="settings-carplay-return" class="secondary" type="button">返回 CarPlay 画面</button></div>
+        <form id="carplay-settings-form" class="settings-form carplay-settings-form">
+          <div class="settings-card carplay-settings-card">
+          <div class="carplay-card-heading"><h3>连接与网络</h3><p>选择连接手机与上游网络，管理热点信道变化时的恢复方式。</p></div>
+          <label class="toggle-choice carplay-enable"><input id="carplay-enabled" type="checkbox" checked><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>开启 CarPlay 功能</strong><small>关闭后停止 CarPlay 接收会话。</small></span></label>
+          <label class="toggle-choice carplay-enable"><input id="carplay-auto_play" type="checkbox"><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>连接后自动播放音乐</strong><small>默认关闭。开启后，下次手机连接成功时尝试恢复当前音乐；刷新页面不会重复播放。</small></span></label>
+          <div class="carplay-fields">
+          <label>连接手机<select id="carplay-phone_id"><option value="">自动：上次成功连接的手机</option></select></label>
+          <label>网络来源<select id="carplay-network"><option value="auto">自动：有线 / 无线优先，蓝牙共享回退</option><option value="wifi">无线 Wi-Fi</option><option value="ethernet">有线网络</option><option value="bluetooth">蓝牙共享网络</option></select></label>
+          <label>上游信道变化时<select id="carplay-recovery_priority"><option value="internet">保证联网优先</option><option value="carplay">保证 CarPlay 优先</option></select></label>
+          </div>
+          <p id="carplay-phone-status" class="carplay-status" role="status">正在读取已登记手机。切换手机会短暂重建 CarPlay 连接，录像继续运行。</p>
+          <p class="carplay-help">联网优先：原 Wi-Fi 换信道后短暂重建热点，自动恢复连接。CarPlay 优先：保持当前会话，不为恢复上游重建热点。关闭 CarPlay 后可在网络设置中手动重连 Wi-Fi；热点可能短暂断开，录像继续运行。</p>
+          <p id="carplay-network-status" class="carplay-status" role="status">网络状态等待检测；没有外网时，本地画面仍可运行。</p>
+          </div>
+          <div class="settings-card carplay-settings-card">
+          <div class="carplay-card-heading"><h3>画面设置</h3><p>调整视频清晰度、帧率与主页面布局。</p></div>
+          <div class="carplay-fields carplay-display-fields">
+          <label>画质<select id="carplay-quality"><option value="1080">1080p 蓝光</option><option value="720">720p 高清</option><option value="480">480p 标清</option></select></label>
+          <label>帧率<select id="carplay-fps"><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+          <label>主页面布局<select id="carplay-dashboard_layout" aria-describedby="carplay-layout-help"><option value="vertical">竖向地图</option><option value="auto" selected>跟随屏幕</option></select></label>
+          </div>
+          <p id="carplay-layout-help" class="carplay-help"><strong>选择“竖向地图”可能会造成视觉上变扁。</strong>竖向地图：地图在左、卡片在右，整幅画面拉伸铺满屏幕，不留黑边。跟随屏幕：按页面比例显示，由 iPhone 自动选择布局。首次进入或保存设置后首次进入 CarPlay 时重新检测尺寸。</p>
+          </div>
+          <div class="form-actions carplay-save-actions"><p id="carplay-settings-notice" role="status">正在读取设置</p><button class="primary" type="submit">保存 CarPlay 设置</button></div>
+        </form>
+        <div id="carplay-pairing-panel" class="settings-card carplay-settings-card">
+          <h3>登记手机</h3>
+          <p>保持 iPhone 停留在“设置 → 蓝牙”，先搜索并选择你的手机。配对会短暂替换 CarPlay 接收会话；录像继续运行。只有收到本轮新画面才算登记完成。</p>
+          <button id="carplay-pairing-scan" type="button" class="secondary" disabled>搜索蓝牙设备</button>
+          <label>待登记手机<select id="carplay-pairing-device" disabled><option value="">请先搜索并选择手机</option></select></label>
+          <button id="carplay-pairing-start" type="button" disabled>开始登记（120 秒）</button>
+          <p id="carplay-pairing-status" role="status">登记服务等待检测</p>
+          <div id="carplay-pairing-prompt" hidden>
+            <p>请核对 iPhone 与这里显示的六位数字：<strong id="carplay-pairing-digits"></strong>。只有两端一致才确认，并在 iPhone 上同意配对及 CarPlay 提示。</p>
+            <button id="carplay-pairing-confirm" type="button" disabled>两端数字一致，确认配对</button>
+          </div>
+          <button id="carplay-pairing-cancel" type="button" class="secondary" disabled>取消本轮登记</button>
+          <button id="carplay-pairing-reconcile" type="button" class="secondary" hidden disabled>重新核对清理状态</button>
+        </div>
+      </section>
+      <section id="settings-panel-2" class="settings-section" aria-labelledby="ap-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">ACCESS POINT</p><h2 id="ap-settings-title">AP 热点</h2></div></div>
         <div class="hardware-overview" aria-label="AP 热点硬件信息">
           <div><span>开启状态</span><strong id="ap-status">读取中</strong></div>
@@ -270,7 +320,7 @@
         </article>
       </section>
 
-      <section class="settings-section" aria-labelledby="maintenance-settings-title">
+      <section id="settings-panel-4" class="settings-section" aria-labelledby="maintenance-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge">读取中</span></div>
         <article class="settings-card power-card">
           <div><h3>媒体自动断开与温重启</h3><p>启用后，录像删除会在一次维护中完成批量删除和空间回收，再自动温重启恢复 Gadget。上传文件本身只会暂存，不会触发重启。</p><p id="snapshot-reserve-detail" class="muted">正在读取快照预留空间…</p></div>
@@ -279,7 +329,7 @@
         <div class="settings-warning">“修复快照预留空间”只回收达到安全目标所需的空闲簇，可重复执行且不会删除录像；“回收历史旧空间”会处理全部可回收空闲簇。两项操作都必须在 Gadget 暂停的维护窗口执行。</div>
       </section>
 
-      <section class="settings-section" aria-labelledby="export-settings-title">
+      <section id="settings-panel-5" class="settings-section" aria-labelledby="export-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">EXPORTS</p><h2 id="export-settings-title">导出文件</h2></div><span id="export-retention-status" class="badge">读取中</span></div>
         <article class="settings-card export-settings-card">
           <div class="settings-card-head"><div><h3>下载后的保留方式</h3><p>导出完成后会保存在数据盘；可再次下载的历史文件会占用空间，保留数量超出时会自动清理最旧文件。</p></div></div>
@@ -293,7 +343,7 @@
         </article>
       </section>
 
-      <section class="settings-section" aria-labelledby="fan-settings-title">
+      <section id="settings-panel-6" class="settings-section" aria-labelledby="fan-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">THERMAL &amp; FAN</p><h2 id="fan-settings-title">散热与风扇</h2></div><span id="fan-status" class="badge">读取中</span></div>
         <article class="settings-card fan-settings-card">
           <div class="fan-live-grid"><div><span>CPU 温度</span><strong id="fan-temperature">—</strong></div><div><span>当前场景</span><strong id="fan-scene">—</strong></div><div><span>温度请求</span><strong id="fan-temperature-request">—</strong></div><div><span>最终 PWM</span><strong id="fan-output">—</strong></div></div>
@@ -305,7 +355,7 @@
         </article>
       </section>
 
-      <section class="settings-section security-section" aria-labelledby="security-title">
+      <section id="settings-panel-7" class="settings-section security-section" aria-labelledby="security-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SECURITY</p><h2 id="security-title">安全与账户</h2></div><span id="password-status" class="badge">密码已设置</span></div>
         <article class="settings-card account-card">
           <div><h3>管理页面密码</h3><p>修改后会立即注销其他浏览器中的旧登录会话。请使用至少 8 个字符且容易记住的独立密码。</p></div>
@@ -313,7 +363,7 @@
         </article>
       </section>
 
-      <section class="settings-section update-section" aria-labelledby="update-title">
+      <section id="settings-panel-8" class="settings-section update-section" aria-labelledby="update-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SIGNED UPDATE</p><h2 id="update-title">系统更新</h2></div><span id="update-status" class="badge">读取中</span></div>
         <article class="settings-card update-card">
           <div class="update-summary">
@@ -337,20 +387,23 @@
 		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。正式新版可携带经过二次校验的 FFmpeg/MPP/RGA 媒体运行时；指定版本不会回退内核、驱动或 systemd，也不会主动降级媒体运行时。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
       </section>
 
-      <section class="settings-section power-section" aria-labelledby="power-title">
+      <section id="settings-panel-9" class="settings-section power-section" aria-labelledby="power-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SYSTEM</p><h2 id="power-title">系统与电源</h2></div></div>
         <article class="settings-card power-card">
           <div><h3>设备电源</h3><p>重启或关机会停止 TeslaBox 服务并断开车机 USB。关机后需要重新断电上电才能启动。</p></div>
           <div class="power-actions"><button id="reboot-button" class="secondary" type="button">重启设备</button><button id="shutdown-button" class="danger-button" type="button">关闭设备</button></div>
         </article>
       </section>
+        </div>
+      </div>
     </div>
 
     <div id="logs-page" class="page logs-page app-page" hidden>
       <section class="settings-hero logs-hero">
         <div><p class="eyebrow">DIAGNOSTICS</p><h1>日志中心</h1><p class="hero-copy">查看 USB Gadget 生命周期、视频合成、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
         <div class="logs-hero-actions">
-          <button id="logs-download-report" class="primary" type="button">下载完整诊断报告</button>
+          <label>下载内容<select id="logs-download-source"><option value="">完整诊断报告</option><option value="usb">USB 枚举</option><option value="media">视频与转码</option><option value="network">网络与热点</option><option value="application">TeslaBox 服务</option><option value="carplay">CarPlay 服务</option></select></label>
+          <button id="logs-download-report" class="primary" type="button">下载日志</button>
           <button id="logs-refresh" class="secondary" type="button">刷新日志</button>
         </div>
       </section>
@@ -388,6 +441,7 @@
           <button type="button" data-log-source="media">视频与转码</button>
           <button type="button" data-log-source="application">TeslaBox 服务</button>
           <button type="button" data-log-source="network">网络与热点</button>
+          <button type="button" data-log-source="carplay">CarPlay 服务</button>
         </div>
         <aside id="logs-summary" class="logs-summary" hidden><strong>中文诊断摘要</strong><ul id="logs-summary-list"></ul><p>摘要用于快速定位常见问题；下面仍保留未经翻译的系统原文和错误码。</p></aside>
         <article class="settings-card logs-card">

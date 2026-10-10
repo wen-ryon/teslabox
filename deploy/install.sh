@@ -527,7 +527,8 @@ install_radxa_archive_keyring
 configure_debian_apt_sources
 install_debian_dependencies \
     avahi-daemon ca-certificates curl exfat-fuse exfatprogs iproute2 iw \
-    dosfstools fonts-noto-cjk libass9 libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs
+    dosfstools fonts-noto-cjk libass9 libnss-mdns network-manager parted pciutils rfkill tzdata udev util-linux xfsprogs \
+    bluez python3 libusb-1.0-0 libstdc++6 openssl dnsmasq-base iptables
 
 if ! systemctl is-active --quiet teslabox.service 2>/dev/null && command -v ss >/dev/null 2>&1; then
     if ss -H -ltn 'sport = :80' 2>/dev/null | sed -n '1p' | read -r _; then
@@ -677,13 +678,14 @@ fi
 log "启动 TeslaBox"
 systemctl restart teslabox.service
 HEALTHY="false"
-attempt=0
-while [ "${attempt}" -lt 30 ]; do
-    if curl --fail --silent --show-error http://127.0.0.1/healthz >/dev/null 2>&1; then
+# 首装包含运行时预检与激活；按截止时间限时，单次请求也必须有超时。
+HEALTH_DEADLINE="$(($(date +%s) + 60))"
+while [ "$(date +%s)" -lt "${HEALTH_DEADLINE}" ]; do
+    if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+        http://127.0.0.1/healthz >/dev/null 2>&1; then
         HEALTHY="true"
         break
     fi
-    attempt=$((attempt + 1))
     sleep 1
 done
 

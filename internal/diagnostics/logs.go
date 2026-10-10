@@ -26,6 +26,8 @@ const (
 	SourceNetwork = "network"
 	// SourceMedia 表示视频播放、FFmpeg 和媒体硬件相关日志。
 	SourceMedia = "media"
+	// SourceCarPlay 表示独立 CarPlay 接收服务日志。
+	SourceCarPlay = "carplay"
 
 	defaultLimit  = 50
 	maximumLimit  = 500
@@ -94,12 +96,22 @@ func (m *Manager) Logs(ctx context.Context, source string, limit int) (Report, e
 		commandLimit = min(limit*12, 4000)
 	}
 	outputs := make([]string, 0, 2)
-	for _, args := range journalArgs(source, commandLimit) {
+	for index, args := range journalArgs(source, commandLimit) {
 		output, err := m.runner.Run(ctx, "journalctl", args...)
 		if err != nil {
 			return Report{}, fmt.Errorf("读取系统日志: %w", err)
 		}
-		outputs = append(outputs, string(output))
+		text := string(output)
+		if source == SourceCarPlay && index == 1 {
+			var filtered []string
+			for _, line := range strings.Split(text, "\n") {
+				if containsKeyword(line, []string{"carplay"}) {
+					filtered = append(filtered, line)
+				}
+			}
+			text = strings.Join(filtered, "\n")
+		}
+		outputs = append(outputs, text)
 	}
 
 	lines := make([]string, 0, limit+1)
@@ -139,7 +151,7 @@ func (m *Manager) Logs(ctx context.Context, source string, limit int) (Report, e
 	return report, nil
 }
 
-// Bundle 收集当前状态、当前启动和上一次启动的关键日志，避免故障重启后丢失根因。
+// Bundle 收集当前状态与两次启动日志，各来源独立留额避免 CarPlay 证据被挤掉。
 func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 	if !m.bundleMu.TryLock() {
 		return Bundle{}, fmt.Errorf("已有诊断报告正在生成")
@@ -197,22 +209,21 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 		{title: "崩溃持久化日志索引", name: "find", args: []string{"/sys/fs/pstore", "-maxdepth", "1", "-type", "f", "-printf", "%TY-%Tm-%TdT%TH:%TM:%TS %s %p\n"}},
 		{title: "崩溃持久化日志正文", name: "find", args: []string{"/sys/fs/pstore", "-maxdepth", "1", "-type", "f", "-exec", "head", "-c", "65536", "{}", ";"}},
 	}
-	writeBlockDevicesSection(ctx, m.runner, &report)
+	writeBudgetSection(&report, 16<<10, func(out *strings.Builder) { writeBlockDevicesSection(ctx, m.runner, out) })
 	for _, command := range commands {
-		writeCommandSection(ctx, m.runner, &report, command)
-		if report.Len() >= maximumBundle {
-			break
-		}
+		writeBudgetSection(&report, 4<<10, func(out *strings.Builder) { writeCommandSection(ctx, m.runner, out, command) })
 	}
-	writeIncidentJournalSection(ctx, m.runner, &report, "当前启动存储与 USB 关键故障日志", "0")
-	writeIncidentJournalSection(ctx, m.runner, &report, "上一次启动关键故障日志", "-1")
+	writeBudgetSection(&report, 96<<10, func(out *strings.Builder) {
+		writeIncidentJournalSection(ctx, m.runner, out, "当前启动存储与 USB 关键故障日志", "0")
+	})
+	writeBudgetSection(&report, 96<<10, func(out *strings.Builder) {
+		writeIncidentJournalSection(ctx, m.runner, out, "上一次启动关键故障日志", "-1")
+	})
 
-	for _, source := range []string{SourceUSB, SourceMedia, SourceApplication, SourceNetwork} {
-		writeLogSection(ctx, m, &report, source)
-		if report.Len() >= maximumBundle {
-			break
-		}
+	for _, source := range []string{SourceUSB, SourceMedia, SourceApplication, SourceNetwork, SourceCarPlay} {
+		writeLogSection(ctx, m, &report, source, 64<<10)
 	}
+	writeSourceBootSection(ctx, m, &report, SourceCarPlay, "-1")
 
 	content := report.String()
 	if len(content) > maximumBundle {
@@ -231,7 +242,7 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 // ValidSource 判断页面请求是否属于固定的安全日志来源。
 func ValidSource(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case SourceApplication, SourceUSB, SourceNetwork, SourceMedia:
+	case SourceApplication, SourceUSB, SourceNetwork, SourceMedia, SourceCarPlay:
 		return true
 	default:
 		return false
@@ -255,6 +266,11 @@ func journalArgs(source string, limit int) [][]string {
 		return [][]string{append(args, "--unit", "teslabox.service", "--unit", "teslabox-update.service")}
 	case SourceNetwork:
 		return [][]string{append(args, "--unit", "NetworkManager.service", "--unit", "teslabox-ap.service")}
+	case SourceCarPlay:
+		return [][]string{
+			append(append([]string{}, args...), "--unit", "teslabox-carplay-experiment.service", "--unit", "teslabox-carplay.service"),
+			append(append([]string{}, args...), "--unit", "teslabox.service"),
+		}
 	case SourceMedia:
 		return [][]string{
 			append(append([]string{}, args...), "--unit", "teslabox.service"),
@@ -375,7 +391,8 @@ func writeCommandSection(ctx context.Context, runner system.Runner, report *stri
 	writeSanitizedLines(report, string(output), command.keywords, 500)
 }
 
-func writeLogSection(ctx context.Context, manager *Manager, report *strings.Builder, source string) {
+func writeLogSection(ctx context.Context, manager *Manager, report *strings.Builder, source string, budget int) {
+	start := report.Len()
 	fmt.Fprintf(report, "\n===== 当前启动日志: %s =====\n", source)
 	logs, err := manager.Logs(ctx, source, maximumLimit)
 	if err != nil {
@@ -386,7 +403,18 @@ func writeLogSection(ctx context.Context, manager *Manager, report *strings.Buil
 		report.WriteString("[没有匹配日志]\n")
 		return
 	}
-	for _, line := range logs.Lines {
+	lines := logs.Lines
+	// journal 按时间正序返回；预算不足时保留尾部，避免旧记录挤掉刚发生的故障。
+	remaining := max(0, budget-(report.Len()-start)-256)
+	first := len(lines)
+	for first > 0 && len(lines[first-1])+1 <= remaining {
+		first--
+		remaining -= len(lines[first]) + 1
+	}
+	if first > 0 {
+		fmt.Fprintf(report, "[本区段预算不足，已丢弃 %d 条较旧日志；保留最近完整记录，窗口不完整]\n", first)
+	}
+	for _, line := range lines[first:] {
 		report.WriteString(line)
 		report.WriteByte('\n')
 	}
@@ -438,6 +466,7 @@ func writeSanitizedLines(report *strings.Builder, output string, keywords []stri
 		lines = append(lines, redactLine(line))
 	}
 	if len(lines) > limit {
+		fmt.Fprintf(report, "[行数窗口不完整：匹配=%d，保留最后=%d]\n", len(lines), limit)
 		lines = lines[len(lines)-limit:]
 	}
 	for _, line := range lines {

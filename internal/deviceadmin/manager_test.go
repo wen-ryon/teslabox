@@ -101,6 +101,38 @@ func TestParseAPSTAChannelLimit(t *testing.T) {
 			output: "valid interface combinations:\n" +
 				"\t * #{ managed } <= 1, #{ AP } <= 1, total <= 1, #channels <= 1\n",
 		},
+		{
+			name: "shared group supports two interfaces",
+			output: "valid interface combinations:\n" +
+				"\t * #{ managed, AP, P2P-client } <= 2, total <= 2, #channels <= 1\n",
+			limit: 1,
+			found: true,
+		},
+		{
+			name: "shared group permits only one role at a time",
+			output: "valid interface combinations:\n" +
+				"\t * #{ managed, AP } <= 1, #{ P2P-device } <= 1, total <= 2, #channels <= 2\n",
+		},
+		{
+			name: "zero AP quota cannot run hotspot",
+			output: "valid interface combinations:\n" +
+				"\t * #{ managed } <= 2, #{ AP } <= 0, total <= 2, #channels <= 2\n",
+		},
+		{
+			name: "grouped AP variants with separate station",
+			output: "valid interface combinations:\n" +
+				"\t * #{ AP, P2P-GO } <= 1, #{ managed, P2P-client } <= 1, total <= 2, #channels <= 2\n",
+			limit: 2,
+			found: true,
+		},
+		{
+			name: "unsupported combination does not inflate channel count",
+			output: "valid interface combinations:\n" +
+				"\t * #{ managed, AP } <= 1, total <= 3, #channels <= 3\n" +
+				"\t * #{ managed } <= 1, #{ AP } <= 1, total <= 2, #channels <= 1\n",
+			limit: 1,
+			found: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -848,6 +880,56 @@ func TestWiFiStatusReportsRealAPSTAConcurrency(t *testing.T) {
 	}
 }
 
+func TestDisconnectWiFiOnlyDisconnectsCurrentClient(t *testing.T) {
+	const upstreamUUID = "22222222-2222-2222-2222-222222222222"
+	for _, test := range []struct {
+		name       string
+		upstream   string
+		wantAction bool
+	}{
+		{name: "已连接", upstream: "Home:" + upstreamUUID + ":802-11-wireless:wlan0:yes\n", wantAction: true},
+		{name: "已经断开", upstream: "Home:" + upstreamUUID + ":802-11-wireless::yes\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{responses: map[string]string{
+				"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "TeslaBox-5G:11111111-1111-1111-1111-111111111111:802-11-wireless:ap0:yes\n" + test.upstream,
+				"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 11111111-1111-1111-1111-111111111111": "ap\nTeslaBox-5G\na\n161\nwpa-psk\nshared\n192.168.88.1/24\n",
+				"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid " + upstreamUUID:                      "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+				"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status": "ap0:wifi:connected\nwlan0:wifi:connected\n",
+			}}
+			manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err := manager.DisconnectWiFi(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := containsCall(runner.calls, "nmcli device disconnect wlan0"); got != test.wantAction {
+				t.Fatalf("STA 断开命令存在 = %v，预期 %v；调用 = %#v", got, test.wantAction, runner.calls)
+			}
+			if containsCall(runner.calls, "nmcli device disconnect ap0") || manager.manualWiFiDisconnect != test.wantAction {
+				t.Fatalf("AP 或手动断开状态异常：调用 = %#v，标志 = %v", runner.calls, manager.manualWiFiDisconnect)
+			}
+		})
+	}
+}
+
+func TestManualWiFiDisconnectSuppressesRecovery(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]string{
+		"nmcli -t --escape yes -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show": "Home:22222222-2222-2222-2222-222222222222:802-11-wireless::yes\n",
+		"nmcli -g 802-11-wireless.mode,802-11-wireless.ssid,802-11-wireless.band,802-11-wireless.channel,802-11-wireless-security.key-mgmt,ipv4.method,ipv4.addresses connection show uuid 22222222-2222-2222-2222-222222222222": "infrastructure\nHome\na\n0\nwpa-psk\nauto\n\n",
+		"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status": "wlan0:wifi:disconnected\n",
+	}}
+	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager.manualWiFiDisconnect = true
+	recovered, ssid, err := manager.reconcileAutoConnect(context.Background())
+	if err != nil || recovered || ssid != "" || !manager.manualWiFiDisconnect {
+		t.Fatalf("恢复结果 = %v, %q, %v；手动断开 = %v", recovered, ssid, err, manager.manualWiFiDisconnect)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "connection modify") || strings.Contains(call, "connection up") || strings.Contains(call, "wifi rescan") {
+			t.Fatalf("手动断开后不应自动重连：%#v", runner.calls)
+		}
+	}
+}
+
 func TestConnectUsesBSSIDOnlyForCurrentActivation(t *testing.T) {
 	t.Parallel()
 	const upstreamUUID = "22222222-2222-2222-2222-222222222222"
@@ -859,6 +941,7 @@ func TestConnectUsesBSSIDOnlyForCurrentActivation(t *testing.T) {
 		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": ":Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:90:161:WPA2\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager.manualWiFiDisconnect = true
 	manager.sameWirelessPHY = func(_, _ string) (bool, bool) { return true, true }
 	manager.wirelessPHYInfo = func(context.Context, string) (string, error) {
 		return "valid interface combinations:\n\t * #{ managed } <= 1, #{ AP } <= 1, total <= 2, #channels <= 1\n\t* 5745 MHz [149] (20.0 dBm)\n\t* 5805 MHz [161] (20.0 dBm)\n", nil
@@ -873,6 +956,9 @@ func TestConnectUsesBSSIDOnlyForCurrentActivation(t *testing.T) {
 	request := ConnectRequest{UUID: upstreamUUID}
 	if err := manager.Connect(context.Background(), request); err != nil {
 		t.Fatal(err)
+	}
+	if manager.manualWiFiDisconnect {
+		t.Fatal("显式连接成功后仍保留手动断开标志")
 	}
 	wantCalls := []string{
 		"nmcli connection modify uuid 11111111-1111-1111-1111-111111111111 802-11-wireless.band a 802-11-wireless.channel 161",

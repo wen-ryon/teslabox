@@ -1,0 +1,23 @@
+[Unit]
+Description=TeslaBox CarPlay receiver
+Wants=teslabox.service bluetooth.service NetworkManager.service
+After=teslabox.service bluetooth.service NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+# 公开版本逐成员校验，不能让 Python 缓存成为下一次启动时的额外成员。
+ExecStartPre=/usr/bin/python3 -B @RUNTIME@/python/carplay-runtime-ready.py
+ExecStart=/usr/bin/python3 -B -u @RUNTIME@/python/carplay-service.py --settings /var/lib/teslabox-system/carplay/service.json --run-hardware
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=15
+RuntimeDirectory=teslabox-carplay
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

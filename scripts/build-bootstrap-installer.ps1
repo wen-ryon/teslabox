@@ -15,6 +15,9 @@ $distRoot = [IO.Path]::GetFullPath((Join-Path $root "dist"))
 if (-not $outputPath.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The installer output must be inside dist."
 }
+if (Test-Path -LiteralPath $outputPath) {
+    throw "Refusing to overwrite a fixed release installer: $outputPath"
+}
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$') {
     throw "Invalid release version: $Version"
 }

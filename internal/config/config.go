@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -10,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/certdelivery"
 	"github.com/wen-ryon/teslabox/internal/storagepolicy"
+	"github.com/wen-ryon/teslabox/internal/webtls"
 )
 
 const (
@@ -62,6 +65,16 @@ const (
 // Config 集中保存运行参数，避免系统路径和策略散落在业务代码中。
 type Config struct {
 	HTTPAddr                    string
+	HTTPSAddr                   string
+	HTTPSDomain                 string
+	CarPlayPublicAddress        string
+	HTTPSCertificateBundle      string
+	HTTPSCertificateEndpoint    string
+	HTTPSCertificatePublicKey   string
+	HTTPSCertificateIdentity    string
+	CarPlayBrowserToken         string
+	CarPlayServiceSettings      string
+	CarPlayMFIDirectory         string
 	DataUUID                    string
 	DataLabel                   string
 	DataMountPath               string
@@ -202,6 +215,16 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		HTTPAddr:                    envString("TESLABOX_HTTP_ADDR", defaultHTTPAddr),
+		HTTPSAddr:                   strings.TrimSpace(os.Getenv("TESLABOX_HTTPS_ADDR")),
+		HTTPSDomain:                 strings.TrimSpace(os.Getenv("TESLABOX_HTTPS_DOMAIN")),
+		HTTPSCertificateEndpoint:    envString("TESLABOX_HTTPS_CERTIFICATE_ENDPOINT", certdelivery.DefaultEndpoint),
+		HTTPSCertificatePublicKey:   envString("TESLABOX_HTTPS_CERTIFICATE_PUBLIC_KEY", certdelivery.DefaultPublicKey),
+		HTTPSCertificateIdentity:    envString("TESLABOX_HTTPS_CERTIFICATE_IDENTITY", "/var/lib/teslabox-system/cert-delivery/identity.json"),
+		CarPlayPublicAddress:        strings.TrimSpace(os.Getenv("TESLABOX_CARPLAY_PUBLIC_ADDRESS")),
+		HTTPSCertificateBundle:      strings.TrimSpace(os.Getenv("TESLABOX_HTTPS_CERTIFICATE_BUNDLE")),
+		CarPlayBrowserToken:         strings.TrimSpace(os.Getenv("TESLABOX_CARPLAY_BROWSER_TOKEN")),
+		CarPlayServiceSettings:      strings.TrimSpace(os.Getenv("TESLABOX_CARPLAY_SERVICE_SETTINGS")),
+		CarPlayMFIDirectory:         strings.TrimSpace(os.Getenv("TESLABOX_CARPLAY_MFI_DIRECTORY")),
 		DataUUID:                    strings.TrimSpace(os.Getenv("TESLABOX_DATA_UUID")),
 		DataLabel:                   envString("TESLABOX_DATA_LABEL", defaultDataLabel),
 		DataMountPath:               envString("TESLABOX_DATA_MOUNT_PATH", defaultDataMountPath),
@@ -264,6 +287,30 @@ func Load() (Config, error) {
 		FFprobePath:                 envString("TESLABOX_FFPROBE_PATH", "/opt/teslabox/media/bin/ffprobe"),
 	}
 
+	if cfg.HTTPSCertificateEndpoint != "" || cfg.HTTPSCertificatePublicKey != "" {
+		if cfg.CarPlayMFIDirectory == "" {
+			cfg.CarPlayMFIDirectory = "/var/lib/teslabox-system/carplay/mfi"
+		}
+		if cfg.CarPlayServiceSettings == "" {
+			cfg.CarPlayServiceSettings = "/var/lib/teslabox-system/carplay/service.json"
+		}
+		if cfg.CarPlayBrowserToken == "" {
+			cfg.CarPlayBrowserToken = "/run/teslabox-carplay/browser-token"
+		}
+		if cfg.HTTPSDomain == "" {
+			cfg.HTTPSDomain = certdelivery.ProductDomain
+		}
+		if cfg.HTTPSCertificateBundle == "" {
+			cfg.HTTPSCertificateBundle = "/var/lib/teslabox-system/tls/certificate.pem"
+		}
+		if cfg.CarPlayPublicAddress == "" {
+			cfg.CarPlayPublicAddress = certdelivery.DefaultPublicAddress
+		}
+	}
+	if cfg.CarPlayServiceSettings == "" {
+		// 旧实验部署尚未迁移时，登记入口仍读取本机已有配置。
+		cfg.CarPlayServiceSettings = "/var/lib/teslabox-carplay-experiment/carplay-service.json"
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -294,6 +341,34 @@ func betaManifestURLForStable(manifestURL string) string {
 
 // Validate 拒绝可能挂载错误设备或造成忙循环的配置。
 func (c Config) Validate() error {
+	if c.HTTPSCertificateEndpoint != "" || c.HTTPSCertificatePublicKey != "" {
+		if c.HTTPSDomain != certdelivery.ProductDomain || c.CarPlayPublicAddress == "" || !isSafeAbsolutePath(c.HTTPSCertificateIdentity) {
+			return fmt.Errorf("统一证书更新需要产品固定域名、网络别名和私有身份路径")
+		}
+		if _, err := certdelivery.NewClient(certdelivery.ClientConfig{Endpoint: c.HTTPSCertificateEndpoint, PublicKey: c.HTTPSCertificatePublicKey, IdentityPath: c.HTTPSCertificateIdentity, CertificatePath: c.HTTPSCertificateBundle, MFIDirectory: c.CarPlayMFIDirectory}); err != nil {
+			return fmt.Errorf("统一证书更新配置: %w", err)
+		}
+	}
+	if c.CarPlayPublicAddress != "" {
+		a, err := netip.ParseAddr(c.CarPlayPublicAddress)
+		if err != nil || !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || c.HTTPSDomain == "" {
+			return fmt.Errorf("TESLABOX_CARPLAY_PUBLIC_ADDRESS 需要公网形式的 IPv4 地址和有效 HTTPS 域名")
+		}
+	}
+	if c.CarPlayBrowserToken != "" && !isSafeAbsolutePath(c.CarPlayBrowserToken) {
+		return fmt.Errorf("TESLABOX_CARPLAY_BROWSER_TOKEN 必须是非根目录的绝对路径")
+	}
+	if c.CarPlayServiceSettings != "" && (!isSafeAbsolutePath(c.CarPlayServiceSettings) || path.Clean(c.CarPlayServiceSettings) != c.CarPlayServiceSettings || strings.Contains(c.CarPlayServiceSettings, `\`)) {
+		return fmt.Errorf("TESLABOX_CARPLAY_SERVICE_SETTINGS 必须是非根目录的绝对路径")
+	}
+	if c.HTTPSAddr != "" || c.HTTPSDomain != "" || c.HTTPSCertificateBundle != "" {
+		if err := webtls.ValidateDomain(c.HTTPSDomain); err != nil {
+			return fmt.Errorf("TESLABOX_HTTPS_DOMAIN: %w", err)
+		}
+		if !isSafeAbsolutePath(c.HTTPSCertificateBundle) {
+			return fmt.Errorf("TESLABOX_HTTPS_CERTIFICATE_BUNDLE 必须是非根目录的绝对路径")
+		}
+	}
 	if strings.TrimSpace(c.HTTPAddr) == "" {
 		return fmt.Errorf("TESLABOX_HTTP_ADDR 不能为空")
 	}

@@ -32,16 +32,59 @@ type Authenticator interface {
 }
 
 // NewHandler 把静态页面、登录会话和现有 API 组合到同一来源下。
-func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *slog.Logger) http.Handler {
+func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *slog.Logger, options ...HandlerOption) http.Handler {
 	assetFS, err := fs.Sub(assets, "assets")
 	if err != nil {
 		panic("嵌入 Web 资源目录无效")
 	}
 	systemCollector := systeminfo.NewCollector()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", serveEmbedded(assetFS, "index.html", "text/html; charset=utf-8", "no-store"))
+	settings := handlerSettings{}
+	for _, option := range options {
+		option(&settings)
+	}
+	if settings.carplay != nil {
+		mux.HandleFunc("GET /carplay-return", func(w http.ResponseWriter, r *http.Request) {
+			target := "/carplay"
+			host := r.Host
+			if name, _, err := net.SplitHostPort(host); err == nil {
+				host = name
+			}
+			// 产品 HTTPS 入口直接返回域名首页，内网管理入口仍使用同源播放器。
+			if r.TLS != nil && strings.EqualFold(host, settings.carplayHomeDomain) {
+				target = "/"
+			}
+			http.Redirect(w, r, target, http.StatusSeeOther)
+		})
+		mux.HandleFunc("GET connman.vn.cloud.tesla.cn/online/status.html", carPlayConnectivityHandler(logger))
+		mux.HandleFunc("GET /carplay", serveEmbedded(assetFS, "carplay.html", "text/html; charset=utf-8", "no-store"))
+		mux.HandleFunc("GET /carplay/app.js", serveEmbedded(assetFS, "carplay.js", "text/javascript; charset=utf-8", "no-cache"))
+		mux.HandleFunc("GET /carplay/app.css", serveEmbedded(assetFS, "carplay.css", "text/css; charset=utf-8", "no-cache"))
+		for _, name := range []string{"canvas-player", "canvas-renderer", "canvas-session", "canvas-worker", "touch", "host-ui", "connection", "display"} {
+			mux.HandleFunc("GET /carplay/"+name+".js", serveEmbedded(assetFS, "carplay-"+name+".js", "text/javascript; charset=utf-8", "no-cache"))
+		}
+		mux.Handle("GET /carplay/", requireAuth(settings.carplay, authenticator))
+	}
+	managementPage := serveEmbedded(assetFS, "index.html", "text/html; charset=utf-8", "no-store")
+	carplayPage := serveEmbedded(assetFS, "carplay.html", "text/html; charset=utf-8", "no-store")
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if name, _, err := net.SplitHostPort(host); err == nil {
+			host = name
+		}
+		if settings.carplay != nil && settings.carplayHomeDomain != "" &&
+			r.TLS != nil && r.URL.Path == "/" && strings.EqualFold(host, settings.carplayHomeDomain) {
+			carplayPage(w, r)
+			return
+		}
+		managementPage(w, r)
+	})
 	mux.HandleFunc("GET /app.css", serveEmbedded(assetFS, "app.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /app.js", serveEmbedded(assetFS, "app.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /settings-layout.js", serveEmbedded(assetFS, "settings-layout.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /carplay-settings.js", serveEmbedded(assetFS, "carplay-settings.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /carplay-pairing.js", serveEmbedded(assetFS, "carplay-pairing.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /settings-layout.css", serveEmbedded(assetFS, "settings-layout.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /teslabox-logo.svg", serveEmbedded(assetFS, "teslabox-logo.svg", "image/svg+xml", "public, max-age=86400"))
 	mux.HandleFunc("GET /third-party-notices.txt", serveEmbedded(assetFS, "THIRD_PARTY_NOTICES.txt", "text/plain; charset=utf-8", "public, max-age=86400"))
 	mux.HandleFunc("GET /api/v1/auth/session", func(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +173,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	}), authenticator))
 	mux.Handle("GET /api/v1/", protectedAPI)
 	mux.Handle("POST /api/v1/", protectedAPI)
+	mux.Handle("PUT /api/v1/carplay/settings", protectedAPI)
 	mux.Handle("DELETE /api/v1/", protectedAPI)
 	mux.Handle("GET /healthz", apiHandler)
 	return securityHeaders(mux)
@@ -147,7 +191,8 @@ func requireAuth(next http.Handler, authenticator Authenticator) http.Handler {
 			})
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
+		pairing := r.URL.Path == "/api/v1/carplay/pairing" || strings.HasPrefix(r.URL.Path, "/api/v1/carplay/pairing/")
+		if (pairing || r.Method != http.MethodGet && r.Method != http.MethodHead) && !sameOrigin(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "请求来源无效"})
 			return
 		}

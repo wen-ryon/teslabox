@@ -69,6 +69,9 @@ func runCLI(ctx context.Context, socketPath string, args []string, stdin io.Read
 	if len(args) >= 2 && args[0] == "wifi" {
 		return runWiFiCLI(ctx, socketPath, args[1:], stdin, stdout, stderr)
 	}
+	if len(args) >= 1 && args[0] == "carplay" {
+		return runCarPlayCLI(ctx, socketPath, args[1:], stdout, stderr)
+	}
 	if len(args) < 2 || args[0] != "ap" {
 		writeCLIUsage(stderr)
 		return 2
@@ -147,6 +150,12 @@ func runWiFiCLI(ctx context.Context, socketPath string, args []string, stdin io.
 			return 2
 		}
 		return runCLIRequest(ctx, socketPath, http.MethodPost, "/v1/network/wifi/scan", nil, stdout, stderr)
+	case "disconnect":
+		if len(args) != 1 {
+			writeCLIUsage(stderr)
+			return 2
+		}
+		return runCLIRequest(ctx, socketPath, http.MethodPost, "/v1/network/wifi/disconnect", nil, stdout, stderr)
 	case "connect":
 		flags := flag.NewFlagSet("wifi connect", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -246,7 +255,7 @@ func leasePath(owner string) string {
 	return "/v1/network/ap/leases/" + url.PathEscape(owner)
 }
 
-func runCLIRequest(ctx context.Context, socketPath, method, path string, body any, stdout, stderr io.Writer) int {
+func runCLIRequest(ctx context.Context, socketPath, method, path string, body any, stdout, stderr io.Writer, timeouts ...time.Duration) int {
 	var payload io.Reader
 	if body != nil {
 		content, err := json.Marshal(body)
@@ -262,7 +271,11 @@ func runCLIRequest(ctx context.Context, socketPath, method, path string, body an
 		},
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	timeout := 30 * time.Second
+	if len(timeouts) > 0 {
+		timeout = timeouts[0]
+	}
+	client := &http.Client{Transport: transport, Timeout: timeout}
 	request, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, payload)
 	if err != nil {
 		fmt.Fprintln(stderr, "创建请求失败")
@@ -305,6 +318,13 @@ func runCLIRequest(ctx context.Context, socketPath, method, path string, body an
 func writeCLIUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, `用法：
   teslaboxctl -v
+  teslaboxctl carplay network plan --channels <车机支持的信道，逗号分隔>
+  teslaboxctl carplay network status
+  teslaboxctl carplay network acquire|renew --source <来源> --channels <信道列表> [--ttl 5m]
+  teslaboxctl carplay network release --source <来源>
+  teslaboxctl carplay network start --source <来源>
+  teslaboxctl carplay network upstream --source <来源> --phone <已配对手机蓝牙地址>
+  teslaboxctl carplay network pan-reset --source <来源> --phone <当前媒体手机蓝牙地址>
   teslaboxctl ap status
   teslaboxctl ap config [show]
   teslaboxctl ap config set --band 2.4g|5g --channel auto|<信道>
@@ -312,6 +332,7 @@ func writeCLIUsage(output io.Writer) {
   teslaboxctl ap disable --source gps-geofence
   teslaboxctl wifi list
   teslaboxctl wifi scan
+  teslaboxctl wifi disconnect
   teslaboxctl wifi connect --uuid <已保存连接UUID> [--password-stdin]
   teslaboxctl wifi connect --ssid <SSID> --security open|wpa [--password-stdin]
   teslaboxctl wifi autoconnect enable|disable --uuid <已保存连接UUID>`)

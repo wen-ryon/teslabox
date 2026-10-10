@@ -15,6 +15,10 @@ import (
 	"github.com/wen-ryon/teslabox/internal/api"
 	"github.com/wen-ryon/teslabox/internal/automation"
 	"github.com/wen-ryon/teslabox/internal/backing"
+	"github.com/wen-ryon/teslabox/internal/carplaybundle"
+	"github.com/wen-ryon/teslabox/internal/carplaypairing"
+	"github.com/wen-ryon/teslabox/internal/carplaysettings"
+	"github.com/wen-ryon/teslabox/internal/certdelivery"
 	"github.com/wen-ryon/teslabox/internal/config"
 	"github.com/wen-ryon/teslabox/internal/datamount"
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
@@ -42,6 +46,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/updater"
 	buildversion "github.com/wen-ryon/teslabox/internal/version"
 	"github.com/wen-ryon/teslabox/internal/webauth"
+	"github.com/wen-ryon/teslabox/internal/webtls"
 	"github.com/wen-ryon/teslabox/internal/webui"
 	"github.com/wen-ryon/teslabox/internal/writeback"
 )
@@ -257,6 +262,10 @@ func main() {
 		logger.Error("安装正式版本内置媒体运行时失败", "error", err)
 		os.Exit(1)
 	}
+	if err := carplaybundle.EnsureEmbedded(ctx, logger); err != nil {
+		logger.Error("安装正式版本内置 CarPlay 运行时失败", "error", err)
+		os.Exit(1)
+	}
 
 	driveInspector := driveinit.NewLSBLKInspector(runner)
 	storageAdmin := storageadmin.New(storageadmin.Config{
@@ -287,9 +296,16 @@ func main() {
 		logger.Error("初始化首次引导状态失败", "error", err)
 		os.Exit(1)
 	}
+	carPlaySettingsPath := os.Getenv("TESLABOX_CARPLAY_SETTINGS_PATH")
+	if carPlaySettingsPath == "" {
+		carPlaySettingsPath = "/var/lib/teslabox-system/carplay-settings.json"
+	}
 	deviceAdmin := deviceadmin.New(runner, logger, deviceadmin.NetworkConfig{
-		WiFiInterface: cfg.WiFiInterface,
-		APInterface:   cfg.APInterface,
+		CarPlaySettingsPath:  carPlaySettingsPath,
+		WiFiInterface:        cfg.WiFiInterface,
+		APInterface:          cfg.APInterface,
+		CarPlayDomain:        cfg.HTTPSDomain,
+		CarPlayPublicAddress: cfg.CarPlayPublicAddress,
 	})
 	automationService, err := automation.New(deviceAdmin, automation.Config{Logger: logger})
 	if err != nil {
@@ -373,6 +389,19 @@ func main() {
 			Channel: "stable", Board: "radxa-rock-3a", Logger: logger,
 		}, nil)
 	}
+	carPlaySettings, carPlaySettingsErr := carplaysettings.New(carPlaySettingsPath)
+	if carPlaySettingsErr != nil {
+		logger.Error("CarPlay 设置读取失败，录像主链路继续运行", "error", carPlaySettingsErr)
+	}
+	var carPlayPairing *carplaypairing.Manager
+	if cfg.CarPlayBrowserToken != "" {
+		runtime := filepath.Dir(cfg.CarPlayBrowserToken)
+		carPlayPairing, err = carplaypairing.NewConfiguredProvisioningManager(
+			cfg.CarPlayServiceSettings, runtime, runtime)
+		if err != nil {
+			logger.Info("当前平台未启用 CarPlay 首次登记")
+		}
+	}
 	apiHandler := api.NewHandler(
 		manager,
 		logger,
@@ -388,8 +417,17 @@ func main() {
 		api.WithDiagnostics(diagnostics.New(runner)),
 		api.WithFanAdmin(fanManager),
 		api.WithOnboardingAdmin(onboardingManager),
+		api.WithCarPlaySettings(carPlaySettings),
+		api.WithCarPlayPairing(carPlayPairing, ctx),
 	)
-	handler := webui.NewHandler(apiHandler, authManager, logger)
+	var webOptions []webui.HandlerOption
+	if cfg.CarPlayBrowserToken != "" {
+		webOptions = append(webOptions, webui.WithCarPlay(webui.NewCarPlayProxy(cfg.CarPlayBrowserToken)))
+		if cfg.HTTPSDomain != "" {
+			webOptions = append(webOptions, webui.WithCarPlayHome(cfg.HTTPSDomain))
+		}
+	}
+	handler := carplaybundle.HealthHandler(webui.NewHandler(apiHandler, authManager, logger, webOptions...))
 	go deviceAdmin.Run(ctx)
 	go func() {
 		if runErr := automationService.Run(ctx); runErr != nil && ctx.Err() == nil {
@@ -411,6 +449,34 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	var httpsServer *http.Server
+	if cfg.HTTPSCertificateEndpoint != "" {
+		certificateClient, clientErr := certdelivery.NewClient(certdelivery.ClientConfig{Endpoint: cfg.HTTPSCertificateEndpoint, PublicKey: cfg.HTTPSCertificatePublicKey, IdentityPath: cfg.HTTPSCertificateIdentity, CertificatePath: cfg.HTTPSCertificateBundle, MFIDirectory: cfg.CarPlayMFIDirectory})
+		if clientErr != nil {
+			logger.Error("统一证书更新配置不可用", "error", clientErr)
+		} else {
+			// 证书登记与网络请求完全在后台执行，不延迟录像和管理热点启动。
+			go certificateClient.Run(ctx, logger)
+		}
+	}
+	if cfg.HTTPSDomain != "" {
+		address := cfg.HTTPSAddr
+		if address == "" {
+			address = ":443"
+		}
+		httpsServer, err = webtls.NewServer(address, cfg.HTTPSDomain, cfg.HTTPSCertificateBundle, handler)
+		if err != nil {
+			logger.Error("HTTPS 配置不可用", "error", err)
+		} else {
+			go func() {
+				logger.Info("正在启动 HTTPS 服务", "address", address, "domain", cfg.HTTPSDomain)
+				// TLS 入口独立于 HTTP，证书或监听失败不能中断录像等现有业务。
+				if serveErr := httpsServer.ListenAndServeTLS("", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+					logger.Error("HTTPS 服务异常退出", "error", serveErr)
+				}
+			}()
+		}
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("HTTP 服务已启动", "address", cfg.HTTPAddr)
@@ -429,6 +495,11 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	if httpsServer != nil {
+		if err := httpsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("停止 HTTPS 服务失败", "error", err)
+		}
+	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("停止 HTTP 服务失败", "error", err)
 	}
@@ -437,6 +508,11 @@ func main() {
 	}
 	if err := manager.Close(shutdownCtx); err != nil {
 		logger.Error("停止 TeslaUSB 状态管理器失败", "error", err)
+	}
+	if carPlayPairing != nil {
+		if err := carPlayPairing.Close(shutdownCtx); err != nil {
+			logger.Warn("等待 CarPlay 配对清理未完成")
+		}
 	}
 }
 

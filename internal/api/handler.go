@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wen-ryon/teslabox/internal/carplaypairing"
+	"github.com/wen-ryon/teslabox/internal/carplaysettings"
 	"github.com/wen-ryon/teslabox/internal/deviceadmin"
 	"github.com/wen-ryon/teslabox/internal/diagnostics"
 	"github.com/wen-ryon/teslabox/internal/fancontrol"
@@ -165,18 +167,21 @@ type OnboardingAdmin interface {
 }
 
 type handlerOptions struct {
-	deviceAdmin     DeviceAdmin
-	storageAdmin    StorageAdmin
-	gadgetAdmin     GadgetAdmin
-	mediaInspector  MediaInspector
-	mediaAssets     MediaAssetsAdmin
-	mediaCompositor MediaCompositor
-	exportAdmin     ExportAdmin
-	updateAdmin     UpdateAdmin
-	diagnostics     Diagnostics
-	automation      MaintenanceAutomation
-	fanAdmin        FanAdmin
-	onboardingAdmin OnboardingAdmin
+	carPlaySettings       *carplaysettings.Manager
+	carPlayPairing        *carplaypairing.Manager
+	carPlayPairingContext context.Context
+	deviceAdmin           DeviceAdmin
+	storageAdmin          StorageAdmin
+	gadgetAdmin           GadgetAdmin
+	mediaInspector        MediaInspector
+	mediaAssets           MediaAssetsAdmin
+	mediaCompositor       MediaCompositor
+	exportAdmin           ExportAdmin
+	updateAdmin           UpdateAdmin
+	diagnostics           Diagnostics
+	automation            MaintenanceAutomation
+	fanAdmin              FanAdmin
+	onboardingAdmin       OnboardingAdmin
 }
 
 // Option 配置可选的 API 能力。
@@ -388,6 +393,10 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	if settings.fanAdmin != nil {
 		registerFanRoutes(mux, settings.fanAdmin, logger)
 	}
+	if settings.carPlaySettings != nil {
+		registerCarPlaySettingsRoutes(mux, settings.carPlaySettings)
+	}
+	registerCarPlayPairingRoutes(mux, settings.carPlayPairing, settings.carPlayPairingContext)
 	if settings.onboardingAdmin != nil {
 		registerOnboardingRoutes(mux, settings.onboardingAdmin, logger)
 	}
@@ -554,7 +563,25 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 		writeJSON(w, http.StatusOK, report)
 	})
 	mux.HandleFunc("GET /api/v1/diagnostics/report", func(w http.ResponseWriter, r *http.Request) {
-		bundle, err := manager.Bundle(r.Context())
+		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		if source != "" && !diagnostics.ValidSource(source) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的日志来源"})
+			return
+		}
+		var bundle diagnostics.Bundle
+		var err error
+		if source != "" {
+			if selected, ok := manager.(interface {
+				BundleForSource(context.Context, string) (diagnostics.Bundle, error)
+			}); ok {
+				bundle, err = selected.BundleForSource(r.Context(), source)
+			} else {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "分类日志下载暂不可用"})
+				return
+			}
+		} else {
+			bundle, err = manager.Bundle(r.Context())
+		}
 		if err != nil {
 			logger.Warn("生成完整诊断报告失败", "error", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "暂时无法生成完整诊断报告"})

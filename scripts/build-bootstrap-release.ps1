@@ -5,11 +5,28 @@ param(
     [string]$MediaArchive = "build\media-toolchain\teslabox-media-debian11-arm64.tar.gz",
     [string]$RadxaKeyring = "dist\bootstrap-inputs\radxa-archive-keyring_0.2.2_all.deb",
     [string]$OutputDirectory = "dist\bootstrap",
+    [string]$ExpectedCommit = "",
+    [string]$ExpectedMainSHA256 = "",
+    [string]$ExpectedHelperSHA256 = "",
+    [string]$ExpectedMediaSHA256 = "",
     [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$') {
+    throw "Invalid release version."
+}
+$fixedInputs = $ExpectedCommit -or $ExpectedMainSHA256 -or $ExpectedHelperSHA256 -or $ExpectedMediaSHA256 -or $Version -eq "0.2.0-rc.1"
+if ($fixedInputs -and ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    $ExpectedMainSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $ExpectedHelperSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+    $ExpectedMediaSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $AllowDirty)) {
+    throw "Bootstrap requires the fixed commit, main/helper/media hashes and a clean source tree."
+}
+$fullCommit = (git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or ($ExpectedCommit -and $fullCommit -cne $ExpectedCommit)) {
+    throw "Bootstrap source HEAD differs from the fixed release commit."
+}
 
 function Assert-LinuxTextFile {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -50,12 +67,35 @@ $mediaChecksumPath = "$mediaPath.sha256"
 if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
     throw "The media archive checksum is missing: $mediaChecksumPath"
 }
+$mainHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mainPath).Hash.ToLowerInvariant()
+$helperHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helperPath).Hash.ToLowerInvariant()
+$mediaHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mediaPath).Hash.ToLowerInvariant()
+$mediaSidecar = ((Get-Content -Raw -Encoding ASCII -LiteralPath $mediaChecksumPath).Trim() -split '\s+')[0]
+if ($mediaSidecar -cne $mediaHash -or ($ExpectedMediaSHA256 -and $mediaHash -cne $ExpectedMediaSHA256) -or
+    ($ExpectedMainSHA256 -and $mainHash -cne $ExpectedMainSHA256) -or
+    ($ExpectedHelperSHA256 -and $helperHash -cne $ExpectedHelperSHA256)) {
+    throw "Bootstrap input digest does not match its fixed release input."
+}
+foreach ($executable in @($mainPath, $helperPath)) {
+    $stream = [IO.File]::OpenRead($executable)
+    try {
+        $header = New-Object byte[] 64
+        if ($stream.Read($header, 0, 64) -ne 64 -or
+            $header[0] -ne 127 -or $header[1] -ne 69 -or $header[2] -ne 76 -or $header[3] -ne 70 -or
+            $header[4] -ne 2 -or $header[5] -ne 1 -or $header[18] -ne 183 -or $header[19] -ne 0) {
+            throw "Bootstrap executable is not a Linux ARM64 ELF: $executable"
+        }
+    } finally { $stream.Dispose() }
+}
 $radxaKeyringHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $radxaKeyringPath).Hash.ToLowerInvariant()
 if ($radxaKeyringHash -ne "3e3bb3d3150cf1dfa6c050d0c135f6a7f298b7638ff7e656fda711ababdb8a57") {
     throw "The Radxa archive keyring checksum is unexpected: $radxaKeyringPath"
 }
 
 $manifestPath = Join-Path (Split-Path -Parent $mainPath) "latest.json"
+if ($fixedInputs -and -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "The fixed main executable must have its release manifest."
+}
 if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
     $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
     $mainHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mainPath).Hash.ToLowerInvariant()
@@ -65,14 +105,16 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
     }
 }
 
-$output = Join-Path $root $OutputDirectory
+$output = [IO.Path]::GetFullPath((Join-Path $root $OutputDirectory))
 $stage = Join-Path $output "stage"
-$resolvedOutputParent = (Resolve-Path (Split-Path -Parent $output)).Path
-if (-not $output.StartsWith($resolvedOutputParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+$archive = Join-Path $output "teslabox-bootstrap-debian11-arm64.tar.gz"
+if (-not $output.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The output directory must stay inside the repository."
 }
-if (Test-Path -LiteralPath $stage) {
-    Remove-Item -LiteralPath $stage -Recurse -Force
+foreach ($existing in @($stage, $archive, "$archive.sha256")) {
+    if (Test-Path -LiteralPath $existing) {
+        throw "Refusing to overwrite a bootstrap artifact: $existing"
+    }
 }
 
 $directories = @(
@@ -106,7 +148,7 @@ try {
     )
     foreach ($command in $commands) {
         $target = Join-Path $stage $command.Output
-        go build -trimpath -ldflags "-s -w" -o $target $command.Package
+        go -C $root build -trimpath -ldflags "-s -w" -o $target $command.Package
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to build $($command.Package)."
         }
@@ -150,6 +192,10 @@ Copy-Item -LiteralPath $radxaKeyringPath -Destination (Join-Path $stage "keyring
 $info = @(
     "version=$Version",
     "commit=$commit",
+    "full_commit=$fullCommit",
+    "main_sha256=$mainHash",
+    "helper_sha256=$helperHash",
+    "media_sha256=$mediaHash",
     "board=radxa-rock-3a",
     "os=debian-11",
     "arch=arm64"
@@ -171,10 +217,6 @@ foreach ($checksumLine in $checksumLines) {
     $null = [IO.File]::AppendAllText($checksumPath, $checksumLine + [char]10, [Text.Encoding]::ASCII)
 }
 
-$archive = Join-Path $output "teslabox-bootstrap-debian11-arm64.tar.gz"
-if (Test-Path -LiteralPath $archive) {
-    Remove-Item -LiteralPath $archive -Force
-}
 tar -C $stage -czf $archive .
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to create the bootstrap archive."

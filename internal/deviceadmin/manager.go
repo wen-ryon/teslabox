@@ -163,14 +163,15 @@ func (e *APOperationError) Error() string { return e.Message }
 
 // ConnectRequest 描述连接已保存网络或新网络的请求。
 type ConnectRequest struct {
-	UUID                string `json:"uuid,omitempty"`
-	SSID                string `json:"ssid,omitempty"`
-	BSSID               string `json:"bssid,omitempty"`
-	Channel             int    `json:"channel,omitempty"`
-	Password            string `json:"password,omitempty"`
-	Security            string `json:"security,omitempty"`
-	AutoConnect         *bool  `json:"auto_connect,omitempty"`
-	ConfirmAPDisconnect bool   `json:"confirm_ap_disconnect"`
+	UUID                    string `json:"uuid,omitempty"`
+	SSID                    string `json:"ssid,omitempty"`
+	BSSID                   string `json:"bssid,omitempty"`
+	Channel                 int    `json:"channel,omitempty"`
+	Password                string `json:"password,omitempty"`
+	Security                string `json:"security,omitempty"`
+	AutoConnect             *bool  `json:"auto_connect,omitempty"`
+	ConfirmAPDisconnect     bool   `json:"confirm_ap_disconnect"`
+	ConfirmCarPlayReconnect bool   `json:"confirm_carplay_reconnect"`
 }
 
 // AutoConnectUpdate 描述已保存网络的自动连接策略变更。
@@ -201,25 +202,44 @@ type APUpdate struct {
 
 // Manager 串行执行会改变网络状态的命令，避免多个页面操作互相覆盖。
 type Manager struct {
-	runner                  system.Runner
-	logger                  *slog.Logger
-	configuredWiFiInterface string
-	configuredAPInterface   string
-	mu                      sync.Mutex
-	recoveryMu              sync.RWMutex
-	recovery                RecoveryStatus
-	schedule                func(time.Duration, func())
-	apUpdateGeneration      uint64
-	monitoredWiFiInterface  string
-	watchNetworkEvents      networkEventWatch
-	sameWirelessPHY         func(string, string) (bool, bool)
-	wirelessPHYInfo         func(context.Context, string) (string, error)
+	runner                   system.Runner
+	logger                   *slog.Logger
+	configuredWiFiInterface  string
+	configuredAPInterface    string
+	mu                       sync.Mutex
+	recoveryMu               sync.RWMutex
+	recovery                 RecoveryStatus
+	schedule                 func(time.Duration, func())
+	apUpdateGeneration       uint64
+	monitoredWiFiInterface   string
+	manualWiFiDisconnect     bool
+	carPlayNetworkHold       *CarPlayNetworkLease
+	carPlayStartupAdoption   *carPlayStartupAdoption
+	carPlayWiFiRecoveryAfter time.Time
+	carPlayVehicleChannels   []int
+	carPlayWiFiRecoveryUUID  string
+	carPlayWiFiFailures      map[string]time.Time
+	carPlayDomain            string
+	carPlaySettingsPath      string
+	carPlayPublicAddress     string
+	carPlayDNSDirectory      string
+	carPlayRecoveryUncertain bool
+	carPlayWiFiReconnect     bool
+	carPlayInternetProbe     func(context.Context, string, []string) bool
+	carPlayPANProfileCreate  func(context.Context, string, []byte) error
+	carPlayPANInterface      func(context.Context, string) (string, error)
+	watchNetworkEvents       networkEventWatch
+	sameWirelessPHY          func(string, string) (bool, bool)
+	wirelessPHYInfo          func(context.Context, string) (string, error)
 }
 
 // NetworkConfig 允许管理员固定无线接口；客户端接口留空时会根据 NetworkManager 自动发现。
 type NetworkConfig struct {
-	WiFiInterface string
-	APInterface   string
+	CarPlaySettingsPath  string
+	WiFiInterface        string
+	APInterface          string
+	CarPlayDomain        string
+	CarPlayPublicAddress string
 }
 
 // New 创建基于 NetworkManager 和 systemd 的设备管理器；可选配置用于兼容非标准网卡命名。
@@ -238,12 +258,19 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 		runner: runner, logger: logger,
 		configuredWiFiInterface: strings.TrimSpace(networkConfig.WiFiInterface),
 		configuredAPInterface:   strings.TrimSpace(networkConfig.APInterface),
+		carPlayDomain:           strings.TrimSpace(networkConfig.CarPlayDomain),
+		carPlaySettingsPath:     networkConfig.CarPlaySettingsPath,
+		carPlayPublicAddress:    strings.TrimSpace(networkConfig.CarPlayPublicAddress),
+		carPlayDNSDirectory:     defaultCarPlayDNSDirectory(),
 		recovery:                RecoveryStatus{Enabled: true},
 		schedule:                func(delay time.Duration, operation func()) { time.AfterFunc(delay, operation) },
 		watchNetworkEvents:      watchNetworkManagerEvents,
 		sameWirelessPHY:         wirelessInterfacesSharePHY,
 	}
 	manager.wirelessPHYInfo = manager.readWirelessPHYInfo
+	manager.carPlayInternetProbe = probeCarPlayInternet
+	manager.carPlayPANProfileCreate = createCarPlayPANProfile
+	manager.carPlayPANInterface = activeCarPlayPANInterface
 	return manager
 }
 
@@ -534,11 +561,20 @@ func (m *Manager) reconcileAutoConnectIfNeeded(ctx context.Context) (bool, strin
 }
 
 func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string, error) {
+	if m.carPlayNetworkReservedLocked() {
+		return false, "", nil
+	}
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
 		return false, "", err
 	}
 	m.monitoredWiFiInterface = status.Interface
+	if status.CurrentConnection != "" {
+		m.manualWiFiDisconnect = false
+	} else if m.manualWiFiDisconnect {
+		// 用户主动断开后不由同信道 AP+STA 恢复逻辑再次激活上游。
+		return false, "", nil
+	}
 	if !status.Available || status.Interface == "" {
 		return false, "", nil
 	}
@@ -775,6 +811,9 @@ func (m *Manager) recoveryDue() bool {
 func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayBlocksWiFiLocked() {
+		return nil, carPlayNetworkBusy()
+	}
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
 		return nil, err
@@ -797,9 +836,42 @@ func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 
 // Connect 连接已保存网络或创建 WPA/WPA2、开放网络配置。
 // AP+STA 并发模式下连接在自动识别的客户端接口上执行，热点虚拟接口不受影响。
-func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
+func (m *Manager) Connect(ctx context.Context, request ConnectRequest) (err error) {
+	if request.ConfirmCarPlayReconnect {
+		return m.connectWithCarPlayRestart(ctx, request)
+	}
+	return m.connectWiFi(ctx, request, false)
+}
+
+func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, reconnectOwner bool) (err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.carPlayBluetoothWiFiGuardLocked(); err != nil {
+		return err
+	}
+	if m.carPlayRecoveryUncertain || m.carPlayNetworkHold != nil && m.carPlayBlocksWiFiLocked() || m.carPlayWiFiReconnect && !reconnectOwner {
+		return carPlayNetworkBusy()
+	}
+	defer func() {
+		if request.UUID != "" && request.UUID == m.carPlayWiFiRecoveryUUID {
+			// 一个目标连接失败只冷却该网络，不能阻止其他已保存网络接替。
+			if err != nil {
+				if m.carPlayWiFiFailures == nil {
+					m.carPlayWiFiFailures = make(map[string]time.Time)
+				}
+				m.carPlayWiFiFailures[request.UUID] = time.Now().Add(3 * time.Minute)
+			} else {
+				delete(m.carPlayWiFiFailures, request.UUID)
+			}
+			m.carPlayWiFiRecoveryUUID = ""
+			m.carPlayWiFiRecoveryAfter = time.Time{}
+		}
+		if err == nil {
+			m.manualWiFiDisconnect = false
+			// 成功连接已结束上一轮恢复，新断线不能沿用旧失败冷却。
+			m.carPlayWiFiRecoveryAfter = time.Time{}
+		}
+	}()
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
 		return err
@@ -859,7 +931,7 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 			// 只约束本次激活，不能把接入点地址写进配置，否则路由器漫游或更换射频后将无法自动连接。
 			activationArgs = append(activationArgs, "ap", target.BSSID)
 		}
-		_, err = m.run(ctx, "nmcli", activationArgs...)
+		err = m.activateSavedWiFi(ctx, request.UUID, status.Interface, activationArgs)
 		if err != nil {
 			return fmt.Errorf("连接已保存网络: %w", err)
 		}
@@ -920,9 +992,36 @@ func (m *Manager) Connect(ctx context.Context, request ConnectRequest) error {
 	return nil
 }
 
+// DisconnectWiFi 只断开当前客户端连接，并保留已保存配置和自动连接策略。
+func (m *Manager) DisconnectWiFi(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.carPlayBlocksWiFiLocked() {
+		return carPlayNetworkBusy()
+	}
+	status, err := m.WiFiStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if !status.Available || status.Interface == "" {
+		return ErrWiFiUnavailable
+	}
+	if status.CurrentConnection == "" {
+		return nil
+	}
+	if _, err := m.run(ctx, "nmcli", "device", "disconnect", status.Interface); err != nil {
+		return fmt.Errorf("断开当前 WiFi: %w", err)
+	}
+	m.manualWiFiDisconnect = true
+	return nil
+}
+
 func (m *Manager) clearManagedProfileBSSIDLocks(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayNetworkReservedLocked() {
+		return nil
+	}
 
 	output, err := m.run(ctx, "nmcli", "-t", "--escape", "yes", "-f", "NAME,UUID,TYPE", "connection", "show")
 	if err != nil {
@@ -961,6 +1060,9 @@ func (m *Manager) clearProfileBSSIDLock(ctx context.Context, uuid string) error 
 func (m *Manager) SetAutoConnect(ctx context.Context, update AutoConnectUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayBlocksWiFiLocked() {
+		return carPlayNetworkBusy()
+	}
 	if !validUUID(update.UUID) {
 		return invalidInput("连接 UUID 无效")
 	}
@@ -987,6 +1089,9 @@ func (m *Manager) setAutoConnect(ctx context.Context, uuid string, enabled bool)
 func (m *Manager) UpdateIPv4(ctx context.Context, update IPv4Update) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayBlocksWiFiLocked() {
+		return carPlayNetworkBusy()
+	}
 	if !validUUID(update.UUID) {
 		return invalidInput("连接 UUID 无效")
 	}
@@ -1047,6 +1152,9 @@ func (m *Manager) UpdateIPv4(ctx context.Context, update IPv4Update) error {
 func (m *Manager) Forget(ctx context.Context, uuid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayRecoveryUncertain || m.carPlayNetworkHold != nil && m.carPlayNetworkHold.Plan.UpstreamUUID == uuid {
+		return carPlayNetworkBusy()
+	}
 	if !validUUID(uuid) {
 		return invalidInput("连接 UUID 无效")
 	}
@@ -1077,6 +1185,9 @@ func (m *Manager) Forget(ctx context.Context, uuid string) error {
 func (m *Manager) RepairAPInterface(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayNetworkReservedLocked() {
+		return carPlayNetworkBusy()
+	}
 	profiles, err := m.wirelessProfiles(ctx)
 	if err != nil {
 		return err
@@ -1102,6 +1213,9 @@ func (m *Manager) RepairAPInterface(ctx context.Context) error {
 	m.schedule(apDisableDelay, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if m.carPlayNetworkReservedLocked() {
+			return
+		}
 		operationCtx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 		defer cancel()
 		if _, disconnectErr := m.runner.Run(operationCtx, "nmcli", "device", "disconnect", apInterface); disconnectErr != nil && !isNMDeviceInactive(disconnectErr) {
@@ -1131,6 +1245,10 @@ func (m *Manager) APSettings(ctx context.Context) (APSettings, error) {
 	if err != nil {
 		return APSettings{}, err
 	}
+	return m.apSettingsFromProfiles(ctx, profiles)
+}
+
+func (m *Manager) apSettingsFromProfiles(ctx context.Context, profiles []profile) (APSettings, error) {
 	wifiInterface, apInterface, wifiAvailable, apAvailable := m.networkInterfaces(ctx, profiles)
 	capability := m.apConcurrencyCapability(ctx, wifiInterface, apInterface, wifiAvailable, apAvailable)
 	reportedAPInterface := ""
@@ -1699,7 +1817,7 @@ func parseAPSTAChannelLimit(output string) (int, bool) {
 	combination := ""
 	maxChannels := 0
 	flush := func() {
-		if !strings.Contains(combination, "#{ managed }") || !strings.Contains(combination, "#{ AP }") {
+		if !combinationAllowsAPSTA(combination) {
 			return
 		}
 		total, totalFound := parseCombinationLimit(combination, "total <=")
@@ -1736,6 +1854,45 @@ func parseAPSTAChannelLimit(output string) (int, bool) {
 	return maxChannels, maxChannels > 0
 }
 
+// combinationAllowsAPSTA 按类型组的共享配额判断，避免把单接口组误判为并发。
+func combinationAllowsAPSTA(combination string) bool {
+	managed, ap := false, false
+	for _, group := range strings.Split(combination, "#{")[1:] {
+		types, quota, found := strings.Cut(group, "}")
+		if !found {
+			return false
+		}
+		required := 0
+		for _, interfaceType := range strings.Split(types, ",") {
+			switch strings.TrimSpace(interfaceType) {
+			case "managed":
+				if managed {
+					return false
+				}
+				managed = true
+				required++
+			case "AP":
+				if ap {
+					return false
+				}
+				ap = true
+				required++
+			}
+		}
+		if required > 0 {
+			quota = strings.TrimSpace(quota)
+			if !strings.HasPrefix(quota, "<=") {
+				return false
+			}
+			limit, valid := parseCombinationLimit(quota, "<=")
+			if !valid || limit < required {
+				return false
+			}
+		}
+	}
+	return managed && ap
+}
+
 func parseCombinationLimit(combination, marker string) (int, bool) {
 	markerIndex := strings.Index(combination, marker)
 	if markerIndex < 0 {
@@ -1752,6 +1909,10 @@ func parseCombinationLimit(combination, marker string) (int, bool) {
 // UpdateAP 校验并更新现有热点；空密码表示保留原密码。
 func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	m.mu.Lock()
+	if m.carPlayNetworkReservedLocked() {
+		m.mu.Unlock()
+		return carPlayNetworkBusy()
+	}
 	locked := true
 	defer func() {
 		if locked {
@@ -1895,6 +2056,9 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 func (m *Manager) ConfigureAPRadio(ctx context.Context, band string, channel int) (APSettings, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayNetworkReservedLocked() {
+		return APSettings{}, carPlayNetworkBusy()
+	}
 	if !validBandChannel(band, channel) {
 		return APSettings{}, invalidInput("热点频段或信道无效")
 	}
@@ -2021,6 +2185,9 @@ func (m *Manager) SetAPRuntime(ctx context.Context, enabled bool) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.carPlayNetworkReservedLocked() {
+		return carPlayNetworkBusy()
+	}
 	settings, err := m.APSettings(ctx)
 	if err != nil {
 		return err

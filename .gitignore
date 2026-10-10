@@ -40,6 +40,7 @@ go.work.sum
 /build/mt7922/
 /build/candidate-*/
 /internal/mediabundle/bundle/
+/internal/carplaybundle/bundle/
 /deploy/bluetooth/
 /scripts/candidates/
 /.gocache/

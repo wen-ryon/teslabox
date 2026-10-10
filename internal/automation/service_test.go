@@ -24,6 +24,7 @@ type fakeAPAdmin struct {
 	wifiStatus      deviceadmin.WiFiStatus
 	wifiScan        []deviceadmin.AccessPoint
 	connectRequests []deviceadmin.ConnectRequest
+	disconnectCalls int
 	autoUpdates     []deviceadmin.AutoConnectUpdate
 }
 
@@ -43,6 +44,13 @@ func (a *fakeAPAdmin) Connect(_ context.Context, request deviceadmin.ConnectRequ
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.connectRequests = append(a.connectRequests, request)
+	return nil
+}
+
+func (a *fakeAPAdmin) DisconnectWiFi(context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.disconnectCalls++
 	return nil
 }
 
@@ -66,6 +74,7 @@ func TestWiFiAutomationUsesDeviceManager(t *testing.T) {
 		{"列表", http.MethodGet, "/v1/network/wifi/status", "", `"ssid":"Home"`},
 		{"扫描", http.MethodPost, "/v1/network/wifi/scan", "", `"signal":76`},
 		{"连接", http.MethodPost, "/v1/network/wifi/connect", `{"ssid":"Home","security":"wpa","password":"correct-password"}`, `"connected":true`},
+		{"断开", http.MethodPost, "/v1/network/wifi/disconnect", "", `"disconnected":true`},
 		{"关闭自动连接", http.MethodPut, "/v1/network/wifi/saved/550e8400-e29b-41d4-a716-446655440000/autoconnect", `{"enabled":false}`, `"updated":true`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -79,6 +88,9 @@ func TestWiFiAutomationUsesDeviceManager(t *testing.T) {
 	}
 	if len(admin.connectRequests) != 1 || admin.connectRequests[0].SSID != "Home" {
 		t.Fatalf("连接请求 = %+v", admin.connectRequests)
+	}
+	if admin.disconnectCalls != 1 {
+		t.Fatalf("断开请求次数 = %d", admin.disconnectCalls)
 	}
 	if len(admin.autoUpdates) != 1 || admin.autoUpdates[0].Enabled || admin.autoUpdates[0].UUID != "550e8400-e29b-41d4-a716-446655440000" {
 		t.Fatalf("自动连接请求 = %+v", admin.autoUpdates)
@@ -157,20 +169,19 @@ func TestAPConfigReadAndUpdate(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T, admin *fakeAPAdmin, now func() time.Time) *Service {
+func newTestService(t *testing.T, admin NetworkAdmin, now func() time.Time) *Service {
 	t.Helper()
-	service, err := New(admin, Config{
-		SocketPath: "/run/teslabox/automation/test.sock",
-		StatePath:  "/run/teslabox/automation/test-state.json",
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Now:        now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 单元测试使用临时目录保存状态，不经过仅约束生产配置的 New 路径检查。
-	service.config.StatePath = filepath.Join(t.TempDir(), "automation-ap.json")
-	return service
+	// New 会立即恢复生产租约；mock 测试直接构造服务，所有状态都限定在独立临时目录。
+	directory := t.TempDir()
+	return &Service{admin: admin, config: Config{
+		SocketPath:             filepath.Join(directory, "test.sock"),
+		StatePath:              filepath.Join(directory, "automation-ap.json"),
+		CarPlayStatePath:       filepath.Join(directory, "carplay.json"),
+		CarPlayAccessDirectory: filepath.Join(directory, "access"),
+		Group:                  DefaultGroup,
+		Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:                    now,
+	}, leases: make(map[string]time.Time)}
 }
 
 func defaultAPSettings(enabled, desired bool) deviceadmin.APSettings {

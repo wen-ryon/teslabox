@@ -25,12 +25,13 @@ import (
 )
 
 const (
-	DefaultSocketPath = "/run/teslabox/automation/control.sock"
-	DefaultStatePath  = "/run/teslabox/automation/ap-state.json"
-	DefaultGroup      = "teslabox-automation"
-	defaultLeaseTTL   = 5 * time.Minute
-	minimumLeaseTTL   = 15 * time.Second
-	maximumLeaseTTL   = time.Hour
+	DefaultSocketPath       = "/run/teslabox/automation/control.sock"
+	DefaultStatePath        = "/run/teslabox/automation/ap-state.json"
+	DefaultCarPlayStatePath = "/var/lib/teslabox/carplay-network-state.json"
+	DefaultGroup            = "teslabox-automation"
+	defaultLeaseTTL         = 5 * time.Minute
+	minimumLeaseTTL         = 15 * time.Second
+	maximumLeaseTTL         = time.Hour
 )
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -43,16 +44,19 @@ type NetworkAdmin interface {
 	WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error)
 	Scan(context.Context) ([]deviceadmin.AccessPoint, error)
 	Connect(context.Context, deviceadmin.ConnectRequest) error
+	DisconnectWiFi(context.Context) error
 	SetAutoConnect(context.Context, deviceadmin.AutoConnectUpdate) error
 }
 
-// Config 定义 Unix Socket、运行期状态和访问组。
+// Config 定义本机接口与恢复记录；CarPlay 状态需在服务重启或掉电后保留。
 type Config struct {
-	SocketPath string
-	StatePath  string
-	Group      string
-	Logger     *slog.Logger
-	Now        func() time.Time
+	SocketPath             string
+	StatePath              string
+	CarPlayStatePath       string
+	CarPlayAccessDirectory string
+	Group                  string
+	Logger                 *slog.Logger
+	Now                    func() time.Time
 }
 
 type lease struct {
@@ -67,12 +71,14 @@ type persistedState struct {
 
 // Service 管理自动化租约；同一时刻只允许一个热点状态变更。
 type Service struct {
-	admin      NetworkAdmin
-	config     Config
-	mu         sync.Mutex
-	leases     map[string]time.Time
-	managed    bool
-	httpServer *http.Server
+	admin                   NetworkAdmin
+	config                  Config
+	mu                      sync.Mutex
+	leases                  map[string]time.Time
+	managed                 bool
+	carPlayLease            *deviceadmin.CarPlayNetworkLease
+	carPlayRecoveryRequired bool
+	httpServer              *http.Server
 }
 
 // EnsureAccessGroup 确保 OTA 升级后的旧系统也具备固定的最小权限用户组。
@@ -100,6 +106,12 @@ func New(admin NetworkAdmin, config Config) (*Service, error) {
 	if config.StatePath == "" {
 		config.StatePath = DefaultStatePath
 	}
+	if config.CarPlayStatePath == "" {
+		config.CarPlayStatePath = DefaultCarPlayStatePath
+	}
+	if config.CarPlayAccessDirectory == "" {
+		config.CarPlayAccessDirectory = "/run/teslabox/carplay"
+	}
 	if config.Group == "" {
 		config.Group = DefaultGroup
 	}
@@ -112,7 +124,17 @@ func New(admin NetworkAdmin, config Config) (*Service, error) {
 	if !safeRuntimePath(config.SocketPath) || !safeRuntimePath(config.StatePath) {
 		return nil, errors.New("自动化 Socket 和状态文件必须位于 /run/teslabox")
 	}
-	return &Service{admin: admin, config: config, leases: make(map[string]time.Time)}, nil
+	if !safeRuntimePath(config.CarPlayAccessDirectory) {
+		return nil, errors.New("CarPlay 私有交接目录必须位于 /run/teslabox")
+	}
+	if !strings.HasPrefix(pathpkg.Clean(config.CarPlayStatePath), "/var/lib/teslabox/") {
+		return nil, errors.New("CarPlay 恢复记录必须位于 /var/lib/teslabox")
+	}
+	service := &Service{admin: admin, config: config, leases: make(map[string]time.Time)}
+	if err := service.restoreCarPlayProtection(); err != nil {
+		return nil, fmt.Errorf("恢复 CarPlay 网络保护: %w", err)
+	}
+	return service, nil
 }
 
 func safeRuntimePath(path string) bool {
@@ -152,7 +174,7 @@ func (s *Service) Run(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      25 * time.Second,
+		WriteTimeout:      55 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    8 * 1024,
 	}
@@ -225,8 +247,15 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/network/ap/leases/{owner}", s.handleAcquire)
 	mux.HandleFunc("DELETE /v1/network/ap/leases/{owner}", s.handleRelease)
 	mux.HandleFunc("GET /v1/network/wifi/status", s.handleWiFiStatus)
+	mux.HandleFunc("POST /v1/network/carplay/plan", s.handleCarPlayPlan)
+	mux.HandleFunc("GET /v1/network/carplay/state", s.handleCarPlayState)
+	mux.HandleFunc("PUT /v1/network/carplay/leases/{owner}", s.handleCarPlayAcquire)
+	mux.HandleFunc("DELETE /v1/network/carplay/leases/{owner}", s.handleCarPlayRelease)
+	mux.HandleFunc("POST /v1/network/carplay/leases/{owner}/ap", s.handleCarPlayAPStart)
+	mux.HandleFunc("POST /v1/network/carplay/leases/{owner}/upstream", s.handleCarPlayUpstream)
 	mux.HandleFunc("POST /v1/network/wifi/scan", s.handleWiFiScan)
 	mux.HandleFunc("POST /v1/network/wifi/connect", s.handleWiFiConnect)
+	mux.HandleFunc("POST /v1/network/wifi/disconnect", s.handleWiFiDisconnect)
 	mux.HandleFunc("PUT /v1/network/wifi/saved/{uuid}/autoconnect", s.handleWiFiAutoConnect)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -236,13 +265,27 @@ func (s *Service) Handler() http.Handler {
 }
 
 func (s *Service) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
+	capabilities := []map[string]any{{
+		"name": "network.ap.lease", "actions": []string{"read", "acquire", "renew", "release"},
+	}, {
+		"name": "network.wifi", "actions": []string{"list", "scan", "connect", "disconnect", "set_autoconnect"},
+	}}
+	if _, supported := s.admin.(carPlayNetworkPlanner); supported {
+		capabilities = append(capabilities, map[string]any{
+			"name": "network.carplay.plan", "actions": []string{"read"},
+		})
+	}
+	if _, supported := s.admin.(carPlayNetworkCoordinator); supported {
+		capabilities = append(capabilities, map[string]any{
+			"name": "network.carplay.lease", "actions": []string{"read", "acquire", "renew", "release"},
+		})
+	}
+	if _, supported := s.admin.(carPlayAPStarter); supported {
+		capabilities = append(capabilities, map[string]any{"name": "network.carplay.ap", "actions": []string{"start"}})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"api_version": "v1",
-		"capabilities": []map[string]any{{
-			"name": "network.ap.lease", "actions": []string{"read", "acquire", "renew", "release"},
-		}, {
-			"name": "network.wifi", "actions": []string{"list", "scan", "connect", "set_autoconnect"},
-		}},
+		"api_version":  "v1",
+		"capabilities": capabilities,
 	})
 }
 
@@ -278,6 +321,18 @@ func (s *Service) handleWiFiConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+}
+
+func (s *Service) handleWiFiDisconnect(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "断开 WiFi 不接受请求内容"})
+		return
+	}
+	if err := s.admin.DisconnectWiFi(r.Context()); err != nil {
+		s.writeOperationError(w, "断开 WiFi 失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"disconnected": true})
 }
 
 func (s *Service) handleWiFiAutoConnect(w http.ResponseWriter, r *http.Request) {
@@ -433,6 +488,9 @@ func (s *Service) handleRelease(w http.ResponseWriter, r *http.Request) {
 func (s *Service) acquire(ctx context.Context, owner string, ttl time.Duration) (time.Time, deviceadmin.APSettings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.carPlayRecoveryRequired || s.carPlayLease != nil {
+		return time.Time{}, deviceadmin.APSettings{}, carPlayLeaseBusy()
+	}
 	now := s.config.Now()
 	s.purgeExpiredLocked(now)
 	settings, err := s.admin.APSettings(ctx)
@@ -538,6 +596,17 @@ func (s *Service) expireLoop(ctx context.Context) {
 func (s *Service) expire(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.carPlayRecoveryRequired {
+		return
+	}
+	if s.carPlayLease != nil && !s.carPlayLease.ExpiresAt.After(s.config.Now()) {
+		operationCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
+		err := s.releaseCarPlayLocked(operationCtx, s.carPlayLease.Owner)
+		cancel()
+		if err != nil {
+			s.config.Logger.Warn("CarPlay 网络租约到期后恢复失败，将保留记录重试", "error", err)
+		}
+	}
 	changed := s.purgeExpiredLocked(s.config.Now())
 	if !changed && !(len(s.leases) == 0 && s.managed) {
 		return
@@ -569,6 +638,10 @@ func (s *Service) purgeExpiredLocked(now time.Time) bool {
 func (s *Service) restore(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.carPlayRecoveryRequired || s.carPlayLease != nil {
+		// 保留旧 AP 记录，不在 CarPlay 恢复期间拉起或关闭另一个热点。
+		return nil
+	}
 	content, err := os.ReadFile(s.config.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -620,10 +693,14 @@ func (s *Service) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.config.StatePath), 0o755); err != nil {
+	return writeRuntimeState(s.config.StatePath, content)
+}
+
+func writeRuntimeState(path string, content []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(s.config.StatePath), ".automation-ap-*")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".automation-state-*")
 	if err != nil {
 		return err
 	}
@@ -644,7 +721,10 @@ func (s *Service) persistLocked() error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, s.config.StatePath)
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	return syncStateDirectory(filepath.Dir(path))
 }
 
 func (s *Service) writeOperationError(w http.ResponseWriter, message string, err error) {

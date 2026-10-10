@@ -1,0 +1,98 @@
+/* 共用已有主题和控件，设置分类与内容在宽屏上分别滚动。 */
+.settings-page { max-width: 1180px; display: flex; flex-direction: column; height: calc(100dvh / var(--ui-zoom) - 72px); padding-top: 28px; padding-bottom: 24px; }
+.settings-page > .settings-hero h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; letter-spacing: -.035em; }
+.settings-page > .settings-hero { padding: 10px 0 22px; align-items: center; }
+.settings-layout { display: grid; grid-template-columns: 246px minmax(0,1fr); gap: 26px; flex: 1; min-height: 0; margin-top: 16px; }
+.settings-layout .settings-tabs { position: static; display: flex; flex-direction: column; align-self: stretch; gap: 6px; margin: 0; padding: 8px; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--radius); }
+.settings-layout .settings-category { display: flex; align-items: center; justify-content: flex-start; gap: 11px; width: 100%; min-height: 72px; padding: 12px; border: 1px solid transparent; border-radius: 12px; background: transparent; text-align: left; box-shadow: none; }
+.settings-layout .settings-category:hover { background: var(--surface-hover); }
+.settings-layout .settings-category.active { background: var(--accent-soft); border-color: var(--accent); }
+.settings-layout .settings-category:active { transform: none; }
+.settings-layout .settings-category:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-category-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px; color: var(--accent); background: var(--accent-soft); }
+.settings-category-icon svg { display: block; width: 18px; height: 18px; }
+.settings-function-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px; color: var(--muted); background: var(--surface-raised); }
+.settings-function-icon svg { display: block; width: 18px; height: 18px; }
+.settings-function-entry:hover .settings-function-icon { color: var(--text); }
+.settings-category-copy { display: grid; flex: 1; min-width: 0; gap: 6px; }
+.settings-category-copy strong { font-size: var(--ui-main-font); color: var(--text); }
+.settings-category-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--ui-small-font); line-height: 1.5; font-weight: 400; }
+.settings-category-arrow { display: none; margin-left: auto; font-size: 24px; color: var(--muted); }
+.settings-draft-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--warning); margin-left: auto; }
+.settings-content { min-width: 0; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-width: thin; padding: 0 8px 24px 0; }
+.settings-detail-bar { display: flex; align-items: center; gap: 12px; padding: 4px 0 14px; border-bottom: 1px solid var(--line-soft); margin-bottom: 22px; }
+.settings-page .settings-detail-bar h2 { font-size: 22px; line-height: 1.3; }
+.settings-detail-bar #settings-back { display: none; }
+.settings-function-open .settings-detail-bar #settings-back { display: inline-flex; }
+.settings-function-open #settings-detail-title { display: none; }
+.settings-single-function .settings-detail-bar { display: none; }
+.settings-function-menu { overflow: hidden; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); }
+.settings-function-menu .settings-function-entry { display: flex; justify-content: flex-start; gap: 16px; width: 100%; min-height: 84px; padding: 18px 20px; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: transparent; text-align: left; box-shadow: none; }
+.settings-function-menu .settings-function-entry:last-child { border-bottom: 0; }
+.settings-function-menu .settings-function-entry:hover, .settings-function-menu .settings-function-entry:focus-visible { background: var(--surface-hover); }
+.settings-function-menu .settings-function-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.settings-function-menu .settings-function-entry:active { transform: none; }
+.settings-function-copy { display: grid; flex: 1; min-width: 0; gap: 8px; }
+.settings-function-copy strong { font-size: var(--ui-main-font); color: var(--text); }
+.settings-function-copy small { color: var(--muted); font-size: var(--ui-meta-font); line-height: 1.5; font-weight: 400; }
+.settings-function-arrow { flex: 0 0 auto; color: var(--muted); font-size: 24px; font-weight: 400; }
+.settings-group > .settings-section { margin-top: 32px; }
+.settings-group > .settings-section:first-child { margin-top: 0; }
+.settings-function-open .settings-group > .settings-section { margin-top: 0; }
+.settings-group .settings-section-heading { align-items: center; }
+.settings-page .settings-group .settings-section-heading h2 { font-size: 20px; line-height: 1.35; }
+.settings-group .settings-section-heading .eyebrow { font-size: 9px; margin-bottom: 6px; }
+.settings-content .settings-form { margin-top: 18px; gap: 16px; }
+.settings-content .settings-form .form-grid label { display: grid; gap: 8px; }
+.settings-content .form-grid + p { margin-top: 12px; margin-bottom: 18px; }
+.settings-content .settings-card p + .settings-form { margin-top: 18px; }
+.settings-content .form-actions { gap: 16px; margin-top: 20px; }
+.carplay-settings-form { display: grid; gap: 16px; }
+.carplay-settings-form .carplay-settings-card { margin-top: 0; }
+.carplay-card-heading { margin-bottom: 20px; }
+.carplay-card-heading h3 { margin-bottom: 6px; }
+.carplay-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
+.carplay-fields label, #carplay-pairing-panel > label { display: grid; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--ui-meta-font); }
+.carplay-fields :is(input, select), #carplay-pairing-device { width: 100%; min-width: 0; min-height: 44px; }
+.carplay-display-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.carplay-enable { margin-bottom: 20px; }
+.carplay-settings-card .carplay-help { margin-top: 18px; line-height: 1.75; }
+.carplay-settings-card .carplay-status { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: var(--surface-raised); overflow-wrap: anywhere; }
+.carplay-save-actions > p { margin: 0; color: var(--muted); font-size: var(--ui-meta-font); }
+#carplay-pairing-panel > :is(button, label, div) { margin-top: 16px; }
+#carplay-pairing-panel > label { max-width: 560px; }
+#carplay-pairing-status { margin-top: 16px; color: var(--muted); }
+#carplay-pairing-prompt:not([hidden]) { padding: 16px; border: 1px solid var(--accent); border-radius: 12px; background: var(--accent-soft); }
+#carplay-pairing-prompt button { margin-top: 14px; }
+#carplay-pairing-digits { font-variant-numeric: tabular-nums; letter-spacing: .15em; color: var(--text); }
+@media (max-width: 759px) {
+  .carplay-fields, .carplay-display-fields { grid-template-columns: minmax(0, 1fr); }
+  #carplay-pairing-panel > button { width: 100%; }
+}
+.draft-notice { color: var(--warning); font-size: var(--ui-meta-font); line-height: 1.6; padding: 12px 14px; margin: 0 0 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface); }
+@media (min-width: 760px) and (max-width: 1000px) {
+  .settings-layout { grid-template-columns: 218px minmax(0,1fr); gap: 18px; }
+  .settings-content .fan-live-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .settings-content .fan-range { grid-template-columns: minmax(0,1fr) 62px; }
+  .settings-content .fan-range > span { grid-column: 1 / -1; }
+  .settings-content .fan-levels, .settings-content .fan-scene-grid { grid-template-columns: minmax(0,1fr); }
+}
+@media (max-width: 759px) {
+.settings-page { padding-top: 22px; }
+  .settings-page { display: block; height: auto; padding-bottom: 90px; }
+.settings-page > .settings-hero { flex-wrap: wrap; gap: 14px; padding-top: 0; }
+.settings-page .hero-copy { font-size: 12px; line-height: 1.7; }
+  .settings-layout { display: block; height: auto; min-height: 0; margin-top: 8px; }
+  .settings-layout .settings-tabs { padding: 6px; overflow: visible; }
+  .settings-layout .settings-category { min-height: 78px; }
+  .settings-category-arrow { display: block; }
+  .settings-layout .settings-category.active { background: transparent; border-color: transparent; }
+  .settings-content { display: none; overflow: visible; padding: 0; }
+  .settings-detail-open .settings-tabs { display: none; }
+  .settings-detail-open .settings-content { display: block; }
+  .settings-detail-bar { gap: 14px; }
+  .settings-detail-bar #settings-back { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; min-height: 36px; }
+  .settings-detail-bar h2 { font-size: 20px; }
+  .settings-single-function .settings-detail-bar { display: flex; }
+  .settings-function-menu .settings-function-entry { padding: 16px; gap: 12px; }
+}

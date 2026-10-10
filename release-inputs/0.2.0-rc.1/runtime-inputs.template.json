@@ -1,0 +1,614 @@
+{
+  "schema": 1,
+  "version": "0.2.0-rc.1",
+  "approved_runtime": true,
+  "complete_runtime": true,
+  "release_commit": null,
+  "approval_sha256": "30556810324570af71a1e32925e9401d68bb6b260aa5a9cf09d788c996cb7ea8",
+  "native_source_archive_sha256": "ef2c5b4da00621748521934d0fce8881e66d9e5095501d965a27dd914c5aac9d",
+  "files": [
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/authSetup.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/authSetup.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "95f032f4c7d50cbcdc99a86471c311651b7ffc4a0ee11a1514b8762ab6fbb75d",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/authSetup.ts",
+      "approved_source_sha256": "95f032f4c7d50cbcdc99a86471c311651b7ffc4a0ee11a1514b8762ab6fbb75d",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/bplist.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/bplist.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "464adf69795eb38037da422b6b8e6e2e3d363e6ccf9844a9cca6c0d1685dbab4",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/bplist.ts",
+      "approved_source_sha256": "464adf69795eb38037da422b6b8e6e2e3d363e6ccf9844a9cca6c0d1685dbab4",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/controlCipher.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/controlCipher.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "d977b32dc2e64d119ddc071d0536870b456576a709560dd8f96137d9c984b642",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/controlCipher.ts",
+      "approved_source_sha256": "d977b32dc2e64d119ddc071d0536870b456576a709560dd8f96137d9c984b642",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/cpStack.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/cpStack.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "9862d0ce6786a7f2fecf1444cfac9b5a419fe5adbc86aa8061f7a218ab4e871c",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/cpStack.ts",
+      "approved_source_sha256": "9862d0ce6786a7f2fecf1444cfac9b5a419fe5adbc86aa8061f7a218ab4e871c",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/crypto.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/crypto.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "a3df125c16b9154e483fae47e079525ef87ffba98f9ff934ff48e6a1ba1635dc",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/crypto.ts",
+      "approved_source_sha256": "a3df125c16b9154e483fae47e079525ef87ffba98f9ff934ff48e6a1ba1635dc",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/getInfo.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/getInfo.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "a384528b42ef6884dceea68fb2b0ab36112cd5dcf35b929f06eb564173ddddcf",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/getInfo.ts",
+      "approved_source_sha256": "a384528b42ef6884dceea68fb2b0ab36112cd5dcf35b929f06eb564173ddddcf",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/hid.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/hid.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "e54b517b3f4331d05d76a851f47e5e4686e0d0fd42c0b00c89a89e5220bfdfc6",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/hid.ts",
+      "approved_source_sha256": "e54b517b3f4331d05d76a851f47e5e4686e0d0fd42c0b00c89a89e5220bfdfc6",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/iapTunnel.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/iapTunnel.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "054d78f7f3b91dfdf13a0532b084893445a66a2bfce40e965e9b6defe739db7a",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/iapTunnel.ts",
+      "approved_source_sha256": "054d78f7f3b91dfdf13a0532b084893445a66a2bfce40e965e9b6defe739db7a",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/keepAliveServer.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/keepAliveServer.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "b898fb50d558fbca9b90539f7e60815fc1be8f6d9f5a5e936eb8ecd3d1b0d64b",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/keepAliveServer.ts",
+      "approved_source_sha256": "b898fb50d558fbca9b90539f7e60815fc1be8f6d9f5a5e936eb8ecd3d1b0d64b",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/nalu.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/nalu.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "16ce00746085dca085fd8916a82c7ad9d37b095719299985ac2d3f7f21bc839f",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/nalu.ts",
+      "approved_source_sha256": "16ce00746085dca085fd8916a82c7ad9d37b095719299985ac2d3f7f21bc839f",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/ntp.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/ntp.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "a2904de83dee4a2c9f8e40a4771076c8a641a18118cb4d45fac0f0489325122d",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/ntp.ts",
+      "approved_source_sha256": "a2904de83dee4a2c9f8e40a4771076c8a641a18118cb4d45fac0f0489325122d",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/pairSetup.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/pairSetup.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "2282380828cc7dbc728cf5b1953363f9c72d22fdff941e1fdf9857728febb0de",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/pairSetup.ts",
+      "approved_source_sha256": "2282380828cc7dbc728cf5b1953363f9c72d22fdff941e1fdf9857728febb0de",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/pairVerify.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/pairVerify.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "53698fa466d54a9e0ba2e11562226c08931b25bccced3b7ff44946cb03f0cd58",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/pairVerify.ts",
+      "approved_source_sha256": "53698fa466d54a9e0ba2e11562226c08931b25bccced3b7ff44946cb03f0cd58",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/rtspMessage.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/rtspMessage.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "c03db0cbd799f137f1646b538ad27301f432bea4393f2360f6df478f75c9028f",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/rtspMessage.ts",
+      "approved_source_sha256": "c03db0cbd799f137f1646b538ad27301f432bea4393f2360f6df478f75c9028f",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/screenStream.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/screenStream.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "1a8e82c2e8d6d3531774eeb107e50d066fd48072f7f2b4b747f0503fcfd83a1c",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/screenStream.ts",
+      "approved_source_sha256": "1a8e82c2e8d6d3531774eeb107e50d066fd48072f7f2b4b747f0503fcfd83a1c",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/srp.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/srp.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "c39a8bcc64eae04b75f0f497ad40942a891ac8913c0ede3c79353ae8c03de50d",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/srp.ts",
+      "approved_source_sha256": "c39a8bcc64eae04b75f0f497ad40942a891ac8913c0ede3c79353ae8c03de50d",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/timingServer.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/timingServer.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "fd6ffbca10fb13cf935434963ff250c8fab2d405b6af52332ea8dd1e572d3b32",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/timingServer.ts",
+      "approved_source_sha256": "fd6ffbca10fb13cf935434963ff250c8fab2d405b6af52332ea8dd1e572d3b32",
+      "normalization": "none"
+    },
+    {
+      "path": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/tlv8.ts",
+      "source": "third_party/livi-a956223/src/main/services/projection/driver/cp/stack/tlv8.ts",
+      "role": "reference_source",
+      "mode": 420,
+      "sha256": "c3c8153033ca6c48a599ffffd2234345eaf18e01d5dd31e36ac032fbd97acb2f",
+      "approved_source": "build/livi-reference-a956223/src/main/services/projection/driver/cp/stack/tlv8.ts",
+      "approved_source_sha256": "c3c8153033ca6c48a599ffffd2234345eaf18e01d5dd31e36ac032fbd97acb2f",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/assets/teslabox-120.png",
+      "source": "experiments/carplay-native/reference-livi/assets/teslabox-120.png",
+      "role": "asset",
+      "mode": 420,
+      "sha256": "9bcd910d77cc35fe3f0c1abd5b73a83280cd20acb045d0a6f396042eba9bb66b",
+      "approved_source": "experiments/carplay-native/reference-livi/assets/teslabox-120.png",
+      "approved_source_sha256": "9bcd910d77cc35fe3f0c1abd5b73a83280cd20acb045d0a6f396042eba9bb66b",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/assets/teslabox-180.png",
+      "source": "experiments/carplay-native/reference-livi/assets/teslabox-180.png",
+      "role": "asset",
+      "mode": 420,
+      "sha256": "e6df39baf0b1e9ec96e5301f6c81358a08e29de52de0ca527a7e23ddf8cfe332",
+      "approved_source": "experiments/carplay-native/reference-livi/assets/teslabox-180.png",
+      "approved_source_sha256": "e6df39baf0b1e9ec96e5301f6c81358a08e29de52de0ca527a7e23ddf8cfe332",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/assets/teslabox-256.png",
+      "source": "experiments/carplay-native/reference-livi/assets/teslabox-256.png",
+      "role": "asset",
+      "mode": 420,
+      "sha256": "9224cee95075743dc2928214016a597b811c4318f3b1d8c2b1bd84b1d9697e37",
+      "approved_source": "experiments/carplay-native/reference-livi/assets/teslabox-256.png",
+      "approved_source_sha256": "9224cee95075743dc2928214016a597b811c4318f3b1d8c2b1bd84b1d9697e37",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/control-input.mjs",
+      "source": "experiments/carplay-native/reference-livi/control-input.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "2adbff9c3bf26c967e747b1bca56bd3115f672be35812f717f50af57aaa8de79",
+      "approved_source": "experiments/carplay-native/reference-livi/control-input.mjs",
+      "approved_source_sha256": "0934275418daa782440226cfd5033022b88e3698312585d5280e4833c720d965",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/control-server.mjs",
+      "source": "experiments/carplay-native/reference-livi/control-server.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "b501dd426f0e7ddb67fa8912dfd2ae18ff80ee09f9db94459d0aaa241958c57e",
+      "approved_source": "experiments/carplay-native/reference-livi/control-server.mjs",
+      "approved_source_sha256": "be2c12537acd4449987085e04597825742185f4d2c58baa8e35dcd8607cfb5e6",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/display-observation.mjs",
+      "source": "experiments/carplay-native/reference-livi/display-observation.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "0bd8f982ce494164410e372c5f51ac36c7ac702748d3253b62907cbb95b0b7cd",
+      "approved_source": "experiments/carplay-native/reference-livi/display-observation.mjs",
+      "approved_source_sha256": "0bd8f982ce494164410e372c5f51ac36c7ac702748d3253b62907cbb95b0b7cd",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/event-channel.mjs",
+      "source": "experiments/carplay-native/reference-livi/event-channel.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "2d202a80602bc9aa43f78dfdbed54c6cb9a241e79e539de7bd135cfa7a9f71ca",
+      "approved_source": "experiments/carplay-native/reference-livi/event-channel.mjs",
+      "approved_source_sha256": "2d202a80602bc9aa43f78dfdbed54c6cb9a241e79e539de7bd135cfa7a9f71ca",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/host-ui.mjs",
+      "source": "experiments/carplay-native/reference-livi/host-ui.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "b9fc2a31b6a7ee083237007be0da507e245357f42940bd33d122e3a1d3041b14",
+      "approved_source": "experiments/carplay-native/reference-livi/host-ui.mjs",
+      "approved_source_sha256": "b9fc2a31b6a7ee083237007be0da507e245357f42940bd33d122e3a1d3041b14",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/iap-receiver.mjs",
+      "source": "experiments/carplay-native/reference-livi/iap-receiver.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "dca182d973cb7a5fa7dfef850197f9b02ecb04329ffe1138475f5b1cf29a5035",
+      "approved_source": "experiments/carplay-native/reference-livi/iap-receiver.mjs",
+      "approved_source_sha256": "dca182d973cb7a5fa7dfef850197f9b02ecb04329ffe1138475f5b1cf29a5035",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/identity-binding.mjs",
+      "source": "experiments/carplay-native/reference-livi/identity-binding.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "6860f76e1c967ae52f1dcfd773be40cedb2f0d4229ab1c9c048ad342a7302f67",
+      "approved_source": "experiments/carplay-native/reference-livi/identity-binding.mjs",
+      "approved_source_sha256": "6860f76e1c967ae52f1dcfd773be40cedb2f0d4229ab1c9c048ad342a7302f67",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/identity-store.mjs",
+      "source": "experiments/carplay-native/reference-livi/identity-store.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "aa91c4535039062131061d4986da77edfcdcb50ffa39a7efbee0c4f70389b6e6",
+      "approved_source": "experiments/carplay-native/reference-livi/identity-store.mjs",
+      "approved_source_sha256": "bfdb112c4baca5ce2e298fdcea14d376bd57e17c10c722b810055a6c9c262b27",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/media-autoplay.mjs",
+      "source": "experiments/carplay-native/reference-livi/media-autoplay.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "97a821cecb245ac321243d467222e296a014a73ddb5182c5d8b660359c16d88a",
+      "approved_source": "experiments/carplay-native/reference-livi/media-autoplay.mjs",
+      "approved_source_sha256": "97a821cecb245ac321243d467222e296a014a73ddb5182c5d8b660359c16d88a",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/mfi-oracle.mjs",
+      "source": "experiments/carplay-native/reference-livi/mfi-oracle.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "7b089bae2d3717b67aa514c1fc467e5d1a53066f6fd3301852c967f295794f77",
+      "approved_source": "experiments/carplay-native/reference-livi/mfi-oracle.mjs",
+      "approved_source_sha256": "7b089bae2d3717b67aa514c1fc467e5d1a53066f6fd3301852c967f295794f77",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/native-boundary.mjs",
+      "source": "experiments/carplay-native/reference-livi/native-boundary.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "d2b5d5e3f80eb48556c92e0f83a41a4e33b60478c221565464bf8e5150733f8a",
+      "approved_source": "experiments/carplay-native/reference-livi/native-boundary.mjs",
+      "approved_source_sha256": "d2b5d5e3f80eb48556c92e0f83a41a4e33b60478c221565464bf8e5150733f8a",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/node-aead.cjs",
+      "source": "experiments/carplay-native/reference-livi/node-aead.cjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "451e5045720be5ebdbbe99857499312724367ea846a84ddb639e798c92340b37",
+      "approved_source": "experiments/carplay-native/reference-livi/node-aead.cjs",
+      "approved_source_sha256": "451e5045720be5ebdbbe99857499312724367ea846a84ddb639e798c92340b37",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/oem-branding.mjs",
+      "source": "experiments/carplay-native/reference-livi/oem-branding.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "6036d796a7084de13deed58c2834c01ace969f1178e33ab57d274f25f5acb6f5",
+      "approved_source": "experiments/carplay-native/reference-livi/oem-branding.mjs",
+      "approved_source_sha256": "6036d796a7084de13deed58c2834c01ace969f1178e33ab57d274f25f5acb6f5",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/peer-policy.mjs",
+      "source": "experiments/carplay-native/reference-livi/peer-policy.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "719fd45daa8a23334d1935d2e12fa898387e6a844d0787bf4b86bd477fa8a1ab",
+      "approved_source": "experiments/carplay-native/reference-livi/peer-policy.mjs",
+      "approved_source_sha256": "62a5128da9af2a95b75ef56d2b8cfa6d08869a835007bfe13325d3f5ae849c70",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/phone-registry.mjs",
+      "source": "experiments/carplay-native/reference-livi/phone-registry.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "17fe44b117d265a2437192d84b55f2be51208ac42a17b9812acf87ae5624f452",
+      "approved_source": "experiments/carplay-native/reference-livi/phone-registry.mjs",
+      "approved_source_sha256": "bbfafdbf59b73131d312d92e709d0da2f41a5fd6a78e05718470a5893afb4b07",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/pinned-auth-loader.mjs",
+      "source": "experiments/carplay-native/reference-livi/pinned-auth-loader.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "981d7f868b1459ba24c89fd76573cea7afde65f4e86a57f14ddd71194f76226b",
+      "approved_source": "experiments/carplay-native/reference-livi/pinned-auth-loader.mjs",
+      "approved_source_sha256": "981d7f868b1459ba24c89fd76573cea7afde65f4e86a57f14ddd71194f76226b",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/plist-budget.mjs",
+      "source": "experiments/carplay-native/reference-livi/plist-budget.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "b2e2f6365e209eea63512afcea7e49ece42db4bcfbc3bfbb5c8f71f0b305e4f7",
+      "approved_source": "experiments/carplay-native/reference-livi/plist-budget.mjs",
+      "approved_source_sha256": "b2e2f6365e209eea63512afcea7e49ece42db4bcfbc3bfbb5c8f71f0b305e4f7",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/reference-session.mjs",
+      "source": "experiments/carplay-native/reference-livi/reference-session.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "28471ede53640f7a6eb483fa3a0ae6f8f77380d817252ecd18766b2530478d18",
+      "approved_source": "experiments/carplay-native/reference-livi/reference-session.mjs",
+      "approved_source_sha256": "28471ede53640f7a6eb483fa3a0ae6f8f77380d817252ecd18766b2530478d18",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/reference-supervisor.mjs",
+      "source": "experiments/carplay-native/reference-livi/reference-supervisor.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "9efb5d4c16a70825eb660f8eb4fb5e5f1639379bc327cc8a6379b07f328866ea",
+      "approved_source": "experiments/carplay-native/reference-livi/reference-supervisor.mjs",
+      "approved_source_sha256": "9efb5d4c16a70825eb660f8eb4fb5e5f1639379bc327cc8a6379b07f328866ea",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/run-reference.mjs",
+      "source": "experiments/carplay-native/reference-livi/run-reference.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "8edc5db1ef60fdce7796bc0f732c779230b4624e0b6e0a8143049ca797a4c058",
+      "approved_source": "experiments/carplay-native/reference-livi/run-reference.mjs",
+      "approved_source_sha256": "1dc127eb2cacbf5658a4c69950b6e6db9d339f69a248ee24e8f4e97225556f67",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/screen-receiver.mjs",
+      "source": "experiments/carplay-native/reference-livi/screen-receiver.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "13d884d5b4d5195d502df56987396c32ecfc3ed63a063420a54726da93c43209",
+      "approved_source": "experiments/carplay-native/reference-livi/screen-receiver.mjs",
+      "approved_source_sha256": "13d884d5b4d5195d502df56987396c32ecfc3ed63a063420a54726da93c43209",
+      "normalization": "none"
+    },
+    {
+      "path": "experiments/carplay-native/reference-livi/window-policy.mjs",
+      "source": "experiments/carplay-native/reference-livi/window-policy.mjs",
+      "role": "node_module",
+      "mode": 420,
+      "sha256": "d907d61fcef48773d4c412e11f194bbad487e1c874b08e4717f2f2df8ff6c49f",
+      "approved_source": "experiments/carplay-native/reference-livi/window-policy.mjs",
+      "approved_source_sha256": "d907d61fcef48773d4c412e11f194bbad487e1c874b08e4717f2f2df8ff6c49f",
+      "normalization": "none"
+    },
+    {
+      "path": "licenses/LIVI-COPYING",
+      "source": "third_party/carplay-licenses/LIVI-COPYING",
+      "role": "license",
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "approved_source": "build/livi-reference-a956223/LICENSE",
+      "approved_source_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "normalization": "none"
+    },
+    {
+      "path": "licenses/LIVI-SOURCE.txt",
+      "source": "third_party/carplay-licenses/LIVI-SOURCE.txt",
+      "role": "license",
+      "mode": 420,
+      "sha256": "1e7901d48e152f9d9b0dfa00c3cba0766512e7ff86d2b8702569f2cc3a77e354",
+      "approved_source": "build/carplay-reference-package-20261007-121613/build/livi-reference-a956223/SOURCE.txt",
+      "approved_source_sha256": "1e7901d48e152f9d9b0dfa00c3cba0766512e7ff86d2b8702569f2cc3a77e354",
+      "normalization": "none"
+    },
+    {
+      "path": "licenses/Node-LICENSE",
+      "source": "third_party/carplay-licenses/Node-LICENSE",
+      "role": "license",
+      "mode": 420,
+      "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+      "approved_source": "build/carplay-reference-package-20261007-121613/runtime/LICENSE",
+      "approved_source_sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+      "normalization": "none"
+    },
+    {
+      "path": "python/bluetooth_power_lease.py",
+      "source": "experiments/carplay-native/scripts/bluetooth_power_lease.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "5f1c85ca12badd8356ecfd8776f87936f086671e071d14f6581ab205d61e0046",
+      "approved_source": "experiments/carplay-native/scripts/bluetooth_power_lease.py",
+      "approved_source_sha256": "5f1c85ca12badd8356ecfd8776f87936f086671e071d14f6581ab205d61e0046",
+      "normalization": "none"
+    },
+    {
+      "path": "python/board-mfi-sign-check.py",
+      "source": "experiments/carplay-native/scripts/board-mfi-sign-check.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "39475a50e049d236fd45d73325472691cbf50ace252d2a1cebd19f5bed6dd168",
+      "approved_source": "experiments/carplay-native/scripts/board-mfi-sign-check.py",
+      "approved_source_sha256": "39475a50e049d236fd45d73325472691cbf50ace252d2a1cebd19f5bed6dd168",
+      "normalization": "none"
+    },
+    {
+      "path": "python/board-wireless-mfi-check.py",
+      "source": "experiments/carplay-native/scripts/board-wireless-mfi-check.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "aa685225be29a48dccebfbbe7c4a446bb09892ebf77cca1c642d8259116904f0",
+      "approved_source": "experiments/carplay-native/scripts/board-wireless-mfi-check.py",
+      "approved_source_sha256": "aa685225be29a48dccebfbbe7c4a446bb09892ebf77cca1c642d8259116904f0",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay-runtime-ready.py",
+      "source": "experiments/carplay-native/scripts/carplay-runtime-ready.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "48302b5b9c8b30a604151a0efd353731d6fa538868dd8d85c6d005e9eecf23b1",
+      "approved_source": "experiments/carplay-native/scripts/carplay-runtime-ready.py",
+      "approved_source_sha256": "48302b5b9c8b30a604151a0efd353731d6fa538868dd8d85c6d005e9eecf23b1",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay-service.py",
+      "source": "experiments/carplay-native/scripts/carplay-service.py",
+      "role": "service",
+      "mode": 420,
+      "sha256": "cf7ef696b9bff46d62f82df1b5b6a8728d54d7833a1677608a67c408340dd103",
+      "approved_source": "experiments/carplay-native/scripts/carplay-service.py",
+      "approved_source_sha256": "cf7ef696b9bff46d62f82df1b5b6a8728d54d7833a1677608a67c408340dd103",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay_bluetooth_inventory.py",
+      "source": "experiments/carplay-native/scripts/carplay_bluetooth_inventory.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "785d0bc11e3c6a22e6091cbfc61d953f6b0b7b96596e95c9037b433abbb51646",
+      "approved_source": "experiments/carplay-native/scripts/carplay_bluetooth_inventory.py",
+      "approved_source_sha256": "055f4a7dfb4298ecd2c49dc46f20e0e51d56786584a7953c8f6e01c726341e5a",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "python/carplay_network_lease.py",
+      "source": "experiments/carplay-native/scripts/carplay_network_lease.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "91d31612e137e20d7695cfc189d4c4cc58f973bc7d7109de1ba2a50bc9e1161b",
+      "approved_source": "experiments/carplay-native/scripts/carplay_network_lease.py",
+      "approved_source_sha256": "91d31612e137e20d7695cfc189d4c4cc58f973bc7d7109de1ba2a50bc9e1161b",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay_peer_return.py",
+      "source": "experiments/carplay-native/scripts/carplay_peer_return.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "447a4a60229af7a00d27c03baa7848b5db48b3d88047e6c7d370c6ad45b1cd41",
+      "approved_source": "experiments/carplay-native/scripts/carplay_peer_return.py",
+      "approved_source_sha256": "447a4a60229af7a00d27c03baa7848b5db48b3d88047e6c7d370c6ad45b1cd41",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay_phone_selection.py",
+      "source": "experiments/carplay-native/scripts/carplay_phone_selection.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "873a1616dc08d1bfc862585acebf94cd92b3977894f6b8010588fe3e6cdd4133",
+      "approved_source": "experiments/carplay-native/scripts/carplay_phone_selection.py",
+      "approved_source_sha256": "384734c1bedf057fe3e285858290be0bb488dee09fb628b2b4de5814c5c746b0",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "python/carplay_provisioning.py",
+      "source": "experiments/carplay-native/scripts/carplay_provisioning.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "65b912d27964a30edc980baf730a9a659a7894a916ae0515e7644367835c6b1b",
+      "approved_source": "experiments/carplay-native/scripts/carplay_provisioning.py",
+      "approved_source_sha256": "65b912d27964a30edc980baf730a9a659a7894a916ae0515e7644367835c6b1b",
+      "normalization": "none"
+    },
+    {
+      "path": "python/carplay_user_settings.py",
+      "source": "experiments/carplay-native/scripts/carplay_user_settings.py",
+      "role": "python",
+      "mode": 420,
+      "sha256": "b4a9fb68044dcb289071a63a2d7b662fa804fc2b2d7c4b1b0da6ce88c02ff6b9",
+      "approved_source": "experiments/carplay-native/scripts/carplay_user_settings.py",
+      "approved_source_sha256": "370e26d040d09c825263ede9d90d38d7451c503aec8bd588e2ff0b2e53974e08",
+      "normalization": "UTF-8 LF and terminal newline only"
+    },
+    {
+      "path": "runtime/bin/node",
+      "source": "dist/rc1-external-inputs/node",
+      "role": "node",
+      "mode": 493,
+      "sha256": "d8fa08f79c8198c5a5ccc9faa5a69803052703fc9513f99e7200e0ab42e1d799",
+      "approved_source": "build/carplay-reference-package-20261007-121613/runtime/bin/node",
+      "approved_source_sha256": "d8fa08f79c8198c5a5ccc9faa5a69803052703fc9513f99e7200e0ab42e1d799",
+      "normalization": "none"
+    },
+    {
+      "path": "systemd/teslabox-carplay-experiment.service",
+      "source": "internal/carplaybundle/teslabox-carplay-experiment.service.in",
+      "role": "unit",
+      "mode": 420,
+      "sha256": "860669ce1b623256a9f571b6dc14dd693375ead5cb7a35b285d7ed6e2836d7b7",
+      "approved_source": "internal/carplaybundle/teslabox-carplay-experiment.service.in",
+      "approved_source_sha256": "860669ce1b623256a9f571b6dc14dd693375ead5cb7a35b285d7ed6e2836d7b7",
+      "normalization": "none"
+    },
+    {
+      "path": "teslabox-carplay",
+      "source": "dist/rc1-external-inputs/teslabox-carplay",
+      "role": "native",
+      "mode": 493,
+      "sha256": "9853f4ffeb33b45fe4dcc867af025c80197db1d7d40997994f9f78225d7241e4",
+      "approved_source": "build/carplay-return-pan-20261010/teslabox-carplay",
+      "approved_source_sha256": "9853f4ffeb33b45fe4dcc867af025c80197db1d7d40997994f9f78225d7241e4",
+      "normalization": "none"
+    }
+  ],
+  "status": "technical-input-template-final-commit-required",
+  "private_material_included": false,
+  "publishable": false
+}

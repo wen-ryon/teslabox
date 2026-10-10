@@ -332,13 +332,16 @@ async function request(path, options = {}) {
   const response = await requestResponse(path, options);
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）`;
+    let reasonCode = "";
     try {
       const payload = await response.json();
       message = payload.error || message;
+      reasonCode = payload.reason_code || "";
       if (payload.suggestion) message += `；${payload.suggestion}`;
     } catch (_) { /* 保留通用提示 */ }
     const error = new Error(message);
     error.status = response.status;
+    error.reasonCode = reasonCode;
     throw error;
   }
   if (response.status === 204) return null;
@@ -360,36 +363,16 @@ function showLogin() {
 function showApp() {
   loginView.hidden = true;
   appView.hidden = false;
+  void globalThis.TeslaBoxCarPlaySettings?.load();
   $("logout-button").hidden = !state.authEnabled;
 }
 
 function initializeSettingsTabs() {
-  const tabs = $("settings-tabs");
-  const sections = [...$("settings-page").querySelectorAll(":scope > .settings-section")];
-  if (!tabs || !sections.length || tabs.childElementCount) return;
-  const saved = readPreference("teslabox-settings-tab", "");
-  sections.forEach((section, index) => {
-    if (!section.id) section.id = `settings-panel-${index+1}`;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.settingsTab = section.id;
-    button.textContent = section.querySelector("h2")?.textContent?.trim() || `设置 ${index+1}`;
-    button.addEventListener("click", () => activateSettingsTab(section.id, true));
-    tabs.append(button);
-  });
-  activateSettingsTab(sections.some((section) => section.id === saved) ? saved : sections[0].id, false);
+  globalThis.TeslaBoxSettingsLayout?.initialize();
 }
 
 function activateSettingsTab(id, remember = true) {
-  const sections = [...$("settings-page").querySelectorAll(":scope > .settings-section")];
-  if (!sections.some((section) => section.id === id)) return;
-  sections.forEach((section) => { section.hidden = section.id !== id; });
-  $("settings-tabs").querySelectorAll("[data-settings-tab]").forEach((button) => {
-    const active = button.dataset.settingsTab === id;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", active ? "true" : "false");
-  });
-  if (remember) writePreference("teslabox-settings-tab", id);
+  globalThis.TeslaBoxSettingsLayout?.selectSection(id, remember);
 }
 
 async function initialize() {
@@ -776,6 +759,7 @@ function showPage(page, updateHistory) {
   const pagePath = state.page === "media" ? "/media" : state.page === "settings" ? "/settings" : state.page === "logs" ? "/logs" : "/";
   if (updateHistory) window.history.pushState({page:state.page}, "", pagePath);
   if (state.page === "media" && !appView.hidden) loadMediaAssets();
+  globalThis.TeslaBoxSettingsLayout?.enterPage();
   if (state.page === "settings" && !appView.hidden) loadSettings();
   if (state.page === "logs" && !appView.hidden) loadLogs();
   scheduleLogsRefresh();
@@ -816,7 +800,9 @@ async function downloadDiagnosticReport() {
   button.disabled = true;
   button.textContent = "正在收集…";
   try {
-    const response = await requestResponse("/api/v1/diagnostics/report", {cache:"no-store", loadingMessage:"正在生成完整诊断报告…"});
+    const source = $("logs-download-source").value;
+    const reportPath = "/api/v1/diagnostics/report" + (source ? "?source=" + encodeURIComponent(source) : "");
+    const response = await requestResponse(reportPath, {cache:"no-store", loadingMessage:"正在生成完整诊断报告…"});
     if (!response.ok) {
       let message = `生成诊断报告失败（HTTP ${response.status}）`;
       try { message = (await response.json()).error || message; } catch (_) { /* 保留通用提示 */ }
@@ -833,7 +819,7 @@ async function downloadDiagnosticReport() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast("完整诊断报告已下载，可以直接发给维护者。", "success");
+    showToast("诊断日志已下载，可以直接发给维护者。", "success");
   } catch (error) {
     showToast(error.message, "error");
   } finally {
@@ -1408,12 +1394,12 @@ async function loadSettings() {
   try {
     const results = await Promise.all([
       apply(request("/api/v1/network/wifi"), (value) => { state.wifi = value; renderWiFiSettings(value); }, (error) => renderWiFiUnavailable(error.message)),
-      apply(request("/api/v1/network/ap"), (value) => { state.ap = value; renderAPSettings(value); }, (error) => renderAPUnavailable(error.message)),
+      apply(request("/api/v1/network/ap"), (value) => { state.ap = value; if (!globalThis.TeslaBoxSettingsLayout?.isDirty("ap-settings-title")) renderAPSettings(value); }, (error) => renderAPUnavailable(error.message)),
       apply(request("/api/v1/storage/devices"), (value) => { state.storage = value; renderStorageDevices(value); }, (error) => renderStorageUnavailable(error.message)),
       apply(request("/api/v1/update"), (value) => { state.update = value; renderUpdate(value); }, (error) => renderUpdateUnavailable(error.message)),
       apply(request("/api/v1/maintenance"), (value) => { state.maintenance = value; renderMaintenanceSettings(value); }, (error) => renderMaintenanceUnavailable(error.message)),
       apply(request("/api/v1/storage/snapshot-reserve"), renderSnapshotReserveStatus, () => {}),
-      apply(request("/api/v1/fan"), (value) => { state.fan = value; renderFanSettings(); }, (error) => renderFanUnavailable(error.message)),
+      apply(request("/api/v1/fan"), (value) => { if (!globalThis.TeslaBoxSettingsLayout?.isDirty("fan-settings-title")) { state.fan = value; renderFanSettings(); } }, (error) => renderFanUnavailable(error.message)),
       Promise.allSettled([request("/api/v1/export-settings"), request("/api/v1/exports/history")]).then((values) => {
         if (!current()) return false;
         const [settingsResult, historyResult] = values;
@@ -1528,6 +1514,7 @@ async function saveFanSettings() {
   const button = $("fan-save"); button.disabled = true;
   try {
     state.fan = await postJSON("/api/v1/fan", fanSettingsPayload());
+    globalThis.TeslaBoxSettingsLayout?.markClean("fan-settings-title");
     renderFanSettings();
     setSettingsNotice("风扇设置已保存", false);
   } catch (error) { setSettingsNotice(`保存风扇设置失败：${error.message}`, true); }
@@ -1542,13 +1529,15 @@ function renderFanUnavailable(message) {
 function renderExportSettings() {
   const settings = state.exportSettings || {delete_after_download:false, retain_count:8};
   const deleteAfterDownload = Boolean(settings.delete_after_download);
-  $("export-delete-after-download").checked = deleteAfterDownload;
   const retainSelect = $("export-retain-count");
+  if (!globalThis.TeslaBoxSettingsLayout?.isDirty("export-settings-title")) {
+    $("export-delete-after-download").checked = deleteAfterDownload;
   if ([...retainSelect.options].some((option) => Number(option.value) === Number(settings.retain_count))) retainSelect.value = String(settings.retain_count);
   else retainSelect.value = "8";
+  }
   $("export-settings-save").disabled = false;
   $("export-history-refresh").disabled = false;
-  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${retainSelect.value} 个`;
+  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${settings.retain_count} 个`;
   $("export-retention-status").className = "badge ok";
   renderExportRetentionControls();
   const history = Array.isArray(state.exportHistory) ? state.exportHistory : [];
@@ -1638,6 +1627,7 @@ async function saveExportSettings() {
         retain_count:Number($("export-retain-count").value),
       }),
     });
+    globalThis.TeslaBoxSettingsLayout?.markClean("export-settings-title");
     await loadExportSettings();
     setSettingsNotice("导出文件保留设置已保存", false);
   } catch (error) {
@@ -2364,6 +2354,19 @@ async function runWiFiConnect(payload) {
     setSettingsNotice("WiFi 已连接", false);
     await loadSettings();
   } catch (error) {
+    if (error.reasonCode === "carplay_network_reserved" && !payload.confirm_carplay_reconnect) {
+      const confirmed = await askConfirmation(
+        "强制连接 Wi-Fi",
+        "连接此 Wi-Fi 会暂时中断 CarPlay，并可能让热点和当前页面短暂断开。连接结束后会自动重新启动 CarPlay，录像继续运行。是否继续？",
+        "中断 CarPlay 并连接", true,
+      );
+      if (confirmed) {
+        await runWiFiConnect({...payload, confirm_carplay_reconnect:true});
+      } else {
+        setSettingsNotice("已取消连接，保持当前 CarPlay 会话", false);
+      }
+      return;
+    }
     setSettingsNotice(error.message, true);
   }
 }
@@ -2483,6 +2486,7 @@ async function saveAPSettings(event) {
   setSettingsNotice(enabled ? "正在应用热点设置，页面可能断开…" : "正在提交关闭指令…", false);
   try {
     await postJSON("/api/v1/network/ap", payload);
+    globalThis.TeslaBoxSettingsLayout?.markClean("ap-settings-title");
     $("ap-password").value = "";
     if (!enabled) {
       $("ap-status").textContent = "正在关闭";
