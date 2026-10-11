@@ -16,6 +16,7 @@ import { validWindow } from './window-policy.mjs';
 import { superviseReference } from './reference-supervisor.mjs';
 import { teslaBoxBranding } from './oem-branding.mjs';
 import { splitAutoPlayProfile } from './media-autoplay.mjs';
+import { CODEC_DIAGNOSTIC_FILE, writeCodecDiagnostic } from './codec-diagnostic.mjs';
 
 const { values } = parseArgs({ options: {
   binary: { type: 'string' }, 'hardware-config': { type: 'string' }, profile: { type: 'string' },
@@ -195,7 +196,7 @@ try {
       codecSaved = true;
       // 仅保存首个编码配置，供生产解析器离线复现；不保存视频、音频或密钥。
       try {
-        fs.writeFileSync(path.join(path.dirname(values.binary), `reference-codec-${randomUUID()}.bin`), bytes, { flag: 'wx', mode: 0o600 });
+        writeCodecDiagnostic(bytes, { directory: temporary, runtimeDirectory: path.dirname(values.binary) });
         stage('screen_codec_saved');
       } catch { stage('screen_codec_save_failed'); }
     },
@@ -249,7 +250,7 @@ try {
   }
   unbind?.(); store?.close();
   if (temporary) {
-    for (const file of ['manifest.json', 'helper.sock']) {
+    for (const file of ['manifest.json', 'helper.sock', CODEC_DIAGNOSTIC_FILE]) {
       try { fs.unlinkSync(path.join(temporary, file)); } catch (error) { if (error.code !== 'ENOENT') process.exitCode = 1; }
     }
     try { fs.rmdirSync(temporary); } catch { process.exitCode = 1; }
