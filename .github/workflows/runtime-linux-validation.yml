@@ -40,14 +40,55 @@ jobs:
           git rev-parse HEAD | tee validation-logs/commit.txt
           go version | tee validation-logs/go-version.txt
           uname -a | tee validation-logs/platform.txt
+      - name: Prepare isolated XFS data filesystem
+        id: xfs
+        # 仅格式化 runner 临时文件，不访问真实块设备或生产服务器。
+        run: |
+          if ! command -v mkfs.xfs >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y xfsprogs
+          fi
+          runnerroot="$(realpath "$RUNNER_TEMP")"
+          taskdir="$(mktemp -d "$runnerroot/teslabox-xfs.XXXXXX")"
+          taskdir="$(realpath "$taskdir")"
+          case "$taskdir" in "$runnerroot"/teslabox-xfs.*) ;; *) exit 1 ;; esac
+          echo "TESLABOX_TEST_XFS_TASK_DIR=$taskdir" >> "$GITHUB_ENV"
+          image="$taskdir/data.img"
+          mountroot="$taskdir/mount"
+          (set -o noclobber; : > "$image")
+          test -f "$image" && test ! -L "$image" && test ! -b "$image"
+          test "$(realpath "$image")" = "$taskdir/data.img"
+          # 稀疏盘须满足产品 8 GiB 保留策略，实际只写测试夹具与文件系统元数据。
+          truncate -s 16G "$image"
+          mkdir -m 0700 "$mountroot"
+          sudo mkfs.xfs -f -m reflink=1 "$image"
+          sudo mount -o loop,nosuid,nodev "$image" "$mountroot"
+          sudo chown "$(id -u):$(id -g)" "$mountroot"
+          chmod 0700 "$mountroot"
+          test "$(stat -f -c %T "$mountroot")" = xfs
+          test "$(stat -c %d "$mountroot")" != "$(stat -c %d /)"
+          echo "TESLABOX_TEST_DATA_ROOT=$mountroot" >> "$GITHUB_ENV"
+          findmnt "$mountroot" | tee validation-logs/xfs-filesystem.log
       - name: All Go tests
         run: go test -count=1 -shuffle=on -json ./... 2>&1 | tee validation-logs/go-test.jsonl
       - name: Go vet
         if: ${{ !cancelled() }}
         run: go vet ./... 2>&1 | tee validation-logs/go-vet.log
       - name: All Go race tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.xfs.outcome == 'success' }}
         run: go test -race -count=1 -shuffle=on -json ./... 2>&1 | tee validation-logs/go-race.jsonl
+      - name: Unmount isolated XFS data filesystem
+        if: ${{ always() }}
+        run: |
+          taskdir="${TESLABOX_TEST_XFS_TASK_DIR:-}"
+          if test -n "$taskdir"; then
+            runnerroot="$(realpath "$RUNNER_TEMP")"
+            taskdir="$(realpath "$taskdir")"
+            case "$taskdir" in "$runnerroot"/teslabox-xfs.*) ;; *) exit 1 ;; esac
+            if mountpoint -q "$taskdir/mount"; then
+              sudo umount "$taskdir/mount"
+            fi
+          fi
       - name: Preserve test evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -16,6 +16,25 @@ import (
 	"time"
 )
 
+// 外置盘用例必须使用独立文件系统，不能关闭系统盘保护来迁就 CI。
+func externalExportTestDir(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("TESLABOX_TEST_DATA_ROOT")
+	if root == "" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "export-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("清理外置盘测试目录: %v", err)
+		}
+	})
+	return dir
+}
+
 type fakeExportRunner struct {
 	block   bool
 	started chan struct{}
@@ -99,7 +118,7 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 	t.Parallel()
 	runner := &fakeExportRunner{}
 	exporter, err := NewExporter(runner, ExportConfig{
-		FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 1, MaxDuration: 30 * time.Minute,
+		FFmpegPath: "/opt/ffmpeg", OutputDir: externalExportTestDir(t), QueueSize: 1, MaxDuration: 30 * time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +189,7 @@ func TestExportDownloadFilenameDescribesQualityAndOverlay(t *testing.T) {
 
 func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
+	directory := externalExportTestDir(t)
 	statePath := filepath.Join(t.TempDir(), "export-state.json")
 	exporter, err := NewExporter(&fakeExportRunner{}, ExportConfig{
 		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
@@ -222,7 +241,7 @@ func TestExporterPersistsHistoryAndConsumesCompletedDownload(t *testing.T) {
 
 func TestExporterDeletesCompletedExportWithoutDownload(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
+	directory := externalExportTestDir(t)
 	statePath := filepath.Join(t.TempDir(), "export-state.json")
 	exporter, err := NewExporter(&fakeExportRunner{}, ExportConfig{
 		FFmpegPath: "/opt/ffmpeg", OutputDir: directory, StatePath: statePath, QueueSize: 1, MaxDuration: time.Minute,
@@ -734,7 +753,7 @@ func TestPrepareExportOverlayUsesTenHertzSEISampling(t *testing.T) {
 
 func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
+	directory := externalExportTestDir(t)
 	firstPath := filepath.Join(directory, "2026-07-20_10-00-00-front.mp4")
 	secondPath := filepath.Join(directory, "2026-07-20_10-00-00-back.mp4")
 	if err := os.WriteFile(firstPath, []byte("front-source"), 0o600); err != nil {
@@ -813,7 +832,7 @@ func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
 
 func TestExporterFirstCreateRemovesOnlyManagedTemporaryArtifacts(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
+	directory := externalExportTestDir(t)
 	temporary := ".0123456789abcdef01234567.tmp.mp4"
 	completed := "0123456789abcdef01234567.mp4"
 	for _, name := range []string{temporary, completed, "keep.mp4"} {
@@ -845,7 +864,7 @@ func TestExporterCancelQueuedTaskReleasesSnapshotImmediately(t *testing.T) {
 	t.Parallel()
 	runner := &fakeExportRunner{block: true, started: make(chan struct{})}
 	exporter, err := NewExporter(runner, ExportConfig{
-		FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 2, MaxDuration: 30 * time.Minute,
+		FFmpegPath: "/opt/ffmpeg", OutputDir: externalExportTestDir(t), QueueSize: 2, MaxDuration: 30 * time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -891,7 +910,7 @@ func TestExporterShutdownWaitsForRunnerBeforeReleasingSnapshot(t *testing.T) {
 		started: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}),
 	}
 	exporter, err := NewExporter(runner, ExportConfig{
-		FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 1, MaxDuration: time.Minute,
+		FFmpegPath: "/opt/ffmpeg", OutputDir: externalExportTestDir(t), QueueSize: 1, MaxDuration: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1051,7 +1070,7 @@ func TestExporterRunsLongClipSequentiallyAndRemuxesSegments(t *testing.T) {
 		})
 	}
 	runner := &recordingExportRunner{}
-	exporter, err := NewExporter(runner, ExportConfig{FFmpegPath: "/opt/ffmpeg", OutputDir: t.TempDir(), QueueSize: 1})
+	exporter, err := NewExporter(runner, ExportConfig{FFmpegPath: "/opt/ffmpeg", OutputDir: externalExportTestDir(t), QueueSize: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

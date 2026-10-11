@@ -15,6 +15,25 @@ import (
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
+// 快照夹具放在真实 XFS 测试盘，保留生产容量检查及掉盘保护。
+func snapshotTestDir(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("TESLABOX_TEST_DATA_ROOT")
+	if root == "" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "snapshot-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("清理 XFS 测试目录: %v", err)
+		}
+	})
+	return dir
+}
+
 type command struct {
 	name string
 	args []string
@@ -77,7 +96,7 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 
 func TestManagerCreateStopsBeforeCopyWhenSpaceIsLow(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -109,7 +128,7 @@ func TestManagerCreateStopsBeforeCopyWhenSpaceIsLow(t *testing.T) {
 
 func TestManagerRecoverOnlyRemovesManagedResources(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
 	if err := os.Mkdir(snapshotPath, 0o750); err != nil {
@@ -158,7 +177,7 @@ func TestManagerRecoverOnlyRemovesManagedResources(t *testing.T) {
 
 func TestManagerRemoveDetachesLoopWhenFUSEAlreadyUnmounted(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
 	if err := os.Mkdir(snapshotPath, 0o750); err != nil {
@@ -189,7 +208,7 @@ func TestManagerRemoveDetachesLoopWhenFUSEAlreadyUnmounted(t *testing.T) {
 
 func TestManagerCreateFallsBackToExFATFUSE(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -215,7 +234,7 @@ func TestManagerCreateFallsBackToExFATFUSE(t *testing.T) {
 
 func TestManagerCreateAcceptsRepairedFilesystem(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -249,7 +268,7 @@ func TestManagerCreateAcceptsRepairedFilesystem(t *testing.T) {
 
 func TestManagerCreateRepairedRepairsOnlyNewSnapshotCopyBeforeMount(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -299,7 +318,7 @@ func TestManagerCreateRepairedRepairsOnlyNewSnapshotCopyBeforeMount(t *testing.T
 
 func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -353,7 +372,7 @@ func TestManagerCreateUsesReflinkAndReadOnlyMount(t *testing.T) {
 
 func TestManagerCreateAppliesCOWExtentHintOnlyOnce(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -399,7 +418,7 @@ func TestManagerCreateAppliesCOWExtentHintOnlyOnce(t *testing.T) {
 
 func TestManagerCreateStopsBeforeCopyWhenCOWExtentHintFails(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -426,7 +445,7 @@ func TestManagerCreateStopsBeforeCopyWhenCOWExtentHintFails(t *testing.T) {
 
 func TestManagerCreateFailureDoesNotPublishSnapshot(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	imagePath := filepath.Join(root, "teslacam.img")
 	snapshotPath := filepath.Join(root, "snapshots")
 	mountRoot := filepath.Join(root, "mounts")
@@ -455,7 +474,7 @@ func TestManagerCreateFailureDoesNotPublishSnapshot(t *testing.T) {
 
 func TestManagerRemoveRejectsPathsOutsideManagedRoots(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := snapshotTestDir(t)
 	manager := New(&fakeRunner{}, Config{
 		SnapshotPath: filepath.Join(root, "snapshots"),
 		MountRoot:    filepath.Join(root, "mounts"),

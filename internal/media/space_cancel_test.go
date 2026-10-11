@@ -9,7 +9,7 @@ import (
 )
 
 func TestExportCanceledMediaReleasesSnapshot(t *testing.T) {
-	dir := t.TempDir()
+	dir := externalExportTestDir(t)
 	path := filepath.Join(dir, "front.mp4")
 	if err := os.WriteFile(path, []byte("video"), 0o600); err != nil {
 		t.Fatal(err)
