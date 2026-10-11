@@ -162,7 +162,7 @@ jobs:
           git rev-parse HEAD | tee validation-logs/commit.txt
           node --version | tee validation-logs/node-version.txt
       - name: All frontend tests
-        run: node --test internal/webui/*.test.cjs 2>&1 | tee validation-logs/node-tests.log
+        run: node --test --test-reporter=tap internal/webui/*test.cjs 2>&1 | tee validation-logs/node-tests.log
       - name: Preserve frontend evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
