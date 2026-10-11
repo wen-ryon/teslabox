@@ -8,8 +8,10 @@ import (
 	"errors"
 	"github.com/wen-ryon/teslabox/internal/webauth"
 	"github.com/wen-ryon/teslabox/internal/webui"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,5 +243,119 @@ func TestComponentAPIStaysInsideActualWebAuthentication(t *testing.T) {
 		if out.Code != tc.code {
 			t.Fatalf("%s code=%d body=%s", tc.path, out.Code, out.Body.String())
 		}
+	}
+}
+
+func TestComponentRedirectPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, initial, destination string
+		hops                       int
+		allowed                    bool
+	}{
+		{"same_host", "https://downloads.invalid/fixed", "https://downloads.invalid/asset", 1, true},
+		{"gitee_same_host", "https://gitee.com/fixed", "https://gitee.com/asset", 1, true},
+		{"gitee_cdn", "https://gitee.com/fixed", "https://foruda.gitee.com/asset?signature=temporary", 2, true},
+		{"gitee_explicit_https_port", "https://gitee.com:443/fixed", "https://foruda.gitee.com:443/asset", 2, true},
+		{"gitee_maximum_hops", "https://gitee.com/fixed", "https://foruda.gitee.com/asset", 3, true},
+		{"too_many_hops", "https://gitee.com/fixed", "https://foruda.gitee.com/asset", 4, false},
+		{"missing_initial", "https://gitee.com/fixed", "https://foruda.gitee.com/asset", 0, false},
+		{"http_downgrade", "https://gitee.com/fixed", "http://foruda.gitee.com/asset", 2, false},
+		{"http_initial", "http://gitee.com/fixed", "https://foruda.gitee.com/asset", 2, false},
+		{"destination_credentials", "https://gitee.com/fixed", "https://user:password@foruda.gitee.com/asset", 2, false},
+		{"initial_credentials", "https://user:password@gitee.com/fixed", "https://foruda.gitee.com/asset", 2, false},
+		{"destination_port", "https://gitee.com/fixed", "https://foruda.gitee.com:8443/asset", 2, false},
+		{"gitee_destination_port", "https://gitee.com/fixed", "https://gitee.com:8443/asset", 1, false},
+		{"initial_port", "https://gitee.com:8443/fixed", "https://foruda.gitee.com/asset", 2, false},
+		{"initial_port_same_host", "https://gitee.com:8443/fixed", "https://gitee.com:8443/asset", 1, false},
+		{"other_gitee_subdomain", "https://gitee.com/fixed", "https://elsewhere.gitee.com/asset", 2, false},
+		{"deceptive_suffix", "https://gitee.com/fixed", "https://foruda.gitee.com.attacker.invalid/asset", 2, false},
+		{"third_party", "https://gitee.com/fixed", "https://elsewhere.invalid/asset", 2, false},
+		{"other_initial_borrows_cdn", "https://elsewhere.invalid/fixed", "https://foruda.gitee.com/asset", 1, false},
+		{"other_initial_borrows_gitee", "https://elsewhere.invalid/fixed", "https://gitee.com/asset", 1, false},
+		{"initial_cdn_cannot_borrow_gitee", "https://foruda.gitee.com/fixed", "https://gitee.com/asset", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initial, err := http.NewRequest(http.MethodGet, tc.initial, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination, err := http.NewRequest(http.MethodGet, tc.destination, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			via := make([]*http.Request, tc.hops)
+			for i := range via {
+				via[i] = initial
+			}
+			if err := checkComponentRedirect(destination, via); (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v, err=%v", tc.allowed, err)
+			}
+		})
+	}
+}
+
+type componentRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f componentRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestGiteeRedirectChainRetainsArchiveVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name, destination string
+		data              []byte
+		allowed           bool
+	}{
+		{"verified", "https://foruda.gitee.com/asset?signature=temporary", []byte("fixed archive"), true},
+		{"corrupt", "https://foruda.gitee.com/asset?signature=temporary", []byte("wrong archive"), false},
+		{"short", "https://foruda.gitee.com/asset", []byte("short"), false},
+		{"oversized", "https://foruda.gitee.com/asset", []byte("fixed archive extra"), false},
+		{"third_party", "https://elsewhere.invalid/asset", []byte("fixed archive"), false},
+		{"http_downgrade", "http://foruda.gitee.com/asset", []byte("fixed archive"), false},
+		{"credentials", "https://user:password@foruda.gitee.com/asset", []byte("fixed archive"), false},
+		{"abnormal_port", "https://foruda.gitee.com:8443/asset", []byte("fixed archive"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits, installed int
+			client := &http.Client{Transport: componentRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				hits++
+				header := make(http.Header)
+				status := http.StatusOK
+				body := ""
+				switch req.URL.Host + req.URL.Path {
+				case "gitee.com/fixed":
+					status = http.StatusFound
+					header.Set("Location", "https://gitee.com/intermediate")
+				case "gitee.com/intermediate":
+					status = http.StatusFound
+					header.Set("Location", tc.destination)
+				default:
+					body = string(tc.data)
+				}
+				return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body)), Request: req}, nil
+			})}
+			m := testManager(t, componentFor([]byte("fixed archive"), "https://gitee.com/fixed"), client,
+				func(ctx context.Context, c Component, path string) error {
+					installed++
+					return ValidateFile(ctx, c, path)
+				})
+			err := m.Ensure(context.Background(), "nas")
+			if (err == nil) != tc.allowed || m.Ready("nas") != tc.allowed {
+				t.Fatalf("allowed=%v, ready=%v, err=%v", tc.allowed, m.Ready("nas"), err)
+			}
+			if tc.allowed && (installed != 1 || hits != 3) {
+				t.Fatalf("installs=%d requests=%d", installed, hits)
+			}
+			if !tc.allowed && installed != 0 {
+				t.Fatal("unverified archive reached installer")
+			}
+			parsed, err := url.Parse(tc.destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (parsed.Scheme != "https" || parsed.User != nil || parsed.Host != "foruda.gitee.com") && hits != 2 {
+				t.Fatal("forbidden redirect reached transport")
+			}
+		})
 	}
 }

@@ -130,12 +130,7 @@ func New(cfg Config) (*Manager, error) {
 	if client.Timeout <= 0 {
 		client.Timeout = 15 * time.Minute
 	}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) > 3 || req.URL.Scheme != "https" || req.URL.Host != via[0].URL.Host {
-			return errors.New("组件下载重定向越界")
-		}
-		return nil
-	}
+	client.CheckRedirect = checkComponentRedirect
 	cfg.HTTPClient = &client
 	cfg.Components = append([]Component(nil), cfg.Components...)
 	installers := map[string]Installer{}
@@ -154,6 +149,34 @@ func New(cfg Config) (*Manager, error) {
 		m.states[c.ID] = Status{ID: c.ID, Version: c.Version, SHA256: c.SHA256, State: "pending"}
 	}
 	return m, nil
+}
+
+// Gitee 的固定附件会转到独立下载域；只对这个初始站点放行已核对的域名，
+// 不能让其他站点借用白名单，也不接受凭据、非标准端口或 HTTPS 降级。
+func checkComponentRedirect(req *http.Request, via []*http.Request) error {
+	rejected := errors.New("组件下载重定向越界")
+	if len(via) == 0 || len(via) > 3 || req == nil || req.URL == nil ||
+		req.URL.Scheme != "https" || req.URL.User != nil {
+		return rejected
+	}
+	initial := via[0]
+	if initial == nil || initial.URL == nil || initial.URL.Scheme != "https" || initial.URL.User != nil {
+		return rejected
+	}
+	if initial.URL.Hostname() == "gitee.com" {
+		if initial.URL.Host != "gitee.com" && initial.URL.Host != "gitee.com:443" {
+			return rejected
+		}
+		switch req.URL.Host {
+		case "gitee.com", "gitee.com:443", "foruda.gitee.com", "foruda.gitee.com:443":
+			return nil
+		}
+		return rejected
+	}
+	if req.URL.Host != initial.URL.Host {
+		return rejected
+	}
+	return nil
 }
 
 // Status 返回副本，调用方不能改变后台状态。
