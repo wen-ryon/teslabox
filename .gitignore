@@ -64,3 +64,7 @@ go.work.sum
 .agents/
 .codex/
 .workbuddy/
+
+# 隔离组件交付验证日志、临时描述与开发 ELF 不进入发行源码。
+/build/runtime-development/
+/internal/runtimecomponents/release/

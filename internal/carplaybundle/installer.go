@@ -37,6 +37,20 @@ func EnsureEmbedded(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 	defer archive.Close()
+	return ensure(ctx, archive, expected, buildversion.Version, logger)
+}
+
+// EnsureArchive 按主 ELF 固定的组件版本安装，组件可在后续主程序更新中原样复用。
+func EnsureArchive(ctx context.Context, archivePath, expected, componentVersion string, logger *slog.Logger) error {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer archive.Close()
+	return ensure(ctx, archive, expected, componentVersion, logger)
+}
+
+func ensure(ctx context.Context, archive io.Reader, expected, componentVersion string, logger *slog.Logger) error {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" || os.Geteuid() != 0 {
 		return errors.New("产品 CarPlay 安装仅支持 root ARM64 Linux")
 	}
@@ -52,8 +66,8 @@ func EnsureEmbedded(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if info.Version != buildversion.Version {
-		return errors.New("CarPlay 内层版本与主程序发行版本不一致")
+	if info.Version != componentVersion {
+		return errors.New("CarPlay 内层版本与固定组件描述不一致")
 	}
 	// 所有预检在服务配置发生变化前完成，不把依赖缺失留到录像服务重启后。
 	preflightCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

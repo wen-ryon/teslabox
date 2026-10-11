@@ -14,7 +14,8 @@ const savedUIFont = normalizeUIFont(readPreference("teslabox-settings-font", "me
 const savedPlaybackQuality = normalizePlaybackQuality(readPreference("teslabox-playback-quality", "auto"));
 const recordingRefreshPreferenceKey = "teslabox-recording-refresh-seconds";
 const savedRecordingRefreshSeconds = normalizeRecordingRefreshSeconds(readPreference(recordingRefreshPreferenceKey, "60"));
-const initialPage = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
+const initialPage = pageFromPath(window.location.pathname);
+function pageFromPath(path) { return ({"/media":"media", "/settings":"settings", "/logs":"logs", "/backup":"backup", "/exports":"exports"})[path] || "dashboard"; }
 const state = {
   offset: 0, total: 0, loading: false, refreshing: false, authEnabled: true,
   view: savedView === "single" ? "single" : "multi",
@@ -221,7 +222,7 @@ let onboardingState = null;
 let onboardingChecking = false;
 let pageGuideIndex = -1;
 const pageGuideSteps = [
-  {target:"nav-toggle", title:"页面从这里切换", detail:"点击左上角 TeslaBox 标志可以打开主导航，在概览、媒体中心、日志中心和设置中心之间切换。"},
+  {target:"nav-toggle", title:"页面从这里切换", detail:"点击左上角 TeslaBox 标志可以打开主导航，切换概览、录像备份、导出管理、媒体中心、日志中心和设置中心。"},
   {target:"live-indicator", title:"设备连接状态", detail:"这里表示管理页面能否正常连接 TeslaBox 服务。显示“设备在线”时，页面可以继续读取设备状态。"},
   {target:"internet-indicator", title:"互联网状态", detail:"这里表示 TeslaBox 当前是否能够访问互联网。无互联网不影响车机写入录像和局域网查看。"},
   {target:"appearance-toggle", title:"页面设置", detail:"点击右上角齿轮可以切换主题、全局字体和车机浏览器兼容模式，也可以退出管理页面。"},
@@ -394,6 +395,7 @@ async function initialize() {
     if (state.page === "media") await loadMediaAssets();
     if (state.page === "settings") await loadSettings();
     if (state.page === "logs") await loadLogs();
+    if (state.page === "exports") await loadExportSettings();
     await maybeShowOnboarding();
   } catch (error) {
     showApp();
@@ -422,6 +424,10 @@ loginForm.addEventListener("submit", async (event) => {
       return;
     }
     await refreshAll();
+    if (state.page === "settings") await loadSettings();
+    if (state.page === "exports") await loadExportSettings();
+    if (state.page === "media") await loadMediaAssets();
+    if (state.page === "logs") await loadLogs();
     await maybeShowOnboarding();
   } catch (error) {
     loginError.textContent = error.message;
@@ -727,6 +733,7 @@ async function changeManagementPassword(event) {
     await refreshAll();
     if (state.page === "settings") await loadSettings();
     if (state.page === "logs") await loadLogs();
+    if (state.page === "exports") await loadExportSettings();
     await maybeShowOnboarding();
   } catch (error) {
     errorElement.textContent = error.message;
@@ -748,26 +755,29 @@ function closeAppearanceMenu() {
 }
 
 function showPage(page, updateHistory) {
-  state.page = ["media", "settings", "logs"].includes(page) ? page : "dashboard";
+  state.page = ["media", "settings", "logs", "backup", "exports"].includes(page) ? page : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
   $("media-page").hidden = state.page !== "media";
   $("settings-page").hidden = state.page !== "settings";
   $("logs-page").hidden = state.page !== "logs";
+  $("backup-page").hidden = state.page !== "backup";
+  $("exports-page").hidden = state.page !== "exports";
   document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
   closeNavigation();
   closeAppearanceMenu();
-  const pagePath = state.page === "media" ? "/media" : state.page === "settings" ? "/settings" : state.page === "logs" ? "/logs" : "/";
+  const pagePath = state.page === "dashboard" ? "/" : `/${state.page}`;
   if (updateHistory) window.history.pushState({page:state.page}, "", pagePath);
   if (state.page === "media" && !appView.hidden) loadMediaAssets();
   globalThis.TeslaBoxSettingsLayout?.enterPage();
-  if (state.page === "settings" && !appView.hidden) loadSettings();
+  if (state.page === "settings" && !appView.hidden && !state.settingsLoaded) loadSettings();
+  if (state.page === "exports" && !appView.hidden) loadExportSettings();
   if (state.page === "logs" && !appView.hidden) loadLogs();
   scheduleLogsRefresh();
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
 window.addEventListener("popstate", () => {
-  const page = window.location.pathname === "/media" ? "media" : window.location.pathname === "/settings" ? "settings" : window.location.pathname === "/logs" ? "logs" : "dashboard";
+  const page = pageFromPath(window.location.pathname);
   showPage(page, false);
 });
 
@@ -1400,20 +1410,9 @@ async function loadSettings() {
       apply(request("/api/v1/maintenance"), (value) => { state.maintenance = value; renderMaintenanceSettings(value); }, (error) => renderMaintenanceUnavailable(error.message)),
       apply(request("/api/v1/storage/snapshot-reserve"), renderSnapshotReserveStatus, () => {}),
       apply(request("/api/v1/fan"), (value) => { if (!globalThis.TeslaBoxSettingsLayout?.isDirty("fan-settings-title")) { state.fan = value; renderFanSettings(); } }, (error) => renderFanUnavailable(error.message)),
-      Promise.allSettled([request("/api/v1/export-settings"), request("/api/v1/exports/history")]).then((values) => {
-        if (!current()) return false;
-        const [settingsResult, historyResult] = values;
-        if (settingsResult.status === "fulfilled" && historyResult.status === "fulfilled") {
-          state.exportSettings = settingsResult.value;
-          state.exportHistory = historyResult.value;
-          renderExportSettings();
-          return true;
-        }
-        renderExportSettingsUnavailable(settingsResult.status === "rejected" ? settingsResult.reason.message : historyResult.reason.message);
-        return false;
-      }),
     ]);
     if (!current()) return;
+    state.settingsLoaded = true;
     if (results.slice(0, 4).every(Boolean)) setSettingsNotice("设置已更新", false, false);
     else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
   } finally {
@@ -1532,12 +1531,13 @@ function renderExportSettings() {
   const retainSelect = $("export-retain-count");
   if (!globalThis.TeslaBoxSettingsLayout?.isDirty("export-settings-title")) {
     $("export-delete-after-download").checked = deleteAfterDownload;
-  if ([...retainSelect.options].some((option) => Number(option.value) === Number(settings.retain_count))) retainSelect.value = String(settings.retain_count);
-  else retainSelect.value = "8";
+    $("export-cache-idle-hours").value = String(settings.cache_idle_hours ?? 24);
+    if ([...retainSelect.options].some((option) => Number(option.value) === Number(settings.retain_count))) retainSelect.value = String(settings.retain_count);
+    else retainSelect.value = "8";
   }
   $("export-settings-save").disabled = false;
   $("export-history-refresh").disabled = false;
-  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${settings.retain_count} 个`;
+  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${settings.retain_count || 8} 个`;
   $("export-retention-status").className = "badge ok";
   renderExportRetentionControls();
   const history = Array.isArray(state.exportHistory) ? state.exportHistory : [];
@@ -1625,6 +1625,7 @@ async function saveExportSettings() {
       body:JSON.stringify({
         delete_after_download:$("export-delete-after-download").checked,
         retain_count:Number($("export-retain-count").value),
+		cache_idle_hours:Number($("export-cache-idle-hours").value),
       }),
     });
     globalThis.TeslaBoxSettingsLayout?.markClean("export-settings-title");
@@ -2880,7 +2881,7 @@ function supportedWiFiSecurity(security) {
 }
 
 function setSettingsNotice(message, error, toast = true) {
-  presentNotice($("settings-notice"), message, error, toast);
+  presentNotice($(state.page === "exports" ? "exports-notice" : "settings-notice"), message, error, toast);
 }
 
 async function loadStatus() {
@@ -3210,6 +3211,86 @@ function renderArchiveTimeline() {
   updateRecordingBulkActions();
 }
 
+let activeRecordingMenu = null;
+
+function closeRecordingMenu(restoreFocus = false) {
+  if (!activeRecordingMenu) return;
+  const {button, panel} = activeRecordingMenu;
+  panel.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  activeRecordingMenu = null;
+  if (restoreFocus && button.isConnected) button.focus();
+}
+
+document.addEventListener("click", (event) => {
+  if (activeRecordingMenu && !activeRecordingMenu.container.contains(event.target)) closeRecordingMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && activeRecordingMenu) {
+    event.preventDefault();
+    closeRecordingMenu(true);
+  }
+});
+window.addEventListener("resize", () => closeRecordingMenu());
+document.addEventListener("scroll", () => closeRecordingMenu(), true);
+
+function createRecordingMenu(session) {
+  const container = document.createElement("div");
+  container.className = "session-more";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "session-more-toggle";
+  button.textContent = "⋯";
+  button.title = "更多";
+  button.setAttribute("aria-label", `更多操作：${formatSessionRange(session.start_at, session.end_at)}`);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  const panel = document.createElement("div");
+  panel.className = "session-more-menu";
+  panel.id = `recording-menu-${session.id}`;
+  panel.hidden = true;
+  panel.setAttribute("role", "menu");
+  panel.setAttribute("aria-label", "录像操作");
+  button.setAttribute("aria-controls", panel.id);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "session-menu-delete";
+  remove.textContent = "删除";
+  remove.setAttribute("role", "menuitem");
+  remove.disabled = recordingDeleteInProgress || session.cached || !["saved", "sentry", "recent"].includes(session.clip_type);
+  remove.addEventListener("click", () => { void deleteRecordingSession(session, remove); });
+  panel.append(remove);
+  panel.addEventListener("click", (event) => {
+    if (event.target.closest("[role='menuitem']")) closeRecordingMenu();
+  });
+  panel.addEventListener("keydown", (event) => {
+    const items = [...panel.querySelectorAll("[role='menuitem']:not(:disabled)")];
+    const index = items.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && items.length) {
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length-1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[next].focus();
+    } else if (event.key === "Tab") closeRecordingMenu();
+  });
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const wasOpen = activeRecordingMenu?.button === button;
+    closeRecordingMenu();
+    if (wasOpen) return;
+    panel.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    // 固定定位使下拉菜单不被卡片的圆角裁剪，窄屏和靠近底部时仍留在可视区域。
+    const anchor = button.getBoundingClientRect();
+    const box = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(8, Math.min(anchor.right-box.width, window.innerWidth-box.width-8))}px`;
+    panel.style.top = `${Math.max(8, Math.min(anchor.bottom+6, window.innerHeight-box.height-8))}px`;
+    activeRecordingMenu = {container, button, panel};
+    panel.querySelector("[role='menuitem']:not(:disabled)")?.focus({preventScroll:true});
+  });
+  container.append(button, panel);
+  return container;
+}
+
 function createSessionTimeline(session) {
   const card = document.createElement("article");
   card.className = `session-card clip-${clipTypeClass(session.clip_type)}`;
@@ -3244,6 +3325,7 @@ function createSessionTimeline(session) {
     head.append(thumbnail);
   }
   const heading = document.createElement("div");
+  heading.className = "session-heading";
   if (recordingDeleteMode && selectable) {
     const selector = document.createElement("p");
     selector.className = "session-select";
@@ -3276,7 +3358,7 @@ function createSessionTimeline(session) {
     locationLabel.textContent = location;
     asideMeta.append(locationLabel);
   }
-  asideMeta.append(duration);
+  asideMeta.append(duration, createRecordingMenu(session));
   aside.append(asideMeta);
   heading.append(title, meta);
   const eventSummary = createEventSummary(session.event_metadata);
@@ -3297,16 +3379,6 @@ function createSessionTimeline(session) {
   const actions = document.createElement("div");
   actions.className = "session-actions";
   actions.append(open);
-  if (session.clip_type === "recent") {
-    const remove = document.createElement("button");
-    remove.className = "ghost session-delete";
-    remove.type = "button";
-    remove.disabled = recordingDeleteInProgress;
-    if (session.cached) remove.disabled = true;
-    remove.textContent = "删除此段最近录像";
-    remove.addEventListener("click", () => deleteRecordingSession(session, remove));
-    actions.append(remove);
-  }
   if (!session.complete) {
     const status = document.createElement("span");
     status.className = "session-warning";
@@ -3326,6 +3398,7 @@ function createSessionTimeline(session) {
   }
 
   card.append(head, body);
+  globalThis.TeslaBoxNASUploads?.attachSession(card, session);
   return card;
 }
 
@@ -4838,15 +4911,17 @@ async function cancelExportTask() {
 }
 
 function renderExportTask(task) {
+  globalThis.TeslaBoxSettingsLayout?.renderExportTask(task);
   const source = task.request?.mode === "source";
   const labels = {queued:"正在排队", running:source ? "正在打包" : "正在导出", completed:source ? "打包完成" : "导出完成", failed:source ? "打包失败" : "导出失败", canceled:"已取消"};
   const running = ["queued", "running"].includes(task.state);
   $("export-task-status").hidden = false;
-  $("export-state").textContent = labels[task.state] || task.state;
+  $("export-state").textContent = task.state === "running" && task.phase === "preparing" ? "正在准备录像" : (labels[task.state] || task.state);
   $("export-progress").value = task.progress_percent || 0;
   const size = task.output_bytes ? ` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
   const files = source && task.file_count ? ` · ${task.file_count} 个源文件` : "";
-  $("export-detail").textContent = task.error || (running ? `已完成 ${task.progress_percent || 0}%${files}${size}` : `可以修改参数后再次导出${files}${size}`);
+  const copyDetail = task.phase === "preparing" ? `准备录像 ${formatBytes(task.copied_bytes || 0)} / ${formatBytes(task.copy_total_bytes || 0)}` : `已完成 ${task.progress_percent || 0}%`;
+  $("export-detail").textContent = task.error || (running ? `${copyDetail}${files}${size}` : `可以修改参数后再次导出${files}${size}`);
   $("export-cancel").hidden = !running;
   $("export-download").hidden = task.state !== "completed" || !task.download_ready;
   $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";

@@ -33,8 +33,11 @@ import (
 	"github.com/wen-ryon/teslabox/internal/media"
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/mediabundle"
+	"github.com/wen-ryon/teslabox/internal/nasupload"
 	"github.com/wen-ryon/teslabox/internal/onboarding"
 	"github.com/wen-ryon/teslabox/internal/platform"
+	"github.com/wen-ryon/teslabox/internal/recordingcache"
+	"github.com/wen-ryon/teslabox/internal/runtimecomponents"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
 	"github.com/wen-ryon/teslabox/internal/storage"
@@ -258,13 +261,31 @@ func main() {
 	// TeslaUSB 是车辆启动时最有时效性的链路；Web、网络和媒体管理组件不应占用其首次绑定机会。
 	go manager.Run(ctx)
 	logger.Info("TeslaUSB 核心状态机已启动", "startup_elapsed_ms", time.Since(processStartedAt).Milliseconds())
-	if err := mediabundle.EnsureEmbedded(ctx, logger); err != nil {
-		logger.Error("安装正式版本内置媒体运行时失败", "error", err)
+	var runtimeManager *runtimecomponents.Manager
+	runtimeDone := make(chan struct{})
+	descriptor, independent, descriptorErr := runtimecomponents.Default()
+	if descriptorErr != nil {
+		logger.Error("独立组件发行描述无效", "error", descriptorErr)
 		os.Exit(1)
 	}
-	if err := carplaybundle.EnsureEmbedded(ctx, logger); err != nil {
-		logger.Error("安装正式版本内置 CarPlay 运行时失败", "error", err)
-		os.Exit(1)
+	if independent {
+		runtimeManager, err = runtimecomponents.NewProduct(descriptor, "/var/lib/teslabox-system/runtime-cache", logger)
+		if err != nil {
+			logger.Error("独立组件配置无效", "error", err)
+			os.Exit(1)
+		}
+		// 公网下载只影响组件就绪，录像核心、管理入口和恢复缓存引用不等待它。
+		go func() { defer close(runtimeDone); runtimeManager.Run(ctx) }()
+	} else {
+		close(runtimeDone)
+		if err := mediabundle.EnsureEmbedded(ctx, logger); err != nil {
+			logger.Error("安装内置媒体运行时失败", "error", err)
+			os.Exit(1)
+		}
+		if err := carplaybundle.EnsureEmbedded(ctx, logger); err != nil {
+			logger.Error("安装内置 CarPlay 运行时失败", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	driveInspector := driveinit.NewLSBLKInspector(runner)
@@ -325,17 +346,48 @@ func main() {
 		os.Exit(1)
 	}
 	mediaCompositor.SetActivityHook(func() func() { return fanManager.Begin("multi") })
+	recordingCache, err := recordingcache.New(recordingcache.Config{
+		Root: filepath.Join(cfg.MediaWorkPath, "recordings"), MediaRoot: cfg.MediaWorkPath,
+		IdleTTL: cfg.RecordingCacheTTL,
+	})
+	if err != nil {
+		logger.Error("初始化系统盘录像缓存失败", "error", err)
+		os.Exit(1)
+	}
 	mediaExporter, err := media.NewExporter(runner, media.ExportConfig{
-		FFmpegPath:    cfg.FFmpegPath,
-		OutputDir:     filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
-		StatePath:     cfg.ExportStatePath,
-		QueueSize:     cfg.ExportQueueSize,
-		MaxDuration:   cfg.ExportMaxDuration,
-		Logger:        logger,
-		BeginActivity: func() func() { return fanManager.Begin("export") },
+		FFmpegPath:      cfg.FFmpegPath,
+		OutputDir:       filepath.Join(cfg.MediaWorkPath, "exports"),
+		LegacyOutputDir: filepath.Join(cfg.DataMountPath, filepath.FromSlash(cfg.ExportPath)),
+		Cache:           recordingCache,
+		StatePath:       cfg.ExportStatePath,
+		QueueSize:       cfg.ExportQueueSize,
+		MaxDuration:     cfg.ExportMaxDuration,
+		Logger:          logger,
+		BeginActivity:   func() func() { return fanManager.Begin("export") },
 	})
 	if err != nil {
 		logger.Error("初始化视频导出器失败", "error", err)
+		os.Exit(1)
+	}
+	uploadRoot := filepath.Join(cfg.MediaWorkPath, "uploads")
+	rclonePath := os.Getenv("TESLABOX_RCLONE_PATH")
+	if independent {
+		for _, c := range descriptor.Components {
+			if c.ID == "nas" {
+				rclonePath = runtimecomponents.NASExecutable("/opt/teslabox/backup/versions", c)
+			}
+		}
+	}
+	if rclonePath == "" {
+		rclonePath = "/opt/teslabox/backup/bin/rclone"
+	}
+	nasUploads, err := nasupload.New(nasupload.Config{
+		Root: uploadRoot, Cache: recordingCache,
+		Transport: &nasupload.Rclone{Executable: rclonePath, WorkDir: uploadRoot},
+		Processor: media.NewNASProcessor(runner, mediaInspector, cfg.FFmpegPath),
+	})
+	if err != nil {
+		logger.Error("初始化 NAS 上传器失败，拒绝丢弃已有上传任务", "error", err)
 		os.Exit(1)
 	}
 	mediaAssets, err := mediaassets.New(mediaassets.Config{
@@ -412,6 +464,7 @@ func main() {
 		api.WithMediaAssetsAdmin(mediaAssets),
 		api.WithMediaCompositor(mediaCompositor),
 		api.WithExportAdmin(mediaExporter),
+		api.WithNASUploadAdmin(nasUploads),
 		api.WithUpdateAdmin(updateManager),
 		api.WithMaintenanceAutomation(maintenanceSettings),
 		api.WithDiagnostics(diagnostics.New(runner)),
@@ -420,6 +473,9 @@ func main() {
 		api.WithCarPlaySettings(carPlaySettings),
 		api.WithCarPlayPairing(carPlayPairing, ctx),
 	)
+	if runtimeManager != nil {
+		apiHandler = runtimeManager.Gate(apiHandler)
+	}
 	var webOptions []webui.HandlerOption
 	if cfg.CarPlayBrowserToken != "" {
 		webOptions = append(webOptions, webui.WithCarPlay(webui.NewCarPlayProxy(cfg.CarPlayBrowserToken)))
@@ -427,14 +483,38 @@ func main() {
 			webOptions = append(webOptions, webui.WithCarPlayHome(cfg.HTTPSDomain))
 		}
 	}
-	handler := carplaybundle.HealthHandler(webui.NewHandler(apiHandler, authManager, logger, webOptions...))
+	handler := webui.NewHandler(apiHandler, authManager, logger, webOptions...)
+	if runtimeManager == nil {
+		handler = carplaybundle.HealthHandler(handler)
+	}
 	go deviceAdmin.Run(ctx)
 	go func() {
 		if runErr := automationService.Run(ctx); runErr != nil && ctx.Err() == nil {
 			logger.Error("本机自动化接口异常退出", "error", runErr)
 		}
 	}()
-	go mediaExporter.Run(ctx)
+	go func() {
+		if runtimeManager != nil {
+			runtimeManager.WaitReady(ctx, "media")
+		}
+		mediaExporter.Run(ctx)
+	}()
+	go func() {
+		if runtimeManager != nil {
+			runtimeManager.WaitReady(ctx, "media", "nas")
+		}
+		nasUploads.Run(ctx)
+	}()
+	autoUploadDone := make(chan struct{})
+	go func() {
+		defer close(autoUploadDone)
+		if runtimeManager != nil && !runtimeManager.WaitReady(ctx, "media", "nas") {
+			return
+		}
+		api.RunEventUploadsInLocation(ctx, manager, nasUploads, mediaInspector, logger, teslaTimeLocation)
+	}()
+	// 上传和导出构造器先恢复缓存引用，清理器最后启动。
+	go recordingCache.Run(ctx)
 	go fanManager.Run(ctx)
 	watchReloadSignal(ctx, manager, reloadCh)
 
@@ -505,6 +585,19 @@ func main() {
 	}
 	if err := mediaExporter.Wait(shutdownCtx); err != nil {
 		logger.Error("等待视频导出器停止失败", "error", err)
+	}
+	if err := nasUploads.Wait(shutdownCtx); err != nil {
+		logger.Error("等待录像上传器停止失败", "error", err)
+	}
+	select {
+	case <-autoUploadDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("等待自动事件扫描退出超时")
+	}
+	select {
+	case <-runtimeDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("运行时安装尚未退出")
 	}
 	if err := manager.Close(shutdownCtx); err != nil {
 		logger.Error("停止 TeslaUSB 状态管理器失败", "error", err)

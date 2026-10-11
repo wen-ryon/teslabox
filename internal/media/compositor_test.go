@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,37 @@ import (
 type fakeStreamingRunner struct {
 	name string
 	args []string
+}
+
+func TestCompositorHLSKeepsRawTransportSeparate(t *testing.T) {
+	t.Parallel()
+	runner := &fakeStreamingRunner{}
+	compositor, err := NewCompositor(runner, "/opt/teslabox/media/bin/ffmpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	request := CompositeRequest{Layout: "single", Camera: "front", Quality: "smooth", Inputs: map[string]string{"front": "/snapshot/front.mp4"}, HLSDirectory: directory}
+	if err := compositor.Stream(t.Context(), request, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(runner.args, " ")
+	for _, value := range []string{"-f hls", "-hls_time 1", "-hls_segment_type fmp4", "independent_segments+temp_file", filepath.Join(directory, "index.m3u8"), "-g 10"} {
+		if !strings.Contains(args, value) {
+			t.Fatalf("missing %q in %s", value, args)
+		}
+	}
+	if strings.Contains(args, "pipe:1") {
+		t.Fatal("HLS must not use the unbounded HTTP stream")
+	}
+	request.HLSDirectory = ""
+	if err := compositor.Stream(t.Context(), request, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	args = strings.Join(runner.args, " ")
+	if !strings.Contains(args, "pipe:1") || strings.Contains(args, "-f hls") {
+		t.Fatalf("raw transport changed: %s", args)
+	}
 }
 
 func (r *fakeStreamingRunner) RunStreaming(_ context.Context, name string, args []string, output io.Writer) error {
@@ -77,7 +109,7 @@ func TestCompositorStreamBuildsSixCameraPipeline(t *testing.T) {
 	joined := strings.Join(runner.args, " ")
 	for _, expected := range []string{
 		"-ss 50.000", "fps=24", "setpts=PTS-STARTPTS", "scale_rkrga=w=556:h=360", "xstack=inputs=6", "shortest=0",
-		"layout=0_0|556_0|1112_0|0_360|556_360|1112_360", "-b:v 3000k", "frag_keyframe+empty_moov+default_base_moof",
+		"layout=0_0|556_0|1112_0|0_360|556_360|1112_360", "-b:v 3000k", "-g 12", "frag_keyframe+empty_moov+default_base_moof",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("args do not contain %q: %s", expected, joined)

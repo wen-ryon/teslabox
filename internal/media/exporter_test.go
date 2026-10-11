@@ -119,12 +119,11 @@ func TestExporterCompletesTaskAndReleasesSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 完成状态可能先于 defer 释放快照公布，两个结果都就绪后再断言。
-		if task.State == ExportCompleted && releases.Load() == 1 {
+		if task.State == ExportCompleted {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("task state = %s, releases = %d", task.State, releases.Load())
+			t.Fatalf("task state = %s", task.State)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -771,12 +770,11 @@ func TestExporterPackagesSelectedSourceFilesWithoutTranscoding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 完成状态可能先于 defer 释放快照公布，两个结果都就绪后再断言。
-		if task.State == ExportCompleted && releases.Load() == 1 {
+		if task.State == ExportCompleted {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("task state = %s, releases = %d", task.State, releases.Load())
+			t.Fatalf("task state = %s", task.State)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

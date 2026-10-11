@@ -11,6 +11,23 @@ import (
 )
 
 func ensureOutputFilesystem(outputDir string) error {
+	return checkOutputFilesystem(outputDir, false)
+}
+
+func ensureSystemOutputFilesystem(outputDir string) error {
+	return checkOutputFilesystem(outputDir, true)
+}
+
+func syncExportDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func checkOutputFilesystem(outputDir string, systemDisk bool) error {
 	ancestor := filepath.Clean(outputDir)
 	for {
 		if _, err := os.Stat(ancestor); err == nil {
@@ -32,7 +49,10 @@ func ensureOutputFilesystem(outputDir string) error {
 	if err := syscall.Stat("/", &rootStat); err != nil {
 		return fmt.Errorf("读取系统盘文件系统: %w", err)
 	}
-	if outputStat.Dev == rootStat.Dev {
+	if systemDisk && outputStat.Dev != rootStat.Dev {
+		return errors.New("媒体工作目录必须位于系统盘")
+	}
+	if !systemDisk && outputStat.Dev == rootStat.Dev {
 		return fmt.Errorf("外接数据盘尚未挂载，拒绝把导出文件写入 TF 系统盘")
 	}
 	return nil

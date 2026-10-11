@@ -1,7 +1,7 @@
 /* 共用已有主题和控件，设置分类与内容在宽屏上分别滚动。 */
 .settings-page { max-width: 1180px; display: flex; flex-direction: column; height: calc(100dvh / var(--ui-zoom) - 72px); padding-top: 28px; padding-bottom: 24px; }
-.settings-page > .settings-hero h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; letter-spacing: -.035em; }
-.settings-page > .settings-hero { padding: 10px 0 22px; align-items: center; }
+.settings-page > .settings-hero h1, .workspace-page > .settings-hero h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; letter-spacing: -.035em; }
+.settings-page > .settings-hero, .workspace-page > .settings-hero { padding: 10px 0 22px; align-items: center; }
 .settings-layout { display: grid; grid-template-columns: 246px minmax(0,1fr); gap: 26px; flex: 1; min-height: 0; margin-top: 16px; }
 .settings-layout .settings-tabs { position: static; display: flex; flex-direction: column; align-self: stretch; gap: 6px; margin: 0; padding: 8px; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--radius); }
 .settings-layout .settings-category { display: flex; align-items: center; justify-content: flex-start; gap: 11px; width: 100%; min-height: 72px; padding: 12px; border: 1px solid transparent; border-radius: 12px; background: transparent; text-align: left; box-shadow: none; }
@@ -45,8 +45,56 @@
 .settings-content .settings-form { margin-top: 18px; gap: 16px; }
 .settings-content .settings-form .form-grid label { display: grid; gap: 8px; }
 .settings-content .form-grid + p { margin-top: 12px; margin-bottom: 18px; }
-.settings-content .settings-card p + .settings-form { margin-top: 18px; }
-.settings-content .form-actions { gap: 16px; margin-top: 20px; }
+.settings-content .settings-card p + .settings-form, .workspace-page .settings-card p + .settings-form { margin-top: 18px; }
+.settings-content .form-actions, .workspace-page .form-actions { gap: 16px; margin-top: 20px; }
+.draft-notice { color: var(--warning); font-size: var(--ui-meta-font); line-height: 1.6; padding: 12px 14px; margin: 0 0 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface); }
+.workspace-page .settings-section { margin-top: 0; }
+.workspace-page .settings-card { margin-top: 18px; }
+.workspace-page .settings-card:first-child { margin-top: 0; }
+.workspace-tabs { display: flex; gap: 6px; width: fit-content; max-width: 100%; margin: 0 0 24px; padding: 5px; border: 1px solid var(--line-soft); border-radius: 13px; background: var(--surface); }
+.workspace-tabs button { display: flex; gap: 9px; align-items: center; min-height: 40px; padding: 0 20px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); white-space: nowrap; }
+.workspace-tabs button.active { background: var(--accent-soft); color: var(--text); border-color: var(--accent); }
+.workspace-tabs .settings-draft-dot { margin-left: 0; }
+.export-history-card .export-history-head { margin-top: 0; }
+#exports-content { margin-top: 18px; }
+.workspace-page .export-retention-controls { display: grid; gap: 18px; margin: 22px 0 18px; }
+.workspace-page .export-retention-controls > label:not(.toggle-choice) { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.workspace-page .export-retention-controls select, .workspace-page .export-retention-controls input[type="number"] { width: 130px; min-width: 0; }
+.workspace-page .export-retention-controls .toggle-choice { width: 100%; margin: 0; }
+.export-live-task { display: grid; gap: 14px; }
+.export-live-task .export-history-actions { justify-content: flex-start; }
+.workspace-page .nas-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
+@media (min-width: 760px) and (max-width: 1000px) {
+  .settings-layout { grid-template-columns: 218px minmax(0,1fr); gap: 18px; }
+  .settings-content .fan-live-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .settings-content .fan-range { grid-template-columns: minmax(0,1fr) 62px; }
+  .settings-content .fan-range > span { grid-column: 1 / -1; }
+  .settings-content .fan-levels, .settings-content .fan-scene-grid { grid-template-columns: minmax(0,1fr); }
+}
+@media (max-width: 759px) {
+  .settings-page, .workspace-page { padding-top: 22px; }
+  .settings-page { display: block; height: auto; padding-bottom: 90px; }
+  .settings-page > .settings-hero, .workspace-page > .settings-hero { flex-wrap: wrap; gap: 14px; padding-top: 0; }
+  .settings-page .hero-copy, .workspace-page .hero-copy { font-size: 12px; line-height: 1.7; }
+  .settings-layout { display: block; height: auto; min-height: 0; margin-top: 8px; }
+  .settings-layout .settings-tabs { padding: 6px; overflow: visible; }
+  .settings-layout .settings-category { min-height: 78px; }
+  .settings-category-arrow { display: block; }
+  .settings-layout .settings-category.active { background: transparent; border-color: transparent; }
+  .settings-content { display: none; overflow: visible; padding: 0; }
+  .settings-detail-open .settings-tabs { display: none; }
+  .settings-detail-open .settings-content { display: block; }
+  .settings-detail-bar { gap: 14px; }
+  .settings-detail-bar #settings-back { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; min-height: 36px; }
+  .settings-detail-bar h2 { font-size: 20px; }
+  .settings-single-function .settings-detail-bar { display: flex; }
+  .settings-function-menu .settings-function-entry { padding: 16px; gap: 12px; }
+  .workspace-tabs { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); width: 100%; gap: 4px; }
+  .workspace-tabs button { justify-content: center; padding: 0 6px; font-size: 12px; gap: 5px; }
+  .workspace-page .nas-fields { grid-template-columns: minmax(0,1fr); }
+  .workspace-page .settings-card { padding: 18px 16px; }
+}
+
 .carplay-settings-form { display: grid; gap: 16px; }
 .carplay-settings-form .carplay-settings-card { margin-top: 0; }
 .carplay-card-heading { margin-bottom: 20px; }
@@ -70,29 +118,3 @@
   #carplay-pairing-panel > button { width: 100%; }
 }
 .draft-notice { color: var(--warning); font-size: var(--ui-meta-font); line-height: 1.6; padding: 12px 14px; margin: 0 0 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface); }
-@media (min-width: 760px) and (max-width: 1000px) {
-  .settings-layout { grid-template-columns: 218px minmax(0,1fr); gap: 18px; }
-  .settings-content .fan-live-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .settings-content .fan-range { grid-template-columns: minmax(0,1fr) 62px; }
-  .settings-content .fan-range > span { grid-column: 1 / -1; }
-  .settings-content .fan-levels, .settings-content .fan-scene-grid { grid-template-columns: minmax(0,1fr); }
-}
-@media (max-width: 759px) {
-.settings-page { padding-top: 22px; }
-  .settings-page { display: block; height: auto; padding-bottom: 90px; }
-.settings-page > .settings-hero { flex-wrap: wrap; gap: 14px; padding-top: 0; }
-.settings-page .hero-copy { font-size: 12px; line-height: 1.7; }
-  .settings-layout { display: block; height: auto; min-height: 0; margin-top: 8px; }
-  .settings-layout .settings-tabs { padding: 6px; overflow: visible; }
-  .settings-layout .settings-category { min-height: 78px; }
-  .settings-category-arrow { display: block; }
-  .settings-layout .settings-category.active { background: transparent; border-color: transparent; }
-  .settings-content { display: none; overflow: visible; padding: 0; }
-  .settings-detail-open .settings-tabs { display: none; }
-  .settings-detail-open .settings-content { display: block; }
-  .settings-detail-bar { gap: 14px; }
-  .settings-detail-bar #settings-back { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; min-height: 36px; }
-  .settings-detail-bar h2 { font-size: 20px; }
-  .settings-single-function .settings-detail-bar { display: flex; }
-  .settings-function-menu .settings-function-entry { padding: 16px; gap: 12px; }
-}

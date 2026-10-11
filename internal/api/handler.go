@@ -177,6 +177,7 @@ type handlerOptions struct {
 	mediaAssets           MediaAssetsAdmin
 	mediaCompositor       MediaCompositor
 	exportAdmin           ExportAdmin
+	nasUploadAdmin        NASUploadAdmin
 	updateAdmin           UpdateAdmin
 	diagnostics           Diagnostics
 	automation            MaintenanceAutomation
@@ -380,6 +381,9 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	}
 	if settings.exportAdmin != nil {
 		registerExportRoutes(mux, controller, settings.exportAdmin, settings.mediaInspector, logger)
+	}
+	if settings.nasUploadAdmin != nil {
+		registerNASUploadRoutes(mux, controller, settings.nasUploadAdmin, sessionCatalog, logger)
 	}
 	if settings.updateAdmin != nil {
 		registerUpdateRoutes(mux, settings.updateAdmin, settings.gadgetAdmin, settings.deviceAdmin, settings.automation, logger)
@@ -869,7 +873,28 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			return
 		}
 		populateOriginalExportCanvas(r.Context(), inspector, request, &source, logger)
-		if !exportSpaceAvailable(state, estimated) {
+		systemDisk := false
+		if staged, ok := admin.(interface{ UsesSystemDisk() bool }); ok {
+			systemDisk = staged.UsesSystemDisk()
+		}
+		if systemDisk {
+			identityProvider, ok := controller.(interface {
+				RecordingIdentity(service.Snapshot) (string, error)
+			})
+			if !ok {
+				release()
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "录像盘身份校验不可用"})
+				return
+			}
+			source.SourceIdentity, err = identityProvider.RecordingIdentity(state)
+			if err != nil {
+				release()
+				writeExportError(w, logger, "确认暂存录像身份失败", err)
+				return
+			}
+			source.SourceRoot, source.SnapshotVersion = state.MediaSnapshot.MountPath, state.MediaSnapshot.ID
+		}
+		if !systemDisk && !exportSpaceAvailable(state, estimated) {
 			release()
 			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "数据盘剩余空间不足，无法在保留车端录像安全余量的同时完成导出"})
 			return
@@ -905,6 +930,11 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			return
 		}
 		defer file.Close()
+		releaseDownload := func() {}
+		if downloads, ok := admin.(interface{ CloseDownload(string) }); ok {
+			releaseDownload = sync.OnceFunc(func() { downloads.CloseDownload(task.ID) })
+		}
+		defer releaseDownload()
 		info, err := file.Stat()
 		if err != nil {
 			logger.Warn("读取导出文件失败", "task_id", task.ID, "error", err)
@@ -931,6 +961,7 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 				logger.Warn("关闭已下载导出文件失败，已保留历史文件", "task_id", task.ID, "error", err)
 				return
 			}
+			releaseDownload()
 			if err := admin.Consume(task.ID); err != nil {
 				logger.Warn("导出文件已下载但自动清理失败", "task_id", task.ID, "error", err)
 			}
@@ -2281,7 +2312,13 @@ type videoGroup struct {
 	Videos        []teslacam.Video        `json:"videos"`
 }
 
+type videoMomentRef struct {
+	ID         string    `json:"id"`
+	RecordedAt time.Time `json:"recorded_at"`
+}
+
 type videoSession struct {
+	MomentRefs      []videoMomentRef        `json:"moment_refs,omitempty"`
 	Cached          bool                    `json:"cached,omitempty"`
 	Coverage        []recentCoverage        `json:"coverage,omitempty"`
 	SnapshotID      string                  `json:"snapshot_id,omitempty"`
@@ -2429,6 +2466,10 @@ func writeVideoSessionPage(w http.ResponseWriter, r *http.Request, sessions []vi
 		refineVideoSessionDurations("", &items[index])
 		if items[index].RecentWindow {
 			items[index].Coverage = recentSessionCoverage(items[index])
+		}
+		items[index].MomentRefs = make([]videoMomentRef, 0, len(items[index].Moments))
+		for _, moment := range items[index].Moments {
+			items[index].MomentRefs = append(items[index].MomentRefs, videoMomentRef{ID: moment.ID, RecordedAt: moment.RecordedAt})
 		}
 		items[index].Moments = nil
 	}

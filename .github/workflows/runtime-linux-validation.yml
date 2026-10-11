@@ -1,0 +1,132 @@
+name: RC1 isolated Linux validation
+
+# 仅候选分支测试，不接生产密钥、不构建签名包、不修改发布通道。
+on:
+  push:
+    branches: [codex/rc1-runtime-linux-validation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  CGO_ENABLED: '1'
+
+jobs:
+  go:
+    name: Linux AMD64 Go, vet and race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.3'
+          cache: false
+      - name: Record source and toolchain
+        run: |
+          mkdir -p validation-logs
+          git rev-parse HEAD | tee validation-logs/commit.txt
+          go version | tee validation-logs/go-version.txt
+          uname -a | tee validation-logs/platform.txt
+      - name: All Go tests
+        run: go test -count=1 -shuffle=on -json ./... 2>&1 | tee validation-logs/go-test.jsonl
+      - name: Go vet
+        if: ${{ !cancelled() }}
+        run: go vet ./... 2>&1 | tee validation-logs/go-vet.log
+      - name: All Go race tests
+        if: ${{ !cancelled() }}
+        run: go test -race -count=1 -shuffle=on -json ./... 2>&1 | tee validation-logs/go-race.jsonl
+      - name: Preserve test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-amd64-go-${{ github.sha }}
+          path: validation-logs/
+          retention-days: 14
+          if-no-files-found: error
+
+  transactions:
+    name: Linux AMD64 media and CarPlay transactions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.3'
+          cache: false
+      - name: Record source and scope
+        run: |
+          mkdir -p validation-logs
+          git rev-parse HEAD | tee validation-logs/commit.txt
+          echo 'Linux AMD64 filesystem transactions; not Debian ARM64 tools or board acceptance.' | tee validation-logs/scope.txt
+      - name: Real Linux media A-B-A and legacy rollback
+        # root 仅用于临时目录的所有权反例，不启动服务，不访问目标板。
+        run: |
+          sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 go test -count=1 -json ./internal/mediabundle ./internal/carplaybundle ./internal/runtimecomponents 2>&1 | tee validation-logs/transactions.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('validation-logs/transactions.jsonl').read_text().splitlines() if line.startswith('{')]
+          required = ['TestMediaVersionsRollbackAndLegacyRetention', 'TestMediaFailedPreflightPreservesActive', 'TestMediaExistingVersionRejectsChangedLibraryAlias', 'TestStageArchiveRejectsOtherOwnedVersionInRootInstaller']
+          for name in required:
+              assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), f'{name} did not execute and pass'
+          PY
+      - name: CarPlay fcntl activation and recovery
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s internal/carplaybundle -p 'test_runtime_*.py' -v 2>&1 | tee validation-logs/carplay-transactions.log
+      - name: Installer shell regression
+        if: ${{ !cancelled() }}
+        run: |
+          bash -n deploy/install.sh
+          bash scripts/test-install-apt-snapshot.sh 2>&1 | tee validation-logs/installer-shell.log
+      - name: Preserve transaction evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-amd64-transactions-${{ github.sha }}
+          path: validation-logs/
+          retention-days: 14
+          if-no-files-found: error
+
+  frontend:
+    name: Node frontend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.11.1'
+          package-manager-cache: false
+      - name: Record source and Node
+        run: |
+          mkdir -p validation-logs
+          git rev-parse HEAD | tee validation-logs/commit.txt
+          node --version | tee validation-logs/node-version.txt
+      - name: All frontend tests
+        run: node --test internal/webui/*.test.cjs 2>&1 | tee validation-logs/node-tests.log
+      - name: Preserve frontend evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-${{ github.sha }}
+          path: validation-logs/
+          retention-days: 14
+          if-no-files-found: error

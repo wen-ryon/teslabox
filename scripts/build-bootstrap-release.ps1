@@ -9,6 +9,11 @@ param(
     [string]$ExpectedMainSHA256 = "",
     [string]$ExpectedHelperSHA256 = "",
     [string]$ExpectedMediaSHA256 = "",
+    [string]$RuntimeDescriptor = "",
+    [string]$ExpectedDescriptorSHA256 = "",
+    [string]$CarPlayArchive = "",
+    [string]$NASArchive = "",
+    [ValidateSet("media", "carplay", "nas")][string[]]$OfflineComponents = @(),
     [switch]$AllowDirty
 )
 
@@ -23,6 +28,10 @@ if ($fixedInputs -and ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$' -or
     $ExpectedMediaSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $AllowDirty)) {
     throw "Bootstrap requires the fixed commit, main/helper/media hashes and a clean source tree."
 }
+if ($RuntimeDescriptor -and ($ExpectedDescriptorSHA256 -cnotmatch '^[0-9a-f]{64}$' -or -not $CarPlayArchive -or -not $NASArchive -or -not $fixedInputs)) {
+    throw "Independent bootstrap requires fixed main/helper/media/descriptor inputs and all component archives."
+}
+if (-not $RuntimeDescriptor -and ($ExpectedDescriptorSHA256 -or $OfflineComponents.Count)) { throw "Offline components require a bound descriptor." }
 $fullCommit = (git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or ($ExpectedCommit -and $fullCommit -cne $ExpectedCommit)) {
     throw "Bootstrap source HEAD differs from the fixed release commit."
@@ -59,10 +68,15 @@ if (-not $AllowDirty) {
     }
 }
 
-$mainPath = (Resolve-Path (Join-Path $root $MainBinary)).Path
-$helperPath = (Resolve-Path (Join-Path $root $UpdateHelper)).Path
-$mediaPath = (Resolve-Path (Join-Path $root $MediaArchive)).Path
-$radxaKeyringPath = (Resolve-Path (Join-Path $root $RadxaKeyring)).Path
+function Resolve-ReleaseInput {
+    param([string]$Path)
+    if (-not [IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $root $Path }
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+$mainPath = Resolve-ReleaseInput $MainBinary
+$helperPath = Resolve-ReleaseInput $UpdateHelper
+$mediaPath = Resolve-ReleaseInput $MediaArchive
+$radxaKeyringPath = Resolve-ReleaseInput $RadxaKeyring
 $mediaChecksumPath = "$mediaPath.sha256"
 if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
     throw "The media archive checksum is missing: $mediaChecksumPath"
@@ -105,6 +119,26 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
     }
 }
 
+$descriptorBytes = $null
+$descriptorDirectory = Join-Path $root "internal/runtimecomponents/release"
+$runtimeDescription = $null
+$componentInputs = @{}
+if ($RuntimeDescriptor) {
+    if (Test-Path -LiteralPath $descriptorDirectory) { throw "Refusing to overwrite descriptor embed directory." }
+    $descriptorPath = (Resolve-Path -LiteralPath $RuntimeDescriptor).Path
+    if ((Get-FileHash -LiteralPath $descriptorPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedDescriptorSHA256) { throw "Bootstrap descriptor differs from fixed input." }
+    $descriptorBytes = [IO.File]::ReadAllBytes($descriptorPath)
+    $runtimeDescription = [Text.Encoding]::UTF8.GetString($descriptorBytes) | ConvertFrom-Json
+    $componentInputs = @{ media=$mediaPath; carplay=(Resolve-Path -LiteralPath $CarPlayArchive).Path; nas=(Resolve-Path -LiteralPath $NASArchive).Path }
+    $savedOS=$env:GOOS; $savedArch=$env:GOARCH
+    try {
+        $env:GOOS=(go env GOHOSTOS).Trim(); $env:GOARCH=(go env GOHOSTARCH).Trim()
+        go -C $root run .\cmd\teslabox-runtime -validate-descriptor $descriptorPath -bound-main $mainPath -input "media=$mediaPath" -input "carplay=$($componentInputs.carplay)" -input "nas=$($componentInputs.nas)"
+        if ($LASTEXITCODE -ne 0) { throw "Bootstrap main/descriptor/component binding failed." }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($descriptorPath)) -cne [Convert]::ToBase64String($descriptorBytes)) { throw "Bootstrap descriptor changed during validation." }
+    } finally { $env:GOOS=$savedOS; $env:GOARCH=$savedArch }
+}
+
 $output = [IO.Path]::GetFullPath((Join-Path $root $OutputDirectory))
 $stage = Join-Path $output "stage"
 $archive = Join-Path $output "teslabox-bootstrap-debian11-arm64.tar.gz"
@@ -126,6 +160,10 @@ foreach ($directory in $directories) {
 
 Copy-Item -LiteralPath $mainPath -Destination (Join-Path $stage "bin\teslabox")
 Copy-Item -LiteralPath $helperPath -Destination (Join-Path $stage "libexec\teslabox-update-helper")
+if ((Get-FileHash -LiteralPath (Join-Path $stage "bin/teslabox") -Algorithm SHA256).Hash.ToLowerInvariant() -cne $mainHash -or
+    (Get-FileHash -LiteralPath (Join-Path $stage "libexec/teslabox-update-helper") -Algorithm SHA256).Hash.ToLowerInvariant() -cne $helperHash) {
+    throw "Fixed executable input changed while copying bootstrap payload."
+}
 
 $commit = (git -C $root rev-parse --short=12 HEAD).Trim()
 if ($LASTEXITCODE -ne 0) {
@@ -146,6 +184,13 @@ try {
         @{ Package = ".\cmd\teslabox-image-init"; Output = "bin\teslabox-image-init" },
         @{ Package = ".\cmd\teslabox-gadget"; Output = "bin\teslabox-gadget" }
     )
+    if ($RuntimeDescriptor) {
+        New-Item -ItemType Directory -Path $descriptorDirectory | Out-Null
+        [IO.File]::WriteAllBytes((Join-Path $descriptorDirectory "descriptor.json"), $descriptorBytes)
+        go -C $root build -trimpath -tags componentdelivery -ldflags "-s -w" -o (Join-Path $stage "libexec/teslabox-runtime") .\cmd\teslabox-runtime
+        if ($LASTEXITCODE -ne 0) { throw "Failed to build bound runtime seed tool." }
+        [IO.File]::WriteAllBytes((Join-Path $stage "config/runtime-components.json"), $descriptorBytes)
+    }
     foreach ($command in $commands) {
         $target = Join-Path $stage $command.Output
         go -C $root build -trimpath -ldflags "-s -w" -o $target $command.Package
@@ -154,6 +199,10 @@ try {
         }
     }
 } finally {
+    if ($RuntimeDescriptor) {
+        Remove-Item -LiteralPath (Join-Path $descriptorDirectory "descriptor.json") -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $descriptorDirectory -ErrorAction SilentlyContinue
+    }
     $env:GOOS = $previousGOOS
     $env:GOARCH = $previousGOARCH
     $env:CGO_ENABLED = $previousCGO
@@ -185,8 +234,21 @@ foreach ($entry in $files.GetEnumerator()) {
         throw "Linux text file copy checksum mismatch: $destination"
     }
 }
-Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
-Copy-Item -LiteralPath $mediaChecksumPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz.sha256")
+if ($RuntimeDescriptor) {
+    # 基础录像检查工具原字节来自固定媒体输入，缺少大媒体包时也能运行录像核心。
+    python (Join-Path $root "scripts/prepare-runtime-bootstrap.py") --media $mediaPath --sha256 $mediaHash --output (Join-Path $stage "libexec/teslabox-fsck.exfat")
+    if ($LASTEXITCODE -ne 0) { throw "Failed to prepare resident recording check tool." }
+    foreach ($component in $runtimeDescription.components) {
+        if ($component.id -in $OfflineComponents) {
+            $cacheDir = Join-Path $stage "runtime-cache"
+            New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+            Copy-Item -LiteralPath $componentInputs[$component.id] -Destination (Join-Path $cacheDir "$($component.sha256).$($component.format)")
+        }
+    }
+} else {
+    Copy-Item -LiteralPath $mediaPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz")
+    Copy-Item -LiteralPath $mediaChecksumPath -Destination (Join-Path $stage "media\teslabox-media-debian11-arm64.tar.gz.sha256")
+}
 Copy-Item -LiteralPath $radxaKeyringPath -Destination (Join-Path $stage "keyring\radxa-archive-keyring_0.2.2_all.deb")
 
 $info = @(
@@ -196,6 +258,8 @@ $info = @(
     "main_sha256=$mainHash",
     "helper_sha256=$helperHash",
     "media_sha256=$mediaHash",
+    "runtime_descriptor_sha256=$ExpectedDescriptorSHA256",
+    "runtime_delivery=$(if ($RuntimeDescriptor) { 'independent' } else { 'embedded' })",
     "board=radxa-rock-3a",
     "os=debian-11",
     "arch=arm64"

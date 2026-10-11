@@ -27,6 +27,16 @@ const (
 	maximumBytes  = 512 * 1024 * 1024
 )
 
+// EnsureArchive 复用固定归档安装，下载与离线输入均先由主程序绑定摘要验证。
+func EnsureArchive(ctx context.Context, archivePath, expectedHash string, logger *slog.Logger) error {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer archive.Close()
+	return install(ctx, archive, expectedHash, defaultParent)
+}
+
 // EnsureEmbedded 安装正式版本内置的媒体运行时；开发构建没有内置包时直接返回。
 func EnsureEmbedded(ctx context.Context, logger *slog.Logger) error {
 	archive, expectedHash, available, err := openEmbeddedArchive()
@@ -44,6 +54,10 @@ func EnsureEmbedded(ctx context.Context, logger *slog.Logger) error {
 }
 
 func install(ctx context.Context, archive io.Reader, expectedHash, parent string) error {
+	return installWithCheck(ctx, archive, expectedHash, parent, validateRuntime)
+}
+
+func installWithCheck(ctx context.Context, archive io.Reader, expectedHash, parent string, check func(context.Context, string) error) error {
 	expectedHash = strings.TrimSpace(strings.ToLower(expectedHash))
 	if len(expectedHash) != sha256.Size*2 {
 		return errors.New("媒体运行时摘要长度无效")
@@ -57,7 +71,7 @@ func install(ctx context.Context, archive io.Reader, expectedHash, parent string
 	target := filepath.Join(parent, "media")
 	marker := filepath.Join(target, markerName)
 	if content, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(content)) == expectedHash {
-		return validateRuntime(ctx, target)
+		return check(ctx, target)
 	}
 
 	staging, err := os.MkdirTemp(parent, ".media.embedded-")
@@ -76,7 +90,7 @@ func install(ctx context.Context, archive io.Reader, expectedHash, parent string
 	if err := os.WriteFile(filepath.Join(staging, markerName), []byte(expectedHash+"\n"), 0o644); err != nil {
 		return fmt.Errorf("写入媒体版本标记: %w", err)
 	}
-	if err := validateRuntime(ctx, staging); err != nil {
+	if err := check(ctx, staging); err != nil {
 		return fmt.Errorf("验证新版媒体运行时: %w", err)
 	}
 
@@ -97,7 +111,7 @@ func install(ctx context.Context, archive io.Reader, expectedHash, parent string
 		}
 		return fmt.Errorf("启用新版媒体运行时: %w", err)
 	}
-	if err := validateRuntime(ctx, target); err != nil {
+	if err := check(ctx, target); err != nil {
 		_ = os.RemoveAll(target)
 		if restoreErr := os.Rename(backup, target); restoreErr != nil {
 			return errors.Join(fmt.Errorf("新版媒体运行时启用后验证失败: %w", err), fmt.Errorf("恢复旧媒体运行时: %w", restoreErr))

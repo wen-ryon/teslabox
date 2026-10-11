@@ -7,11 +7,14 @@
   <title>TeslaBox 管理中心</title>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css?v=20260906-2">
-  <link rel="stylesheet" href="/settings-layout.css?v=20261010-cp-only-1">
-  <script src="/settings-layout.js?v=20261010-cp-only-1" defer></script>
-  <script src="/app.js?v=20261010-cp-only-1" defer></script>
-  <script src="/carplay-pairing.js?v=20261010-cp-only-1" defer></script>
-  <script src="/carplay-settings.js?v=20261010-cp-only-1" defer></script>
+  <link rel="stylesheet" href="/settings-layout.css?v=20261011-runtime-1">
+  <link rel="stylesheet" href="/nas-upload.css?v=20261011-runtime-1">
+  <script src="/nas-upload.js?v=20261011-runtime-1" defer></script>
+  <script src="/settings-layout.js?v=20261011-runtime-1" defer></script>
+  <script src="/runtime-components.js?v=20261011-components-1" defer></script>
+  <script src="/app.js?v=20261011-runtime-1" defer></script>
+  <script src="/carplay-pairing.js?v=20261011-runtime-1" defer></script>
+  <script src="/carplay-settings.js?v=20261011-runtime-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -62,6 +65,8 @@
       <div class="drawer-head"><span class="brand-mark static"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
       <nav class="drawer-nav">
         <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
+        <button type="button" data-page-link="backup"><span>录像备份</span><small>上传任务、NAS 与网盘配置</small></button>
+        <button type="button" data-page-link="exports"><span>导出管理</span><small>任务与历史成品</small></button>
         <button type="button" data-page-link="media"><span>媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
         <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、视频与系统诊断</small></button>
         <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
@@ -205,6 +210,22 @@
       </section>
     </div>
 
+    <div id="backup-page" class="page workspace-page app-page" hidden>
+      <section class="settings-hero"><div><p class="eyebrow">RECORDING BACKUP</p><h1>录像备份</h1><p class="hero-copy">管理录像上传、默认目标与事件自动备份。</p></div></section>
+      <nav class="workspace-tabs" role="tablist" aria-label="录像备份分类">
+        <button id="backup-history-tab" type="button" role="tab" aria-controls="backup-history-panel">任务与记录</button>
+        <button id="backup-targets-tab" type="button" role="tab" aria-controls="backup-targets-panel">上传目标<span class="settings-draft-dot" aria-label="有未保存的修改" hidden></span></button>
+        <button id="backup-rules-tab" type="button" role="tab" aria-controls="backup-rules-panel">上传规则<span class="settings-draft-dot" aria-label="有未保存的修改" hidden></span></button>
+      </nav>
+      <div id="backup-content"></div>
+    </div>
+    <div id="exports-page" class="page workspace-page app-page" hidden>
+      <section class="settings-hero"><div><p class="eyebrow">EXPORT MANAGER</p><h1>导出管理</h1><p class="hero-copy">查看导出任务、下载成品和调整保留方式。</p></div><span id="export-status-slot"></span></section>
+      <div id="exports-notice" class="notice" role="status" aria-live="polite"></div>
+      <p id="export-draft-notice" class="draft-notice" role="status" hidden>保留设置有未保存的修改；切换页面会保留草稿。</p>
+      <article class="settings-card export-live-task"><h3>最近导出任务</h3><p>显示当前浏览器最近创建的任务。请选择录像后发起导出，已完成成品见下方历史。</p><div id="export-live-task"></div></article>
+      <div id="exports-content"></div>
+    </div>
     <div id="settings-page" class="page settings-page app-page" hidden>
       <section class="settings-hero">
         <div><p class="eyebrow">SETTINGS</p><h1>设置中心</h1><p class="hero-copy">管理 WiFi 无线局域网、TeslaBox 热点和设备电源。网络变更可能使当前页面断开。</p></div>
@@ -329,16 +350,18 @@
         <div class="settings-warning">“修复快照预留空间”只回收达到安全目标所需的空闲簇，可重复执行且不会删除录像；“回收历史旧空间”会处理全部可回收空闲簇。两项操作都必须在 Gadget 暂停的维护窗口执行。</div>
       </section>
 
-      <section id="settings-panel-5" class="settings-section" aria-labelledby="export-settings-title">
+      <section class="settings-section" aria-labelledby="export-settings-title">
         <div class="settings-section-heading"><div><p class="eyebrow">EXPORTS</p><h2 id="export-settings-title">导出文件</h2></div><span id="export-retention-status" class="badge">读取中</span></div>
         <article class="settings-card export-settings-card">
-          <div class="settings-card-head"><div><h3>下载后的保留方式</h3><p>导出完成后会保存在数据盘；可再次下载的历史文件会占用空间，保留数量超出时会自动清理最旧文件。</p></div></div>
+            <div class="settings-card-head"><div><h3>下载后的保留方式</h3><p>录像准备、导出和成品均使用系统盘；可再次下载的历史文件会占用空间，保留数量超出时会自动清理最旧文件。</p></div></div>
           <div class="export-retention-controls">
             <label class="toggle-choice export-retention-choice"><input id="export-delete-after-download" type="checkbox"><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>下载后自动清空</strong><small>浏览器完整接收文件后，立即释放该导出占用的空间。</small></span></label>
-            <label>否则保留最近<select id="export-retain-count" aria-label="历史导出保留数量"><option value="1">1 个</option><option value="3">3 个</option><option value="5">5 个</option><option value="8">8 个</option><option value="12">12 个</option><option value="20">20 个</option></select>导出文件</label>
-          </div>
+              <label>否则保留最近<select id="export-retain-count" aria-label="历史导出保留数量"><option value="1">1 个</option><option value="3">3 个</option><option value="5">5 个</option><option value="8">8 个</option><option value="12">12 个</option><option value="20">20 个</option></select>导出文件</label>
+              <label>原始录像缓存闲置留存<input id="export-cache-idle-hours" type="number" min="0" max="168" step="1" value="24" aria-label="原始录像缓存闲置留存小时">小时（0 为结束后清理）</label>
+            </div>
+            <p class="muted">重复导出会复用已准备的原始录像；正在使用的文件不会清理。空间紧张时闲置缓存可能提前释放，历史成品按上面的保留方式管理。</p>
           <div class="form-actions"><p id="export-settings-detail" class="muted">正在读取导出策略…</p><button id="export-settings-save" class="primary" type="button">保存导出设置</button></div>
-          <div class="export-history-head"><div><h3>历史导出</h3><p>只显示仍保留在数据盘、可再次下载的文件。</p></div><button id="export-history-refresh" class="secondary compact" type="button">刷新历史</button></div>
+            <div class="export-history-head"><div><h3>历史导出</h3><p>只显示仍可再次下载的成品；升级前的历史文件仍保留原存储位置。</p></div><button id="export-history-refresh" class="secondary compact" type="button">刷新历史</button></div>
           <div id="export-history-list" class="export-history-list"><p class="empty-state">正在读取…</p></div>
         </article>
       </section>
@@ -365,6 +388,7 @@
 
       <section id="settings-panel-8" class="settings-section update-section" aria-labelledby="update-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SIGNED UPDATE</p><h2 id="update-title">系统更新</h2></div><span id="update-status" class="badge">读取中</span></div>
+        <div id="runtime-components" hidden role="status"><strong>运行时组件</strong><p class="muted">已有组件会复用；首次安装或版本变化时自动获取。未就绪时录像和管理页仍可用。</p><ul id="runtime-components-list"></ul></div>
         <article class="settings-card update-card">
           <div class="update-summary">
             <div><h3>TeslaBox 程序</h3><p id="update-version-detail">正在读取当前版本…</p></div>

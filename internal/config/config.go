@@ -27,6 +27,7 @@ const (
 	defaultStatePath                = "state"
 	defaultExportPath               = "exports"
 	defaultExportStatePath          = "/var/lib/teslabox-system/export-state.json"
+	defaultMediaWorkPath            = "/var/lib/teslabox-system/media"
 	defaultRegistryPath             = "/var/lib/teslabox-system/storage-registry.json"
 	defaultWebAuthPath              = "/var/lib/teslabox-system/web-auth.json"
 	defaultMaintenancePath          = "/var/lib/teslabox-system/maintenance.json"
@@ -85,6 +86,8 @@ type Config struct {
 	StatePath                   string
 	ExportPath                  string
 	ExportStatePath             string
+	MediaWorkPath               string
+	RecordingCacheTTL           time.Duration
 	IndexCacheDir               string
 	RegistryPath                string
 	WebAuthStatePath            string
@@ -179,6 +182,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	recordingCacheTTL, err := envNonNegativeDuration("TESLABOX_RECORDING_CACHE_TTL", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
 	shutdownTimeout, err := envDuration("TESLABOX_SHUTDOWN_TIMEOUT", defaultShutdownLimit)
 	if err != nil {
 		return Config{}, err
@@ -235,6 +242,8 @@ func Load() (Config, error) {
 		StatePath:                   envString("TESLABOX_STATE_PATH", defaultStatePath),
 		ExportPath:                  envString("TESLABOX_EXPORT_PATH", defaultExportPath),
 		ExportStatePath:             envString("TESLABOX_EXPORT_STATE", defaultExportStatePath),
+		MediaWorkPath:               envString("TESLABOX_MEDIA_WORK_PATH", defaultMediaWorkPath),
+		RecordingCacheTTL:           recordingCacheTTL,
 		IndexCacheDir:               envString("TESLABOX_INDEX_CACHE_DIR", "/var/lib/teslabox-system/index-cache"),
 		RegistryPath:                envString("TESLABOX_STORAGE_REGISTRY", defaultRegistryPath),
 		WebAuthStatePath:            envString("TESLABOX_WEB_AUTH_STATE", defaultWebAuthPath),
@@ -418,6 +427,12 @@ func (c Config) Validate() error {
 	}
 	if !isSafeAbsolutePath(c.ExportStatePath) {
 		return fmt.Errorf("TESLABOX_EXPORT_STATE 必须是非根目录的绝对路径")
+	}
+	if c.MediaWorkPath != "" && !isSafeAbsolutePath(c.MediaWorkPath) {
+		return fmt.Errorf("TESLABOX_MEDIA_WORK_PATH 必须是系统盘内非根目录的绝对路径")
+	}
+	if c.RecordingCacheTTL < 0 || c.RecordingCacheTTL > 7*24*time.Hour {
+		return fmt.Errorf("TESLABOX_RECORDING_CACHE_TTL 必须在 0 到 168 小时之间")
 	}
 	timeZone := strings.TrimSpace(c.TeslaTimeZone)
 	if timeZone == "" {

@@ -97,6 +97,7 @@ type MaintenanceLocker interface {
 type Snapshot struct {
 	MediaContext        context.Context `json:"-"`
 	indexIdentity       string
+	eventSnapshotEpoch  uint64
 	Phase               Phase                     `json:"phase"`
 	DataDrive           *storage.Device           `json:"data_drive,omitempty"`
 	Backing             backing.Status            `json:"backing"`
@@ -133,39 +134,43 @@ type Manager struct {
 	logger            *slog.Logger
 	maintenanceLocker MaintenanceLocker
 
-	refreshMu           sync.Mutex
-	spaceGuard          spaceGuardState
-	indexMu             sync.Mutex
-	cachedIndex         CachedMediaIndex
-	cachedDevice        string
-	indexRefreshCh      chan struct{}
-	scanProgress        *ScanProgress
-	runContext          context.Context
-	stateMu             sync.RWMutex
-	state               Snapshot
-	triggerCh           chan struct{}
-	cleanupCh           chan struct{}
-	retired             []mediasnapshot.View
-	mediaLeases         map[string]int
-	calibratedSnapshot  string
-	mediaActiveUntil    time.Time
-	snapshotRecovered   bool
-	snapshotFailures    int
-	snapshotRetryAt     time.Time
-	lastSnapshotAt      time.Time
-	gadgetPaused        bool
-	gadgetResumePending bool
-	bootID              string
-	bindAttemptAllowed  bool
-	bindOwnerRecorded   bool
-	bindWindowEnforced  bool
-	bindWindowEndsAt    time.Time
-	startedAt           time.Time
-	bootUptime          time.Duration
-	bootUptimeKnown     bool
-	waitForEnumeration  func(context.Context, gadget.Status) (gadget.Status, bool, error)
-	waitForDriveConfirm func(context.Context) error
-	now                 func() time.Time
+	refreshMu             sync.Mutex
+	spaceGuard            spaceGuardState
+	indexMu               sync.Mutex
+	cachedIndex           CachedMediaIndex
+	cachedDevice          string
+	indexRefreshCh        chan struct{}
+	scanProgress          *ScanProgress
+	runContext            context.Context
+	stateMu               sync.RWMutex
+	state                 Snapshot
+	triggerCh             chan struct{}
+	cleanupCh             chan struct{}
+	snapshotReadyCh       chan struct{}
+	retired               []mediasnapshot.View
+	mediaLeases           map[string]int
+	calibratedSnapshot    string
+	mediaActiveUntil      time.Time
+	snapshotRecovered     bool
+	snapshotFailures      int
+	snapshotRetryAt       time.Time
+	lastSnapshotAt        time.Time
+	eventSnapshotFailures int
+	eventSnapshotRetryAt  time.Time
+	eventSnapshotEpoch    uint64
+	gadgetPaused          bool
+	gadgetResumePending   bool
+	bootID                string
+	bindAttemptAllowed    bool
+	bindOwnerRecorded     bool
+	bindWindowEnforced    bool
+	bindWindowEndsAt      time.Time
+	startedAt             time.Time
+	bootUptime            time.Duration
+	bootUptimeKnown       bool
+	waitForEnumeration    func(context.Context, gadget.Status) (gadget.Status, bool, error)
+	waitForDriveConfirm   func(context.Context) error
+	now                   func() time.Time
 }
 
 // NewManager 使用手工依赖注入保持系统边界可测试，初始状态不触发任何磁盘写入。
@@ -212,6 +217,7 @@ func NewManager(
 		triggerCh:           make(chan struct{}, 1),
 		indexRefreshCh:      make(chan struct{}, 1),
 		cleanupCh:           make(chan struct{}, 1),
+		snapshotReadyCh:     make(chan struct{}, 1),
 		mediaLeases:         make(map[string]int),
 		gadgetPaused:        gadgetPaused,
 		gadgetResumePending: resumePending,
@@ -628,10 +634,17 @@ func (m *Manager) setScanProgress(stage string, count int) {
 
 // AcquireMediaSnapshot 把媒体视图借给一次请求，防止播放期间的定时轮换卸载底层 loop 设备。
 func (m *Manager) AcquireMediaSnapshot() (Snapshot, func()) {
+	return m.acquireSnapshotState(nil)
+}
+
+func (m *Manager) acquireSnapshotState(source *Snapshot) (Snapshot, func()) {
 	m.spaceGuard.mu.Lock()
 	blocked := m.spaceGuard.blocked
 	m.stateMu.Lock()
 	result := cloneSnapshot(m.state)
+	if source != nil {
+		result = cloneSnapshot(*source)
+	}
 	leaseID := ""
 	var cancelMedia context.CancelFunc
 	var leaseToken uint64
@@ -1223,6 +1236,10 @@ func (m *Manager) refreshSnapshotLocked(ctx context.Context) error {
 	ready.MediaVolumeSpaceAt = &now
 	ready.LastRefreshAt = &now
 	m.store(ready)
+	select {
+	case m.snapshotReadyCh <- struct{}{}:
+	default:
+	}
 	m.snapshotFailures = 0
 	m.snapshotRetryAt = time.Time{}
 	m.lastSnapshotAt = now
@@ -1562,10 +1579,12 @@ func (m *Manager) cleanupDisconnectedSnapshots(ctx context.Context, previous Sna
 		views = append(views, *previous.MediaSnapshot)
 	}
 	m.retired = nil
+	m.eventSnapshotEpoch++
 	m.snapshotRecovered = false
 	m.snapshotFailures = 0
 	m.snapshotRetryAt = time.Time{}
 	var result error
+	m.eventSnapshotFailures, m.eventSnapshotRetryAt = 0, time.Time{}
 	for _, view := range views {
 		if m.snapshotLeased(view.ID) {
 			m.retired = append(m.retired, view)

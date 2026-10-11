@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wen-ryon/teslabox/internal/recordingcache"
 )
 
 var (
@@ -68,6 +70,7 @@ const (
 
 // ExportRequest 只接受结构化选项，避免把 FFmpeg 参数暴露给客户端。
 type ExportRequest struct {
+	uploadProfile   *compositeProfile
 	Mode            ExportMode        `json:"mode,omitempty"`
 	SessionID       string            `json:"session_id"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
@@ -90,6 +93,8 @@ type ExportSettings struct {
 	DeleteAfterDownload bool `json:"delete_after_download"`
 	// RetainCount 限制可再次下载的已完成导出数，防止导出文件长期占满数据盘。
 	RetainCount int `json:"retain_count"`
+	// CacheIdleHours 省略时保留当前策略，零表示任务结束后可立即清理，避免旧页面覆盖新设置。
+	CacheIdleHours *int `json:"cache_idle_hours,omitempty"`
 }
 
 // ExportVideo 是已通过快照边界校验的单个输入片段。
@@ -134,14 +139,17 @@ type SourceExportFile struct {
 
 // ExportSource 固定任务创建时的只读快照和完整录像时间轴。
 type ExportSource struct {
-	MediaContext context.Context
-	SessionStart time.Time
-	SessionEnd   time.Time
-	CanvasWidth  int
-	CanvasHeight int
-	Videos       []ExportVideo
-	SourceFiles  []SourceExportFile
-	OverlayCues  []ExportOverlayCue
+	MediaContext    context.Context `json:"-"`
+	SourceIdentity  string
+	SnapshotVersion string
+	SourceRoot      string
+	SessionStart    time.Time
+	SessionEnd      time.Time
+	CanvasWidth     int
+	CanvasHeight    int
+	Videos          []ExportVideo
+	SourceFiles     []SourceExportFile
+	OverlayCues     []ExportOverlayCue
 }
 
 // ExportTask 是不包含板端文件路径的任务状态。
@@ -159,6 +167,9 @@ type ExportTask struct {
 	EstimatedBytes  uint64        `json:"estimated_bytes"`
 	OutputBytes     uint64        `json:"output_bytes,omitempty"`
 	FileCount       int           `json:"file_count,omitempty"`
+	Phase           string        `json:"phase,omitempty"`
+	CopiedBytes     uint64        `json:"copied_bytes,omitempty"`
+	CopyTotalBytes  uint64        `json:"copy_total_bytes,omitempty"`
 }
 
 type exportState struct {
@@ -169,18 +180,22 @@ type exportState struct {
 
 type persistedExportTask struct {
 	ExportTask
-	VideoStartAt time.Time `json:"video_start_at"`
+	VideoStartAt time.Time     `json:"video_start_at"`
+	Source       *ExportSource `json:"source,omitempty"`
+	Legacy       bool          `json:"legacy,omitempty"`
 }
 
 // ExportConfig 限制导出路径、队列和单任务资源占用。
 type ExportConfig struct {
-	FFmpegPath    string
-	OutputDir     string
-	StatePath     string
-	QueueSize     int
-	MaxDuration   time.Duration
-	Logger        *slog.Logger
-	BeginActivity func() func()
+	FFmpegPath      string
+	OutputDir       string
+	LegacyOutputDir string
+	Cache           *recordingcache.Store
+	StatePath       string
+	QueueSize       int
+	MaxDuration     time.Duration
+	Logger          *slog.Logger
+	BeginActivity   func() func()
 }
 
 type exportRunner interface {
@@ -188,10 +203,11 @@ type exportRunner interface {
 }
 
 type exportJob struct {
-	id      string
-	request ExportRequest
-	source  ExportSource
-	release func()
+	id          string
+	request     ExportRequest
+	source      ExportSource
+	release     func()
+	verifyLocal bool
 }
 
 // Exporter 用单工作进程串行化硬件编码，避免多个任务争抢 MPP/RGA。
@@ -200,18 +216,25 @@ type Exporter struct {
 	config ExportConfig
 	logger *slog.Logger
 
-	prepareMu sync.Mutex
-	prepared  bool
-	stateMu   sync.Mutex
-	mu        sync.RWMutex
-	settings  ExportSettings
-	tasks     map[string]ExportTask
-	cancels   map[string]context.CancelFunc
-	releases  map[string]func()
-	queue     chan exportJob
-	runOnce   sync.Once
-	done      chan struct{}
-	stopping  bool
+	prepareMu          sync.Mutex
+	prepared           bool
+	stateMu            sync.Mutex
+	mu                 sync.RWMutex
+	settings           ExportSettings
+	tasks              map[string]ExportTask
+	cancels            map[string]context.CancelFunc
+	releases           map[string]func()
+	queue              chan exportJob
+	prepareQueue       chan exportJob
+	runOnce            sync.Once
+	done               chan struct{}
+	stopping           bool
+	preparedSources    map[string]ExportSource
+	cacheLeases        map[string]*recordingcache.Lease
+	legacyTasks        map[string]bool
+	downloads          map[string]int
+	outputReservations map[string]func()
+	recovered          []exportJob
 }
 
 // NewExporter 在启动阶段读取导出策略和历史；数据盘未挂载时不触碰输出目录。
@@ -235,9 +258,20 @@ func NewExporter(runner exportRunner, config ExportConfig) (*Exporter, error) {
 		runner: runner, config: config, logger: config.Logger, tasks: make(map[string]ExportTask),
 		cancels: make(map[string]context.CancelFunc), releases: make(map[string]func()),
 		queue: make(chan exportJob, config.QueueSize), done: make(chan struct{}), settings: defaultExportSettings(),
+		prepareQueue: make(chan exportJob, config.QueueSize), outputReservations: make(map[string]func()),
+		preparedSources: make(map[string]ExportSource), cacheLeases: make(map[string]*recordingcache.Lease), legacyTasks: make(map[string]bool), downloads: make(map[string]int),
 	}
 	if err := exporter.loadState(); err != nil {
 		return nil, err
+	}
+	if config.Cache != nil {
+		if exporter.settings.CacheIdleHours == nil {
+			hours := int(config.Cache.Policy().IdleTTL / time.Hour)
+			exporter.settings.CacheIdleHours = &hours
+		}
+		if err := config.Cache.SetIdleTTL(time.Duration(*exporter.settings.CacheIdleHours) * time.Hour); err != nil {
+			return nil, err
+		}
 	}
 	return exporter, nil
 }
@@ -247,6 +281,9 @@ func defaultExportSettings() ExportSettings {
 }
 
 func normalizeExportSettings(settings ExportSettings) (ExportSettings, error) {
+	if settings.CacheIdleHours != nil && (*settings.CacheIdleHours < 0 || *settings.CacheIdleHours > 168) {
+		return ExportSettings{}, &InputError{Message: "原始录像缓存留存必须在 0 到 168 小时之间"}
+	}
 	if settings.RetainCount == 0 {
 		settings.RetainCount = defaultExportRetainCount
 	}
@@ -270,7 +307,7 @@ func (e *Exporter) loadState() error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("导出状态必须是普通文件")
 	}
-	if info.Size() > 1024*1024 {
+	if info.Size() > 16*1024*1024 {
 		return errors.New("导出状态文件过大")
 	}
 	content, err := os.ReadFile(e.config.StatePath)
@@ -282,7 +319,7 @@ func (e *Exporter) loadState() error {
 	if err := decoder.Decode(&persisted); err != nil {
 		return fmt.Errorf("解析导出状态: %w", err)
 	}
-	if persisted.Version != 0 && persisted.Version != 1 {
+	if persisted.Version < 0 || persisted.Version > 2 {
 		return fmt.Errorf("不支持的导出状态版本: %d", persisted.Version)
 	}
 	settings, err := normalizeExportSettings(persisted.Settings)
@@ -292,10 +329,39 @@ func (e *Exporter) loadState() error {
 	tasks := make(map[string]ExportTask, len(persisted.Tasks))
 	for _, item := range persisted.Tasks {
 		task := item.ExportTask
-		if !isExportID(task.ID) || task.State != ExportCompleted || !task.DownloadReady || task.CreatedAt.IsZero() || task.Request.Mode != ExportModeClip && task.Request.Mode != ExportModeSource {
+		if !isExportID(task.ID) || task.CreatedAt.IsZero() || task.Request.Mode != ExportModeClip && task.Request.Mode != ExportModeSource {
 			return errors.New("导出状态包含无效的历史任务")
 		}
 		task.VideoStartAt = item.VideoStartAt
+		if task.State == ExportQueued || task.State == ExportRunning {
+			task.State = ExportFailed
+			task.Error = "上次准备录像时设备停止，源快照已失效，请重新选择"
+			if item.Source != nil && e.config.Cache != nil && len(e.recovered) < e.config.QueueSize {
+				lease, acquireErr := e.config.Cache.PinLocalForRecovery(context.Background(), localExportPaths(*item.Source))
+				if acquireErr == nil {
+					task.State, task.Error, task.Phase = ExportQueued, "", "prepared"
+					task.ProgressPercent = 0
+					e.preparedSources[task.ID] = *item.Source
+					e.cacheLeases[task.ID] = lease
+					e.recovered = append(e.recovered, exportJob{id: task.ID, request: task.Request, source: *item.Source, release: func() {}, verifyLocal: true})
+				} else {
+					task.Error = "上次任务的暂存录像不可用：" + acquireErr.Error()
+				}
+			}
+		} else if task.State != ExportCompleted && task.State != ExportFailed && task.State != ExportCanceled {
+			return errors.New("导出状态包含未知任务状态")
+		}
+		legacy := item.Legacy || persisted.Version < 2 && e.config.Cache != nil
+		if task.State == ExportCompleted && legacy {
+			e.legacyTasks[task.ID] = true
+		}
+		if task.State == ExportCompleted && !legacy && e.config.Cache != nil && task.DownloadReady {
+			info, err := os.Lstat(e.outputPathForTask(task))
+			if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || uint64(info.Size()) != task.OutputBytes {
+				task.State, task.DownloadReady = ExportFailed, false
+				task.Error = "导出成品缺失或不完整，请重新导出"
+			}
+		}
 		tasks[task.ID] = cloneExportTask(task)
 	}
 	e.settings = settings
@@ -310,12 +376,16 @@ func (e *Exporter) persistState() error {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 	e.mu.RLock()
-	state := exportState{Version: 1, Settings: e.settings, Tasks: make([]persistedExportTask, 0, len(e.tasks))}
+	state := exportState{Version: 2, Settings: e.settings, Tasks: make([]persistedExportTask, 0, len(e.tasks))}
 	for _, task := range e.tasks {
-		if task.State != ExportCompleted || !task.DownloadReady {
+		if e.config.Cache == nil && (task.State != ExportCompleted || !task.DownloadReady) {
 			continue
 		}
-		state.Tasks = append(state.Tasks, persistedExportTask{ExportTask: cloneExportTask(task), VideoStartAt: task.VideoStartAt})
+		item := persistedExportTask{ExportTask: cloneExportTask(task), VideoStartAt: task.VideoStartAt, Legacy: e.legacyTasks[task.ID]}
+		if source, ok := e.preparedSources[task.ID]; ok && (task.State == ExportQueued || task.State == ExportRunning) {
+			item.Source = &source
+		}
+		state.Tasks = append(state.Tasks, item)
 	}
 	e.mu.RUnlock()
 	slices.SortFunc(state.Tasks, func(left, right persistedExportTask) int {
@@ -360,6 +430,10 @@ func saveExportState(path string, state exportState) (resultErr error) {
 	if err := os.Rename(temporaryName, path); err != nil {
 		return fmt.Errorf("发布导出状态: %w", err)
 	}
+	// 文件内容与目录项都确认落盘后，调用方才可以释放源快照。
+	if err := syncExportDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("同步导出状态目录: %w", err)
+	}
 	return nil
 }
 
@@ -386,6 +460,28 @@ func (e *Exporter) Run(ctx context.Context) {
 }
 
 func (e *Exporter) run(ctx context.Context) {
+	if e.config.Cache != nil {
+		preparedDone := make(chan struct{})
+		go func() { defer close(preparedDone); e.runPreparation(ctx) }()
+		defer func() {
+			<-preparedDone
+			e.releaseStoppedPreparation()
+			if err := e.persistState(); err != nil {
+				e.logger.Error("保存停止后的导出任务失败", "error", err)
+			}
+		}()
+	}
+	for _, job := range e.recovered {
+		e.mu.Lock()
+		e.releases[job.id] = job.release
+		e.mu.Unlock()
+		if ctx.Err() != nil {
+			e.stopQueued()
+			return
+		}
+		e.runJob(ctx, job)
+	}
+	e.recovered = nil
 	for {
 		if ctx.Err() != nil {
 			e.stopQueued()
@@ -452,9 +548,30 @@ func (e *Exporter) Create(request ExportRequest, source ExportSource, release fu
 	}
 	e.tasks[id] = task
 	e.releases[id] = safeRelease
+	queue := e.queue
+	if e.config.Cache != nil {
+		active := 0
+		for _, existing := range e.tasks {
+			if existing.State == ExportQueued || existing.State == ExportRunning {
+				active++
+			}
+		}
+		if active > e.config.QueueSize+1 {
+			delete(e.tasks, id)
+			delete(e.releases, id)
+			e.mu.Unlock()
+			safeRelease()
+			return ExportTask{}, ErrExportQueueFull
+		}
+		queue = e.prepareQueue
+	}
 	select {
-	case e.queue <- job:
+	case queue <- job:
 		e.mu.Unlock()
+		if err := e.persistState(); err != nil {
+			_, _ = e.Cancel(id)
+			return ExportTask{}, err
+		}
 		return task, nil
 	default:
 		delete(e.tasks, id)
@@ -468,7 +585,7 @@ func (e *Exporter) Create(request ExportRequest, source ExportSource, release fu
 func (e *Exporter) prepareOutput() error {
 	e.prepareMu.Lock()
 	defer e.prepareMu.Unlock()
-	if err := ensureOutputFilesystem(e.config.OutputDir); err != nil {
+	if err := e.ensureOutputFilesystem(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(e.config.OutputDir, 0o750); err != nil {
@@ -523,7 +640,15 @@ func (e *Exporter) discardMissingHistory() {
 func (e *Exporter) Settings() ExportSettings {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.settings
+	return cloneExportSettings(e.settings)
+}
+
+func cloneExportSettings(settings ExportSettings) ExportSettings {
+	if settings.CacheIdleHours != nil {
+		value := *settings.CacheIdleHours
+		settings.CacheIdleHours = &value
+	}
+	return settings
 }
 
 // UpdateSettings 保存导出策略，并立即按新的保留数量回收最旧的已完成导出。
@@ -534,7 +659,10 @@ func (e *Exporter) UpdateSettings(settings ExportSettings) (ExportSettings, erro
 	}
 	e.mu.Lock()
 	previous := e.settings
-	e.settings = normalized
+	if normalized.CacheIdleHours == nil {
+		normalized.CacheIdleHours = previous.CacheIdleHours
+	}
+	e.settings = cloneExportSettings(normalized)
 	e.mu.Unlock()
 	if err := e.persistState(); err != nil {
 		e.mu.Lock()
@@ -542,13 +670,18 @@ func (e *Exporter) UpdateSettings(settings ExportSettings) (ExportSettings, erro
 		e.mu.Unlock()
 		return ExportSettings{}, err
 	}
+	if e.config.Cache != nil && normalized.CacheIdleHours != nil {
+		if err := e.config.Cache.SetIdleTTL(time.Duration(*normalized.CacheIdleHours) * time.Hour); err != nil {
+			return ExportSettings{}, err
+		}
+	}
 	e.prepareMu.Lock()
 	prepared := e.prepared
 	e.prepareMu.Unlock()
 	if prepared {
 		e.pruneFinished()
 	}
-	return normalized, nil
+	return cloneExportSettings(normalized), nil
 }
 
 // History 返回仍可再次下载的已完成导出，按完成时间由新到旧排序。
@@ -627,6 +760,15 @@ func (e *Exporter) Cancel(id string) (ExportTask, error) {
 	if release != nil {
 		release()
 	}
+	if e.config.Cache != nil {
+		if wasQueued {
+			e.discardPreparedJob(id)
+		}
+		// 已准备计划可以跨启动恢复，用户取消必须先落盘，不能在下次启动重新执行。
+		if err := e.persistState(); err != nil {
+			return task, err
+		}
+	}
 	_ = os.Remove(e.outputPathForTask(task))
 	_ = os.Remove(e.tempPathForTask(task))
 	return task, nil
@@ -634,15 +776,31 @@ func (e *Exporter) Cancel(id string) (ExportTask, error) {
 
 // Open 只允许打开已完成任务对应的固定文件名。
 func (e *Exporter) Open(id string) (*os.File, ExportTask, error) {
-	task, err := e.Task(id)
-	if err != nil {
-		return nil, ExportTask{}, err
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	task, found := e.tasks[id]
+	if !found {
+		return nil, ExportTask{}, ErrExportNotFound
 	}
 	if task.State != ExportCompleted || !task.DownloadReady {
 		return nil, task, errors.New("导出文件尚未就绪")
 	}
 	file, err := os.Open(e.outputPathForTask(task))
+	if err == nil {
+		e.downloads[id]++
+	}
 	return file, task, err
+}
+
+// CloseDownload 解除成品下载保护，允许后续历史清理回收文件。
+func (e *Exporter) CloseDownload(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.downloads[id] > 1 {
+		e.downloads[id]--
+	} else {
+		delete(e.downloads, id)
+	}
 }
 
 // Consume 删除已被浏览器完整接收的导出，并从历史中移除。
@@ -656,17 +814,24 @@ func (e *Exporter) Delete(id string) error {
 }
 
 func (e *Exporter) deleteCompleted(id, operation string) error {
-	task, err := e.Task(id)
-	if err != nil {
-		return err
+	e.mu.Lock()
+	task, found := e.tasks[id]
+	if !found {
+		e.mu.Unlock()
+		return ErrExportNotFound
 	}
 	if task.State != ExportCompleted || !task.DownloadReady {
+		e.mu.Unlock()
 		return &InputError{Message: "只能删除已经完成的导出文件"}
 	}
+	if e.downloads[id] > 0 {
+		e.mu.Unlock()
+		return &InputError{Message: "文件正在下载，请完成后再清理"}
+	}
 	if err := os.Remove(e.outputPathForTask(task)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		e.mu.Unlock()
 		return fmt.Errorf("%s: %w", operation, err)
 	}
-	e.mu.Lock()
 	current, found := e.tasks[id]
 	if found && current.State == ExportCompleted {
 		delete(e.tasks, id)
@@ -684,7 +849,23 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		job.release()
 		e.mu.Lock()
 		delete(e.releases, job.id)
+		lease := e.cacheLeases[job.id]
+		delete(e.cacheLeases, job.id)
+		reservation := e.outputReservations[job.id]
+		delete(e.outputReservations, job.id)
+		if e.tasks[job.id].State != ExportQueued {
+			delete(e.preparedSources, job.id)
+		}
 		e.mu.Unlock()
+		if lease != nil {
+			lease.Release()
+		}
+		if reservation != nil {
+			reservation()
+		}
+		if err := e.persistState(); err != nil {
+			e.logger.Error("保存导出任务恢复状态失败", "error", err)
+		}
 		e.pruneFinished()
 	}()
 	e.mu.Lock()
@@ -693,9 +874,18 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		e.mu.Unlock()
 		return
 	}
+	if parent.Err() != nil && e.config.Cache != nil {
+		e.mu.Unlock()
+		return
+	}
 	timeout := exportTimeout(job.request, job.source)
+	if e.config.Cache != nil {
+		timeout += 5 * time.Minute
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
-	if job.source.MediaContext != nil {
+	ctx, cancelSpace := context.WithCancelCause(ctx)
+	defer cancelSpace(nil)
+	if e.config.Cache == nil && job.source.MediaContext != nil {
 		stop := context.AfterFunc(job.source.MediaContext, cancel)
 		defer stop()
 		if job.source.MediaContext.Err() != nil {
@@ -705,6 +895,9 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 	e.cancels[job.id] = cancel
 	now := time.Now()
 	task.State = ExportRunning
+	if e.config.Cache != nil {
+		task.Phase = "preparing"
+	}
 	task.StartedAt = &now
 	e.tasks[job.id] = task
 	e.mu.Unlock()
@@ -715,26 +908,122 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 		delete(e.cancels, job.id)
 		e.mu.Unlock()
 	}()
+	if e.config.Cache != nil {
+		if err := e.prepareOutput(); err != nil {
+			e.finishJob(job.id, task, err)
+			return
+		}
+		releaseSpace := func() {}
+		defer func() { releaseSpace() }()
+		var err error
+		stopSpaceWatch := e.watchSystemSpace(ctx, cancelSpace)
+		defer stopSpaceWatch()
+		e.mu.RLock()
+		lease := e.cacheLeases[job.id]
+		reserved := e.outputReservations[job.id]
+		e.mu.RUnlock()
+		if job.verifyLocal {
+			// 启动只恢复持有关系，完整内容核验放到后台工作进程，不阻塞 HTTP 健康检查。
+			verified, verifyErr := e.config.Cache.AcquireLocal(ctx, localExportPaths(job.source))
+			if verifyErr != nil {
+				e.completeRunJob(parent, job, task, verifyErr)
+				return
+			}
+			e.mu.Lock()
+			e.cacheLeases[job.id] = verified
+			e.mu.Unlock()
+			if lease != nil {
+				lease.Release()
+			}
+			lease = verified
+		}
+		if lease == nil {
+			copyCtx, cancelCopy := context.WithCancel(ctx)
+			stop := func() bool { return true }
+			if job.source.MediaContext != nil {
+				stop = context.AfterFunc(job.source.MediaContext, cancelCopy)
+				if job.source.MediaContext.Err() != nil {
+					cancelCopy()
+				}
+			}
+			lease, releaseSpace, err = e.stageSource(copyCtx, &job)
+			if releaseSpace == nil {
+				releaseSpace = func() {}
+			}
+			stop()
+			if err == nil {
+				err = copyCtx.Err()
+			}
+			cancelCopy()
+			if err != nil {
+				if lease != nil {
+					lease.Release()
+				}
+				e.finishJob(job.id, task, exportContextError(ctx, err))
+				return
+			}
+			e.mu.Lock()
+			e.cacheLeases[job.id] = lease
+			e.preparedSources[job.id] = job.source
+			e.mu.Unlock()
+			if err := e.persistState(); err != nil {
+				e.finishJob(job.id, task, err)
+				return
+			}
+		} else if reserved == nil {
+			releaseSpace, err = e.reserveOutput(ctx, job.request, job.source)
+			if releaseSpace == nil {
+				releaseSpace = func() {}
+			}
+			if err != nil {
+				e.completeRunJob(parent, job, task, err)
+				return
+			}
+		}
+		// 完整本地输入及恢复计划提交后归还快照；之后的取消只由本地任务和系统盘保护决定。
+		job.release()
+		e.mu.Lock()
+		current := e.tasks[job.id]
+		current.Phase = "processing"
+		e.tasks[job.id] = current
+		e.mu.Unlock()
+	}
 
 	if job.request.Mode == ExportModeSource {
 		err := writeSourceArchive(ctx, job.source, e.tempPathForTask(task), func(progress int) {
 			e.updateProgress(job.id, progress)
 		})
-		if err != nil {
-			e.finishJob(job.id, task, err)
-			return
+		if err == nil {
+			err = e.publishOutput(ctx, task)
 		}
-		if err = os.Rename(e.tempPathForTask(task), e.outputPathForTask(task)); err != nil {
-			e.finishJob(job.id, task, err)
-			return
-		}
-		e.finishJob(job.id, task, nil)
+		e.completeRunJob(parent, job, task, exportContextError(ctx, err))
 		return
 	}
 
 	err := e.runClipJob(ctx, task, job)
 	if err == nil {
-		err = os.Rename(e.tempPathForTask(task), e.outputPathForTask(task))
+		err = e.publishOutput(ctx, task)
+	}
+	e.completeRunJob(parent, job, task, exportContextError(ctx, err))
+}
+
+func (e *Exporter) completeRunJob(parent context.Context, job exportJob, task ExportTask, err error) {
+	if err != nil && parent.Err() != nil && e.config.Cache != nil {
+		e.mu.Lock()
+		current := e.tasks[job.id]
+		if _, ready := e.preparedSources[job.id]; ready && current.State != ExportCanceled {
+			current.State, current.Phase, current.Error = ExportQueued, "prepared", ""
+			current.ProgressPercent = 0
+			e.tasks[job.id] = current
+			e.mu.Unlock()
+			_ = os.Remove(e.tempPathForTask(task))
+			return
+		}
+		e.mu.Unlock()
+	}
+	// 成功状态对外可见时源租约应已归还；失败路径先公布终态，再由 defer 统一释放。
+	if err == nil {
+		job.release()
 	}
 	e.finishJob(job.id, task, err)
 }
@@ -742,6 +1031,7 @@ func (e *Exporter) runJob(parent context.Context, job exportJob) {
 func (e *Exporter) finishJob(id string, task ExportTask, err error) {
 	if err != nil {
 		_ = os.Remove(e.tempPathForTask(task))
+		_ = os.Remove(e.outputPathForTask(task))
 		if !errors.Is(err, context.Canceled) {
 			e.logger.Warn("视频导出任务失败", "task_id", id, "error", err)
 		}
@@ -754,6 +1044,11 @@ func (e *Exporter) finishJob(id string, task ExportTask, err error) {
 		if err != nil {
 			task.State = ExportFailed
 			task.Error = "导出失败"
+			if errors.Is(err, recordingcache.ErrSpace) {
+				task.Error = "系统盘空间不足，请缩短范围或清理历史导出"
+			} else if task.Phase == "preparing" {
+				task.Error = "准备录像失败，源文件可能已失效，请刷新后重试"
+			}
 		} else {
 			if info, statErr := os.Stat(e.outputPathForTask(task)); statErr == nil {
 				task.OutputBytes = uint64(info.Size())
@@ -768,6 +1063,11 @@ func (e *Exporter) finishJob(id string, task ExportTask, err error) {
 		e.tasks[id] = task
 	}
 	e.mu.Unlock()
+	if task.State == ExportCanceled {
+		// 取消请求可能早于编码器最后一次写入，退出后再清理一次才不会留下迟到产物。
+		_ = os.Remove(e.tempPathForTask(task))
+		_ = os.Remove(e.outputPathForTask(task))
+	}
 	if persistErr := e.persistState(); persistErr != nil {
 		e.logger.Warn("保存导出历史失败", "task_id", id, "error", persistErr)
 	}
@@ -796,7 +1096,14 @@ func (e *Exporter) stopQueued() {
 			wasQueued := task.State == ExportQueued
 			now := time.Now()
 			task.State = ExportCanceled
-			task.CompletedAt = &now
+			if e.config.Cache != nil {
+				task.State, task.CompletedAt = ExportQueued, nil
+				if _, ready := e.preparedSources[id]; ready {
+					task.Phase = "prepared"
+				}
+			} else {
+				task.CompletedAt = &now
+			}
 			e.tasks[id] = task
 			// 运行任务必须等 FFmpeg 真正退出后由 runJob 释放；排队任务不会再被消费，可立即归还租约。
 			if wasQueued {
@@ -815,7 +1122,7 @@ func (e *Exporter) pruneFinished() {
 	completed := make([]ExportTask, 0, len(e.tasks))
 	terminal := make([]ExportTask, 0, len(e.tasks))
 	for id, task := range e.tasks {
-		if _, retained := e.releases[id]; retained {
+		if _, retained := e.releases[id]; retained || e.downloads[id] > 0 {
 			continue
 		}
 		if task.State == ExportCompleted && task.DownloadReady {
@@ -840,15 +1147,21 @@ func (e *Exporter) pruneFinished() {
 	}
 	removed := false
 	for _, task := range stale {
+		e.mu.Lock()
+		if _, retained := e.releases[task.ID]; retained || e.downloads[task.ID] > 0 {
+			e.mu.Unlock()
+			continue
+		}
 		if err := os.Remove(e.outputPathForTask(task)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			e.mu.Unlock()
 			e.logger.Warn("清理历史导出文件失败", "task_id", task.ID, "error", err)
 			continue
 		}
 		if err := os.Remove(e.tempPathForTask(task)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			e.mu.Unlock()
 			e.logger.Warn("清理历史导出临时文件失败", "task_id", task.ID, "error", err)
 			continue
 		}
-		e.mu.Lock()
 		if _, retained := e.releases[task.ID]; !retained {
 			delete(e.tasks, task.ID)
 			removed = true
@@ -868,6 +1181,13 @@ func (e *Exporter) tempPath(id string) string {
 }
 
 func (e *Exporter) outputPathForTask(task ExportTask) string {
+	if e.legacyTasks[task.ID] && e.config.LegacyOutputDir != "" {
+		ext := ".mp4"
+		if task.Request.Mode == ExportModeSource {
+			ext = ".zip"
+		}
+		return filepath.Join(e.config.LegacyOutputDir, task.ID+ext)
+	}
 	if task.Request.Mode == ExportModeSource {
 		return filepath.Join(e.config.OutputDir, task.ID+".zip")
 	}
@@ -1018,7 +1338,7 @@ func exportDecoderInputCount(request ExportRequest, source ExportSource) int {
 			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
 			start := maxTime(exportStart, video.RecordedAt, cursor)
 			end := minTime(exportEnd, videoEnd)
-			if !end.After(start) || !isLinuxAbsolutePath(video.Path) {
+			if !end.After(start) || !isHostOrLinuxAbsolutePath(video.Path) {
 				continue
 			}
 			count++
@@ -1579,6 +1899,9 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 		"high":     {width: 1920, height: 1080, fps: 30, bitrate: int(highExportReservedKbps)},
 		"original": {width: 1448, height: 938, fps: 36},
 	}[request.Quality]
+	if request.uploadProfile != nil {
+		profile, ok = *request.uploadProfile, true
+	}
 	if !ok || !isHostOrLinuxAbsolutePath(output) {
 		return nil, &InputError{Message: "导出参数无效"}
 	}
@@ -1588,7 +1911,7 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 	if err != nil {
 		return nil, err
 	}
-	useHEVC := request.Quality == "high" || request.Quality == "original"
+	useHEVC := request.Quality == "high" || request.Quality == "original" || request.uploadProfile != nil
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-y"}
 	filters := make([]string, 0, len(source.Videos)*2)
 	cameraLabels := make([]string, 0, len(tiles))
@@ -1602,7 +1925,7 @@ func exportArgs(request ExportRequest, source ExportSource, output string, subti
 			videoEnd := video.RecordedAt.Add(time.Duration(video.Duration * float64(time.Second)))
 			start := maxTime(exportStart, video.RecordedAt, cursor)
 			end := minTime(exportEnd, videoEnd)
-			if !end.After(start) || !isLinuxAbsolutePath(video.Path) {
+			if !end.After(start) || !isHostOrLinuxAbsolutePath(video.Path) {
 				continue
 			}
 			if inputIndex >= maxExportDecoderInputs {

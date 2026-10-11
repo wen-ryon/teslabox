@@ -1,0 +1,89 @@
+.nas-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:18px 0}.nas-fields label{display:flex;flex-direction:column;gap:6px}.nas-fields label[hidden]{display:none}.nas-quality{grid-column:1/-1}.nas-upload-dialog{width:min(760px,94vw);max-height:90vh;overflow:auto;border:1px solid var(--line,#ddd);border-radius:18px;padding:24px;background:var(--surface,#111);color:var(--text,#222)}.nas-upload-dialog::backdrop{background:#0009}.nas-moments,.nas-cameras{display:flex;gap:12px;flex-wrap:wrap;padding:12px 0}.nas-moments label,.nas-cameras label{display:flex;align-items:center;gap:6px}.nas-task{margin:14px 0;padding:12px;border:1px solid var(--line,#ddd);border-radius:12px;overflow-wrap:anywhere}.nas-task button{margin-right:10px}.nas-upload-dialog fieldset{margin:14px 0}.nas-status{min-height:24px}
+.nas-upload-dialog .nas-choice{display:flex;align-items:center;gap:8px;margin:16px 0}.nas-upload-dialog input[type="checkbox"]{width:16px;height:16px;margin:0;padding:0;flex:0 0 16px;accent-color:var(--accent)}.nas-moments label,.nas-cameras label{white-space:nowrap}
+.nas-default-form{display:flex;align-items:end;gap:12px;flex-wrap:wrap;margin-top:16px}
+.nas-default-form label{display:grid;gap:8px;flex:1;min-width:220px;font-size:13px}
+.nas-upload-dialog{width:min(700px,calc(100vw - 32px));padding:24px;max-height:calc(100dvh - 32px);box-shadow:0 24px 80px #0009}
+.nas-dialog-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.nas-dialog-heading .eyebrow{margin:0 0 6px;font-size:11px}
+.nas-dialog-heading h2{margin:0;font-size:25px;letter-spacing:-.02em;line-height:1.3}
+.nas-dialog-heading button{width:32px;min-height:32px;padding:0;border:0;background:transparent;color:var(--muted);font-size:24px;box-shadow:none}
+.nas-session-caption{margin:10px 0 18px;font-size:12px}
+.nas-target-summary{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-hover,#161616)}
+.nas-target-caption{color:var(--muted);font-size:11px}
+.nas-target-name{display:flex;align-items:center;gap:10px;margin-top:6px;overflow-wrap:anywhere}
+.nas-target-name strong{font-size:16px}
+.nas-target-name>span{padding:3px 7px;border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:10px}
+.nas-default-quality{margin:8px 0 0;font-size:12px;line-height:1.6}
+.nas-upload-dialog .nas-choice{position:relative;padding:13px 14px;border:1px solid var(--line);border-radius:12px;gap:12px;cursor:pointer}
+.nas-choice>span{display:grid;gap:4px}.nas-choice strong{font-size:13px}.nas-choice small{font-size:11px;color:var(--muted)}
+.nas-upload-dialog .nas-choice input[type="checkbox"]{position:absolute;width:1px;height:1px;opacity:0;clip-path:inset(50%)}
+.nas-switch{position:relative;flex:0 0 36px;width:36px;height:20px;border-radius:99px;background:#35353b;transition:background .15s}
+.nas-switch::after{position:absolute;content:"";width:16px;height:16px;top:2px;left:2px;border-radius:50%;background:#fff;transition:transform .15s}
+.nas-choice input:checked+.nas-switch{background:var(--accent)}.nas-choice input:checked+.nas-switch::after{transform:translateX(16px)}
+.nas-choice:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.nas-upload-dialog fieldset{min-width:0;border:1px solid var(--line);border-radius:14px;padding:12px 16px 16px;margin:18px 0}
+.nas-upload-dialog fieldset[hidden]{display:none}.nas-upload-dialog legend{padding:0 6px;font-size:13px;font-weight:700;color:var(--text)}
+.nas-selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:2px 0 12px;font-size:11px}
+.nas-selection-toolbar>div{display:flex;gap:6px}.nas-selection-toolbar button{min-height:28px;padding:3px 9px;font-size:11px;box-shadow:none;background:transparent;color:var(--muted)}
+.nas-upload-dialog .nas-moments,.nas-upload-dialog .nas-cameras{display:grid;gap:8px;padding:0;grid-template-columns:repeat(3,minmax(0,1fr))}
+.nas-upload-dialog .nas-moments{max-height:210px;overflow:auto;grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}
+.nas-upload-dialog .nas-moments label,.nas-upload-dialog .nas-cameras label{min-width:0;min-height:44px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0c0c0e;cursor:pointer;gap:10px;white-space:normal;transition:border-color .15s,background .15s}
+.nas-upload-dialog .nas-moments label:hover,.nas-upload-dialog .nas-cameras label:hover{border-color:var(--muted)}
+.nas-upload-dialog :is(.nas-moments,.nas-cameras) label:has(input:checked){border-color:var(--accent);background:rgba(59,130,246,.10)}
+.nas-upload-dialog :is(.nas-moments,.nas-cameras) label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.nas-upload-dialog :is(.nas-moments,.nas-cameras) input[type="checkbox"]{appearance:none;width:17px;height:17px;flex-basis:17px;border:1px solid #60606b;border-radius:5px;background:#151518}
+.nas-upload-dialog :is(.nas-moments,.nas-cameras) input:checked{border-color:var(--accent);background-color:var(--accent);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='m4 8 3 3 5-6' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-position:center;background-repeat:no-repeat}
+.nas-upload-dialog .nas-moments label>span{display:grid;gap:4px;min-width:0}.nas-moments strong{font-size:12px;font-weight:650}.nas-moments small{color:var(--muted);font-size:10px}.nas-cameras label>span{font-size:12px;font-weight:600}
+.nas-cameras label:has(input:disabled:not(:checked)){opacity:.4;cursor:default}.nas-cameras label:has(input:disabled:checked){cursor:default}
+.nas-camera-help{font-size:11px;margin:2px 0 12px}.nas-upload-dialog .nas-quality .nas-fields{margin:6px 0 12px;gap:12px}.nas-upload-dialog .nas-quality label{font-size:12px}.nas-upload-dialog .nas-quality .muted{font-size:11px;line-height:1.6}
+.nas-status:empty{display:none}.nas-status{font-size:12px;line-height:1.6}.nas-upload-dialog .modal-actions{display:flex;justify-content:flex-end;gap:10px;padding-top:4px;margin-top:18px}.nas-upload-dialog .modal-actions button{min-width:88px;font-size:13px}
+@media(max-width:520px){.nas-upload-dialog{width:calc(100vw - 24px);padding:18px;border-radius:16px;max-height:calc(100dvh - 24px)}.nas-upload-dialog fieldset{padding:10px 12px 12px}.nas-upload-dialog .nas-moments,.nas-upload-dialog .nas-cameras{grid-template-columns:repeat(2,minmax(0,1fr))}.nas-upload-dialog .nas-moments label,.nas-upload-dialog .nas-cameras label{padding:10px 8px;gap:7px}.nas-choice small{line-height:1.5}.nas-upload-dialog .modal-actions{display:grid;grid-template-columns:1fr 1fr}.nas-default-form label{min-width:0;flex-basis:100%}.nas-default-form button{width:100%}.nas-selection-toolbar{gap:6px}}
+.nas-upload-dialog .nas-moments{grid-template-columns:repeat(2,minmax(0,1fr));max-height:300px;align-items:start}
+.nas-moment-option{min-width:0}.nas-minute-status.has-uploads{color:#4ade80}
+.nas-minute-records{margin-top:5px;border:1px solid var(--line);border-radius:9px;overflow:hidden;font-size:11px}
+.nas-minute-records[hidden]{display:none}.nas-minute-records summary{padding:8px 10px;cursor:pointer;color:var(--muted)}
+.nas-minute-records[open] summary{border-bottom:1px solid var(--line);color:var(--text)}
+.nas-file-records article{padding:10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.nas-file-records article:last-child{border-bottom:0}
+.nas-file-records strong{font-size:12px;line-height:1.6}.nas-file-records p{margin:5px 0 0;font-size:11px;color:var(--muted);line-height:1.6}
+.nas-file-records .nas-record-path{font-family:monospace;font-size:9px}
+.nas-moment-option:has(.nas-minute-records[open]){grid-column:1/-1}.nas-file-records{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:8px}
+.nas-file-records article{border:1px solid var(--line);border-radius:8px}.nas-file-records article:last-child{border-bottom:1px solid var(--line)}
+.nas-record-location{margin-top:7px}.nas-record-location summary{padding:2px 0;font-size:10px}.nas-record-location[open] summary{border-bottom:0}
+.nas-upload-plan{padding:13px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface-hover,#161616)}
+.nas-upload-plan strong{font-size:13px}.nas-upload-plan p{margin:7px 0 0;font-size:11px;line-height:1.6;color:var(--muted)}.nas-upload-plan .nas-plan-warning{color:#fbbf24}
+@media(max-width:520px){.nas-upload-dialog .nas-moments{max-height:260px}.nas-upload-plan{padding:12px}.nas-file-records article{padding:8px}.nas-file-records{grid-template-columns:1fr}}
+.nas-upload-dialog .nas-moments.nas-short-session{max-height:none;overflow:visible}
+.nas-moments .nas-minute-brief{color:var(--text);font-size:10px;line-height:1.6}.nas-minute-brief[hidden]{display:none}
+#nas-upload-settings .nas-server-card,#nas-upload-settings .nas-quality-card{margin-top:16px}
+#nas-upload-settings .nas-default-form{margin-top:0;gap:12px}
+#nas-upload-settings .nas-default-form label{font-size:var(--ui-meta-font);gap:8px;min-width:0}
+#nas-upload-settings .nas-form-status{margin-top:12px;line-height:1.65}
+#nas-upload-settings .nas-form-status:empty{display:none}
+#nas-upload-settings .nas-server-editor{margin:20px 0;padding-top:18px;border-top:1px solid var(--line-soft)}
+#nas-upload-settings .nas-server-fields{gap:16px}
+#nas-upload-settings .nas-server-fields label,#nas-upload-settings .nas-quality-settings label{gap:8px;min-width:0}
+#nas-upload-settings label small{display:block;font-size:var(--ui-small-font);font-weight:400;color:var(--muted);line-height:1.65}
+#nas-upload-settings .nas-full-width{grid-column:1/-1}
+#nas-upload-settings .nas-http-choice{display:flex;flex-direction:row;gap:12px;margin-top:20px;font-weight:400}
+#nas-upload-settings .nas-http-choice input{position:absolute;width:1px;height:1px;padding:0;margin:0;min-height:0;clip-path:inset(50%)}
+#nas-upload-settings .nas-http-choice .toggle-choice-copy{gap:6px}
+#nas-upload-settings .nas-http-choice strong{font-size:var(--ui-meta-font)}
+#nas-upload-settings .nas-action-buttons{display:flex;gap:10px;flex-wrap:wrap}
+#nas-upload-settings .nas-server-actions{gap:14px}
+#nas-upload-settings .nas-server-actions>span,#nas-upload-settings .nas-quality-card .form-actions>span{font-size:var(--ui-small-font);line-height:1.65}
+#nas-upload-settings .nas-quality-settings{min-width:0;border:0;padding:0;margin:0}
+#nas-upload-settings .nas-quality-settings .nas-fields{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:0}
+#nas-upload-settings .nas-quality-help{margin-top:16px;line-height:1.7}
+#nas-upload-settings .nas-history-card{margin-top:24px}
+#nas-upload-settings .nas-automatic-card{margin-top:16px}
+#nas-upload-settings .nas-auto-switch{display:flex;flex-direction:row;gap:12px;font-weight:400;margin-top:16px}
+#nas-upload-settings .nas-auto-switch input{position:absolute;width:1px;height:1px;padding:0;margin:0;min-height:0;clip-path:inset(50%)}
+#nas-upload-settings .nas-auto-switch .toggle-choice-copy{gap:6px}
+#nas-upload-settings .nas-auto-quality{margin-top:20px}
+#nas-upload-settings .nas-auto-quality legend{font-size:var(--ui-meta-font);font-weight:650;margin-bottom:16px}
+#nas-upload-settings #nas-auto-target,#nas-upload-settings #nas-auto-scan:not(:empty){margin-bottom:16px}
+#nas-upload-settings .nas-history-card .settings-card-head{align-items:flex-start}
+#nas-upload-settings .nas-task{border-color:var(--line-soft);background:var(--surface-raised)}
+#nas-upload-settings .nas-task>p{margin-top:10px}
+#nas-upload-settings .nas-task>button{margin-top:12px}
+@media(max-width:700px){#nas-upload-settings .nas-default-form{align-items:stretch;flex-direction:column}#nas-upload-settings .nas-default-form label{flex-basis:auto}#nas-upload-settings .nas-default-form button{width:100%}#nas-upload-settings .nas-server-fields,#nas-upload-settings .nas-quality-settings .nas-fields{grid-template-columns:1fr}#nas-upload-settings .nas-action-buttons{width:100%;display:grid;grid-template-columns:1fr 1fr}#nas-upload-settings .nas-action-buttons button{width:100%;min-width:0}#nas-upload-settings .nas-quality-card .settings-card-head .badge{align-self:flex-start}}

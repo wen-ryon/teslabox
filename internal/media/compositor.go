@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,8 @@ type CompositeRequest struct {
 	Camera       string
 	Inputs       map[string]string
 	InputOffsets map[string]float64
+	// HLSDirectory 仅由服务端创建，空值沿用直接 fMP4 输出。
+	HLSDirectory string
 }
 
 // InputError 让 API 可以区分用户参数问题和媒体工具链故障。
@@ -91,7 +95,12 @@ func (c *Compositor) Stream(ctx context.Context, request CompositeRequest, outpu
 		countingOutput := &byteCountingWriter{output: output}
 		if err := c.runner.RunStreaming(ctx, c.ffmpegPath, args, countingOutput); err != nil {
 			inputIndex, retry := incompatibleDRMInput(err)
-			if countingOutput.bytes > 0 || !retry || inputIndex < 0 || inputIndex >= len(tiles) {
+			publishedHLS := false
+			if request.HLSDirectory != "" {
+				_, playlistErr := os.Stat(filepath.Join(request.HLSDirectory, "index.m3u8"))
+				publishedHLS = playlistErr == nil
+			}
+			if countingOutput.bytes > 0 || publishedHLS || !retry || inputIndex < 0 || inputIndex >= len(tiles) {
 				return fmt.Errorf("实时合成录像: %w", err)
 			}
 			camera := tiles[inputIndex].camera
@@ -240,10 +249,22 @@ func compositeArgsWithCompatibility(request CompositeRequest, compatibility map[
 		"-filter_complex", strings.Join(filters, ";"), "-map", "[out]", "-an",
 		"-c:v", "h264_rkmpp", "-rc_mode", "CBR", "-b:v", bitrate,
 		"-maxrate", bitrate, "-bufsize", strconv.Itoa(profile.bitrate*2)+"k",
-		"-g", strconv.Itoa(profile.fps*2), "-fps_mode", "cfr",
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
-		"-f", "mp4", "pipe:1",
+		// 缩短首个 fMP4 媒体片段的等待时间，避免移动端在硬件冷启动后继续等待完整两秒 GOP。
+		"-g", strconv.Itoa(profile.fps/2), "-fps_mode", "cfr",
 	)
+	if request.HLSDirectory != "" {
+		if !filepath.IsAbs(request.HLSDirectory) {
+			return nil, nil, &InputError{Message: "HLS 临时目录必须是绝对路径"}
+		}
+		// 原子发布完整分片，避免 Safari 读到仍在增长的媒体文件。
+		args = append(args, "-y", "-f", "hls", "-hls_time", "1", "-hls_list_size", "0",
+			"-hls_playlist_type", "event", "-hls_segment_type", "fmp4",
+			"-hls_flags", "independent_segments+temp_file", "-hls_fmp4_init_filename", "init.mp4",
+			"-hls_segment_filename", filepath.Join(request.HLSDirectory, "segment-%05d.m4s"),
+			filepath.Join(request.HLSDirectory, "index.m3u8"))
+	} else {
+		args = append(args, "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
+	}
 	return args, tiles, nil
 }
 

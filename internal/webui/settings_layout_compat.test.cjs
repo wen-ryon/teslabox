@@ -14,6 +14,8 @@ function environment({hash = "", saved = "", mobile = false} = {}) {
     constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.className = ""; this.id = ""; this.hidden = false; }
     get classList() { return {toggle:(name, on) => {const set = new Set(this.className.split(/\s+/).filter(Boolean)); if (on) set.add(name); else set.delete(name); this.className = [...set].join(" ");}, contains:name => this.className.split(/\s+/).includes(name), remove:name => this.classList.toggle(name, false)}; }
     append(...children) { for (const child of children) { if (child.parent) child.parent.children = child.parent.children.filter(node => node !== child); child.parent = this; this.children.push(child); } }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); this.parent = null; }
+    prepend(...children) { this.append(...children); this.children = [...children, ...this.children.filter(node => !children.includes(node))]; }
     replaceChildren(...children) { for (const child of this.children) child.parent = null; this.children = []; this.append(...children); }
     setAttribute(key, value) { if (key === "class") this.className = value; else this[key] = value; }
     removeAttribute(key) { delete this[key]; }
@@ -33,32 +35,43 @@ function environment({hash = "", saved = "", mobile = false} = {}) {
   const sections = new Map();
   for (const match of html.matchAll(/<section([^>]*class="[^"]*settings-section[^>]*aria-labelledby="([^"]+)"[^>]*)>/g)) {
     const title = match[2], id = match[1].match(/\bid="([^"]+)"/)?.[1];
-    if (!id || !title.endsWith("settings-title") && !["security-title","update-title","power-title"].includes(title)) continue;
-    const section = add(content, "section", id, "settings-section"); sections.set(id, section);
+    if (!title.endsWith("settings-title") && !["security-title","update-title","power-title"].includes(title)) continue;
+    const section = add(content, "section", id || "settings-panel-5", "settings-section"); sections.set(id || "settings-panel-5", section);
     const heading = add(section,"h2",title); heading.textContent = title;
   }
   for (const id of ["fan-mode-automatic", "fan-mode-manual"]) add(sections.get("settings-panel-6"),"button",id);
   const retain = add(sections.get("settings-panel-5"),"select","export-retain-count");
+  const exportSection = sections.get("settings-panel-5");
+  add(exportSection,"div","", "settings-section-heading");
+  add(exportSection,"div","", "export-history-head");
+  for (const id of ["export-retention-status", "export-history-list"]) add(exportSection,"div",id);
+  const backup = add(content,"section","nas-upload-settings","settings-section");
+  add(backup,"div","","settings-section-heading");
+  for (const cls of ["nas-server-card","nas-quality-card","nas-automatic-card","nas-history-card"]) add(backup,"article","",cls);
+  add(backup,"div","nas-auto-events");
+  for (const id of ["backup-content","exports-content","export-status-slot","export-draft-notice","exports-page","app-view"]) add(root,"div",id);
+  for (const name of ["history","targets","rules"]) { const tab = add(root,"button",`backup-${name}-tab`); add(tab,"span","","settings-draft-dot"); }
   const store = new Map(saved ? [["teslabox-settings-tab",saved]] : []);
   const location = {pathname:"/settings",hash};
   const document = {getElementById:id => [root,...root.querySelectorAll("*")].find(node => node.id === id) || null, createElement:tag => new Node(tag), createElementNS:(_,tag) => new Node(tag), querySelectorAll:selector => root.querySelectorAll(selector), addEventListener(name,callback) {this[name] = callback;}};
-  const context = vm.createContext({document,window:{location,matchMedia:() => ({matches:mobile,addEventListener(){}}),history:{pushState(_,unused,url){const [pathname,hash=""] = url.split("#");location.pathname=pathname;location.hash=hash ? "#"+hash : "";}}},localStorage:{getItem:key => store.get(key),setItem:(key,value) => store.set(key,value)}});
+  const calls=[];
+  const context = vm.createContext({document,showPage: page => calls.push(page),window:{location,setInterval(){},matchMedia:() => ({matches:mobile,addEventListener(){}}),history:{pushState(_,unused,url){const [pathname,hash=""] = url.split("#");location.pathname=pathname;location.hash=hash ? "#"+hash : "";}}},localStorage:{getItem:key => store.get(key),setItem:(key,value) => store.set(key,value)}});
   vm.runInContext(source,context);
-  return {document,context,layout:context.TeslaBoxSettingsLayout,sections,store,tabs,content,retain};
+  return {document,context,layout:context.TeslaBoxSettingsLayout,sections,store,tabs,content,retain,calls};
 }
 
 test("完整初始化保留导出节点，CarPlay 位于网络下面，重复初始化不重复菜单", () => {
   const model = environment();
   model.layout.initialize(); model.layout.initialize();
   assert.deepEqual(model.tabs.children.map(node => node.dataset.settingsGroup),["network","carplay","storage","thermal","security","system"]);
-  assert.equal(model.sections.get("settings-panel-5").parent.id,"settings-group-storage");
+  assert.equal(model.sections.get("settings-panel-5").parent.id,"exports-content");
   assert.equal(model.document.getElementById("export-retain-count"),model.retain);
 });
 test("旧设置 localStorage 区段 ID 恢复导出，旧区段书签同样有效", () => {
   for (const options of [{saved:"settings-panel-5"},{hash:"#settings-panel-5"},{hash:"#settings-tab=settings-panel-5"},{hash:"#storage/settings-panel-5"}]) {
     const model = environment(options);model.layout.initialize();
-    assert.equal(model.sections.get("settings-panel-5").hidden,false,JSON.stringify(options));
-    assert.equal(model.store.get("teslabox-settings-tab"),"settings-panel-5");
+    assert.deepEqual(model.calls,["exports"],JSON.stringify(options));
+    assert.equal(model.store.get("teslabox-settings-tab"),"");
   }
 });
 test("CarPlay URL 与程序选择都打开实际设置区段，旧存储跳转仍有效", () => {
@@ -78,10 +91,10 @@ test("导出草稿与原节点在分类切换中保留，保存通知清除草�
   assert.equal(model.retain.value,"12");assert.equal(model.layout.isDirty("export-settings-title"),true);
   model.layout.markClean("export-settings-title");assert.equal(model.layout.isDirty("export-settings-title"),false);
 });
-test("手机版旧导出书签直接显示详情而非隐藏菜单", () => {
+test("手机版旧导出书签跳转独立导出页面", () => {
   const model = environment({mobile:true,hash:"#settings-panel-5"});model.layout.initialize();
   assert.equal(model.sections.get("settings-panel-5").hidden,false);
-  assert.equal(model.document.getElementById("settings-page").classList.contains("settings-detail-open"),true);
+  assert.deepEqual(model.calls,["exports"]);
 });
 test("app 初始化、设置跳转与认证后加载使用实际模块钩子", () => {
   const body = name => app.match(new RegExp("^function "+name+"\\([^\\n]*\\{.*?^}","ms"))[0];
@@ -92,10 +105,14 @@ test("app 初始化、设置跳转与认证后加载使用实际模块钩子", (
   context.initializeSettingsTabs();context.activateSettingsTab("settings-panel-5");context.showApp();context.showPage("settings",false);
   assert.deepEqual(calls,["init","settings-panel-5","load","enter","settings"]);
 });
-test("导出区域保持数据盘语义和既有 API，未混入新 workspace 或录像缓存", () => {
-  assert.ok(html.includes("导出完成后会保存在数据盘"));
+test("完整发行包含备份与系统盘录像缓存，同时保留导出设置 API", () => {
+  assert.ok(html.includes("系统盘"));
+  assert.ok(html.includes('id="backup-page"'));
+  assert.ok(html.includes('id="exports-page"'));
   assert.ok(html.includes('id="export-retain-count"'));
   assert.ok(app.includes('request("/api/v1/export-settings"'));
   assert.ok(app.includes('method:"POST", headers:{"Content-Type":"application/json"}'));
-  for (const text of [source,html,app]) for (const marker of ["nas-upload", "exports-page", "cache_idle_hours", "playbackTraceMarker"]) assert.ok(!text.includes(marker),marker);
+  assert.ok(app.includes("cache_idle_hours"));
+  assert.ok(html.includes("nas-upload.js"));
+  for (const text of [source,html,app]) assert.ok(!text.includes("playbackTraceMarker"));
 });

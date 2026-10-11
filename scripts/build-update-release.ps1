@@ -13,6 +13,8 @@ param(
     [string]$ExpectedMediaSHA256 = "",
     [string]$CarPlayArchive = "",
     [string]$CarPlaySHA256 = "",
+    [string]$RuntimeDescriptor = "",
+    [string]$NASArchive = "",
     [switch]$AllowDirty
 )
 
@@ -23,6 +25,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(?:-rc\.\d+)?$') {
 if ($Version -match '-rc\.' -and $Channel -ne "beta") {
     throw "RC releases must use the beta channel."
 }
+if ($RuntimeDescriptor -and (-not $CarPlayArchive -or -not $NASArchive)) { throw "Independent delivery requires all three fixed archive inputs." }
 if ($CarPlayArchive -or $CarPlaySHA256) {
     if (-not $CarPlayArchive -or $CarPlaySHA256 -cnotmatch '^[0-9a-f]{64}$' -or
         $ExpectedCommit -cnotmatch '^[0-9a-f]{40}$' -or $ExpectedMediaSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
@@ -85,12 +88,15 @@ $helperTemporary = "$helper.tmp"
 $manifest = Join-Path $output "latest.json"
 $versionManifest = Join-Path $output "manifest-$Version.json"
 foreach ($artifact in @($binary, $helper, $binaryTemporary, $helperTemporary, $manifest, $versionManifest,
+    (Join-Path $output "runtime-components.json"), (Join-Path $output "runtime-components.json.sha256"),
     (Join-Path $output "teslabox-linux-arm64.sha256"), (Join-Path $output "teslabox-update-helper-linux-arm64.sha256"))) {
     if (Test-Path -LiteralPath $artifact) {
         throw "Refusing to overwrite a release artifact: $artifact"
     }
 }
-$mediaPath = (Resolve-Path (Join-Path $root $MediaArchive)).Path
+$mediaInput = $MediaArchive
+if (-not [IO.Path]::IsPathRooted($mediaInput)) { $mediaInput = Join-Path $root $mediaInput }
+$mediaPath = (Resolve-Path -LiteralPath $mediaInput).Path
 $mediaChecksumPath = "$mediaPath.sha256"
 if (-not (Test-Path -LiteralPath $mediaChecksumPath -PathType Leaf)) {
     throw "The media archive checksum is missing: $mediaChecksumPath"
@@ -102,6 +108,14 @@ if ($mediaChecksum -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $mediaPath).
 $bundleDirectory = Join-Path $root "internal\mediabundle\bundle"
 if ($ExpectedMediaSHA256 -and $mediaChecksum -cne $ExpectedMediaSHA256) {
     throw "The media archive differs from the approved release input."
+}
+$descriptorPath = ""
+$runtimeDescription = $null
+$descriptorBytes = $null
+if ($RuntimeDescriptor) {
+    $descriptorPath = (Resolve-Path -LiteralPath $RuntimeDescriptor).Path
+    $descriptorBytes = [IO.File]::ReadAllBytes($descriptorPath)
+    $runtimeDescription = [Text.Encoding]::UTF8.GetString($descriptorBytes) | ConvertFrom-Json
 }
 $carPlayPath = ""
 if ($CarPlayArchive) {
@@ -116,8 +130,11 @@ if ($CarPlayArchive) {
     $packageText = & tar -xOf $carPlayPath PACKAGE.json
     if ($LASTEXITCODE -ne 0) { throw "The CarPlay runtime package metadata is missing." }
     $innerPackage = ($packageText -join "`n") | ConvertFrom-Json
+    $expectedRuntimeVersion = $Version
+    if ($runtimeDescription) { $expectedRuntimeVersion = ($runtimeDescription.components | Where-Object id -eq "carplay").version }
     if ($innerPackage.schema -ne 1 -or $innerPackage.package_kind -cne "inner" -or
-        $innerPackage.version -cne $Version -or $innerPackage.release_commit -cne $fullCommit) {
+        $innerPackage.version -cne $expectedRuntimeVersion -or
+        (-not $runtimeDescription -and $innerPackage.release_commit -cne $fullCommit)) {
         throw "The CarPlay inner package is not bound to this release version and source commit."
     }
 }
@@ -127,8 +144,23 @@ foreach ($directory in @($bundleDirectory, $carPlayBundleDirectory)) {
         throw "Refusing to overwrite an existing embed directory: $directory"
     }
 }
+$descriptorDirectory = Join-Path $root "internal\runtimecomponents\release"
+if ($descriptorPath -and (Test-Path -LiteralPath $descriptorDirectory)) { throw "Refusing to overwrite descriptor embed directory." }
 $buildTags = "releasebundle"
 if ($carPlayPath) { $buildTags += ",carplaybundle" }
+if ($descriptorPath) {
+    $buildTags = "componentdelivery"
+    foreach ($component in $runtimeDescription.components) {
+        $uri = [Uri]$component.url
+        if ($uri.Host -match "(^|\.)(invalid|localhost|example)$" -or $uri.Host -eq "example.com") { throw "Release hosting must be explicitly configured." }
+    }
+    $savedOS = $env:GOOS; $savedArch = $env:GOARCH
+    try {
+        $env:GOOS = (go env GOHOSTOS).Trim(); $env:GOARCH = (go env GOHOSTARCH).Trim()
+        go -C $root run .\cmd\teslabox-runtime -validate-descriptor $descriptorPath -input "media=$mediaPath" -input "carplay=$carPlayPath" -input "nas=$((Resolve-Path -LiteralPath $NASArchive).Path)"
+        if ($LASTEXITCODE -ne 0) { throw "Bound component descriptor or archive input validation failed." }
+    } finally { $env:GOOS = $savedOS; $env:GOARCH = $savedArch }
+}
 $ldflags = "-s -w -X github.com/wen-ryon/teslabox/internal/version.Version=$Version -X github.com/wen-ryon/teslabox/internal/version.Commit=$commit"
 
 $previousGOOS = $env:GOOS
@@ -136,6 +168,11 @@ $previousGOARCH = $env:GOARCH
 $previousCGO = $env:CGO_ENABLED
 $previousGOCACHE = $env:GOCACHE
 try {
+    if ($descriptorPath) {
+        New-Item -ItemType Directory -Path $descriptorDirectory | Out-Null
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($descriptorPath)) -cne [Convert]::ToBase64String($descriptorBytes)) { throw "Descriptor changed during input validation." }
+        [IO.File]::WriteAllBytes((Join-Path $descriptorDirectory "descriptor.json"), $descriptorBytes)
+    } else {
 	New-Item -ItemType Directory -Force -Path $bundleDirectory | Out-Null
 	Copy-Item -Force -LiteralPath $mediaPath -Destination (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz")
 	Copy-Item -Force -LiteralPath $mediaChecksumPath -Destination (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz.sha256")
@@ -143,6 +180,7 @@ try {
         New-Item -ItemType Directory -Path $carPlayBundleDirectory | Out-Null
         Copy-Item -LiteralPath $carPlayPath -Destination (Join-Path $carPlayBundleDirectory "carplay-runtime.tar.gz")
         Copy-Item -LiteralPath "$carPlayPath.sha256" -Destination (Join-Path $carPlayBundleDirectory "carplay-runtime.tar.gz.sha256")
+    }
     }
     $env:GOOS = "linux"
     $env:GOARCH = "arm64"
@@ -171,9 +209,10 @@ try {
         (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz"),
         (Join-Path $bundleDirectory "teslabox-media-debian11-arm64.tar.gz.sha256"),
         (Join-Path $carPlayBundleDirectory "carplay-runtime.tar.gz"),
-        (Join-Path $carPlayBundleDirectory "carplay-runtime.tar.gz.sha256")
+        (Join-Path $carPlayBundleDirectory "carplay-runtime.tar.gz.sha256"),
+        (Join-Path $descriptorDirectory "descriptor.json")
     )) { Remove-Item -LiteralPath $embed -Force -ErrorAction SilentlyContinue }
-    foreach ($directory in @($bundleDirectory, $carPlayBundleDirectory)) {
+    foreach ($directory in @($bundleDirectory, $carPlayBundleDirectory, $descriptorDirectory)) {
         Remove-Item -LiteralPath $directory -ErrorAction SilentlyContinue
     }
     $env:GOOS = $previousGOOS
@@ -236,5 +275,9 @@ foreach ($expected in @(
     }
 }
 
+if ($descriptorPath) {
+    [IO.File]::WriteAllBytes((Join-Path $output "runtime-components.json"), $descriptorBytes)
+    [IO.File]::WriteAllText((Join-Path $output "runtime-components.json.sha256"), ((Get-FileHash -LiteralPath (Join-Path $output "runtime-components.json") -Algorithm SHA256).Hash.ToLowerInvariant() + "`n"), [Text.Encoding]::ASCII)
+}
 Get-FileHash -Algorithm SHA256 $binary, $helper, $manifest, $versionManifest, $binaryChecksum, $helperChecksum |
     Format-Table Path, Hash

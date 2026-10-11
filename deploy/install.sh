@@ -506,9 +506,7 @@ for REQUIRED_PAYLOAD_FILE in \
     scripts/teslabox-ap-setup.sh \
     scripts/teslabox-fan-early.sh \
     scripts/install-media-toolchain.sh \
-    keyring/radxa-archive-keyring_0.2.2_all.deb \
-    media/teslabox-media-debian11-arm64.tar.gz \
-    media/teslabox-media-debian11-arm64.tar.gz.sha256; do
+    keyring/radxa-archive-keyring_0.2.2_all.deb; do
     validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
 done
 
@@ -520,6 +518,21 @@ for REQUIRED_EXECUTABLE_FILE in \
     libexec/teslabox-update-helper; do
     validate_elf_aarch64_file "${REQUIRED_EXECUTABLE_FILE}"
 done
+
+RUNTIME_DELIVERY="embedded"
+if [ -f "${PAYLOAD_DIR}/libexec/teslabox-runtime" ]; then
+    RUNTIME_DELIVERY="independent"
+    validate_elf_aarch64_file "libexec/teslabox-runtime"
+    validate_elf_aarch64_file "libexec/teslabox-fsck.exfat"
+    validate_payload_file "config/runtime-components.json"
+    chmod 0755 "${PAYLOAD_DIR}/libexec/teslabox-runtime"
+    "${PAYLOAD_DIR}/libexec/teslabox-runtime" \
+        -validate-descriptor "${PAYLOAD_DIR}/config/runtime-components.json" \
+        -bound-main "${PAYLOAD_DIR}/bin/teslabox" || die "首装工具、描述和主程序绑定不一致。"
+else
+    validate_payload_file "media/teslabox-media-debian11-arm64.tar.gz"
+    validate_payload_file "media/teslabox-media-debian11-arm64.tar.gz.sha256"
+fi
 
 log "安装 Debian 运行依赖"
 export DEBIAN_FRONTEND=noninteractive
@@ -534,6 +547,21 @@ if ! systemctl is-active --quiet teslabox.service 2>/dev/null && command -v ss >
     if ss -H -ltn 'sport = :80' 2>/dev/null | sed -n '1p' | read -r _; then
         die "80 端口已被其他服务占用，请先释放该端口。"
     fi
+fi
+
+if [ "${RUNTIME_DELIVERY}" = "independent" ]; then
+    # 工具是动态 ARM64 ELF，必须在安装依赖后真实执行，不能只凭文件头判断可运行。
+    chmod 0755 "${PAYLOAD_DIR}/libexec/teslabox-fsck.exfat"
+    FSCK_TEST_EXIT=0
+    FSCK_TEST_OUTPUT="$("${PAYLOAD_DIR}/libexec/teslabox-fsck.exfat" -V 2>&1)" || FSCK_TEST_EXIT=$?
+    case "${FSCK_TEST_EXIT}:${FSCK_TEST_OUTPUT}" in
+        0:*1.2.0*|16:*1.2.0*) ;;
+        *) die "基础录像检查工具无法在本机运行；未替换主程序。" ;;
+    esac
+    # 预缓存验证不激活 CarPlay，主程序以自身摘要执行原有安装事务。
+    install -d -m 0700 /var/lib/teslabox-system/runtime-cache
+    install -d -m 0700 "${PAYLOAD_DIR}/runtime-cache"
+    "${PAYLOAD_DIR}/libexec/teslabox-runtime" -seed-dir "${PAYLOAD_DIR}/runtime-cache" || die "离线组件校验或预缓存失败；未替换主程序。"
 fi
 
 log "安装 TeslaBox 程序和诊断工具"
@@ -555,9 +583,19 @@ install -m 0755 "${PAYLOAD_DIR}/bin/teslabox-image-init" /usr/local/bin/teslabox
 install -m 0755 "${PAYLOAD_DIR}/bin/teslabox-gadget" /usr/local/bin/teslabox-gadget
 install -m 0755 "${PAYLOAD_DIR}/libexec/teslabox-update-helper" /usr/local/libexec/teslabox-update-helper
 
-log "安装 Rockchip FFmpeg、MPP 和 RGA 媒体工具链"
-sh "${PAYLOAD_DIR}/scripts/install-media-toolchain.sh" \
-    "${PAYLOAD_DIR}/media/teslabox-media-debian11-arm64.tar.gz"
+if [ "${RUNTIME_DELIVERY}" = "independent" ]; then
+    install -m 0755 "${PAYLOAD_DIR}/libexec/teslabox-runtime" /usr/local/libexec/teslabox-runtime
+    if [ ! -e /opt/teslabox/media/bin/teslabox-fsck.exfat ]; then
+        [ ! -L /opt/teslabox/media ] || die "已安装媒体链接缺少录像检查工具，拒绝改写版本目录。"
+        install -d -m 0755 /opt/teslabox/media/bin
+        install -m 0755 "${PAYLOAD_DIR}/libexec/teslabox-fsck.exfat" /opt/teslabox/media/bin/teslabox-fsck.exfat
+    fi
+    log "主程序启动后按固定摘要独立准备媒体、CarPlay 和 NAS；缺网时保留录像与管理页。"
+else
+    log "安装 Rockchip FFmpeg、MPP 和 RGA 媒体工具链"
+    sh "${PAYLOAD_DIR}/scripts/install-media-toolchain.sh" \
+        "${PAYLOAD_DIR}/media/teslabox-media-debian11-arm64.tar.gz"
+fi
 
 if [ ! -f /etc/teslabox/teslabox.env ]; then
     MACHINE_SUFFIX="$(tr -d '-' </etc/machine-id 2>/dev/null | cut -c1-16 | tr '[:lower:]' '[:upper:]')"
@@ -678,7 +716,7 @@ fi
 log "启动 TeslaBox"
 systemctl restart teslabox.service
 HEALTHY="false"
-# 首装包含运行时预检与激活；按截止时间限时，单次请求也必须有超时。
+# 核心健康只验录像管理服务；组件就绪在设置中心独立显示，不因公网下载失败回滚。
 HEALTH_DEADLINE="$(($(date +%s) + 60))"
 while [ "$(date +%s)" -lt "${HEALTH_DEADLINE}" ]; do
     if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
@@ -697,6 +735,10 @@ if [ "${HEALTHY}" != "true" ]; then
     fi
     journalctl -u teslabox.service -n 80 --no-pager >&2 || true
     die "TeslaBox 未通过启动健康检查。"
+fi
+
+if [ "${RUNTIME_DELIVERY}" = "independent" ]; then
+    log "录像管理服务已启动；运行时就绪状态请查看设置中心，未完成组件会自动重试。"
 fi
 
 prepare_mt7922_wifi_firmware() {
