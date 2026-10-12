@@ -85,10 +85,10 @@ func NewConfiguredProvisioningManager(settingsPath, directory, runtime string) (
 		return nil, err
 	}
 	m.completedState = "video_verified"
-	m.reconcile = client.reconcile
+	m.bindServiceRecovery(client)
 	m.scanner = scanBlueZ
 	m.ready = func() bool {
-		if status, err := client.status(); err != nil || !status.ServiceActive {
+		if status, err := client.status(); err != nil || !status.ServiceActive && !status.OnboardingReady {
 			return false
 		}
 		_, _, err := configuredBinary(settingsPath)

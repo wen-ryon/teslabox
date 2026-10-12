@@ -35,7 +35,7 @@ func TestPairingTaskOutlivesHTTPRequestAndCancelWaitsForCleanup(t *testing.T) {
 	mux := http.NewServeMux()
 	registerCarPlayPairingRoutes(mux, m, parent)
 	rctx, endRequest := context.WithCancel(context.Background())
-	r := httptest.NewRequest("POST", "/api/v1/carplay/pairing/start", strings.NewReader(`{"phone_id":"02:11:22:33:44:55"}`)).WithContext(rctx)
+	r := httptest.NewRequest("POST", "/api/v1/carplay/pairing/start", strings.NewReader(`{"phone_id":"02:11:22:33:44:55","handoff_fingerprint":"","confirm_handoff":"yes"}`)).WithContext(rctx)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusAccepted {
@@ -56,7 +56,7 @@ func TestPairingTaskOutlivesHTTPRequestAndCancelWaitsForCleanup(t *testing.T) {
 		t.Fatal("未清理就释放任务", w.Code)
 	}
 	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/carplay/pairing/start", strings.NewReader(`{"phone_id":"02:11:22:33:44:55"}`)))
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/carplay/pairing/start", strings.NewReader(`{"phone_id":"02:11:22:33:44:55","handoff_fingerprint":"","confirm_handoff":"yes"}`)))
 	if w.Code != http.StatusConflict {
 		t.Fatal(w.Code)
 	}

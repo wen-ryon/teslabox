@@ -49,6 +49,13 @@ func TestConfiguredManagerBecomesReadyAfterColdServiceStartup(t *testing.T) {
 	if m.Ready() {
 		t.Fatal("服务停止后的清理终态不能启动新登记")
 	}
+	body, _ = json.Marshal(map[string]any{"running": false, "cleanup_complete": true, "onboarding_ready": true, "provisioning": serviceProvisioning{State: "idle"}})
+	if err := os.WriteFile(filepath.Join(runtime, "status.json"), body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !m.Ready() {
+		t.Fatal("待登记服务不应依赖已运行的视频或热点")
+	}
 }
 
 func TestConfiguredBinaryRejectsUnsafeMetadata(t *testing.T) {

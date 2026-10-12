@@ -17,7 +17,7 @@
     prompt.hidden=!pending;digits.textContent=pending?task.prompt.digits:'';
     get('scan').disabled=!available||busy||active||cleanup||snapshot?.scanning===true;
     target.disabled=get('scan').disabled;
-    get('start').disabled=target.disabled||!phonePattern.test(target.value);
+    get('start').disabled=target.disabled||snapshot?.start_available===false||!phonePattern.test(target.value);
     get('confirm').disabled=!pending;
     get('cancel').disabled=!healthy||busy||!active||cleanup;
     get('reconcile').hidden=!cleanup;get('reconcile').disabled=!healthy||busy||active||!cleanup;
@@ -42,6 +42,10 @@
       if(typeof value.available!=='boolean'||typeof value.scanning!=='boolean'||!validTask(value.task))throw new Error('登记状态暂不可用');
       snapshot=value;healthy=true;
       status.textContent=!value.available?'首次登记服务尚未就绪':value.scanning?'正在搜索蓝牙设备':states[value.task.state];
+      if(value.task.running&&value.task.phase){
+        const phases={network_handoff:'正在交接热点；页面短暂断开后会继续读取同一任务',waiting_video:'正在等待手机连接与本轮视频首帧',restoring:'正在清理本轮连接并恢复原热点，请勿重复启动'};
+        if(phases[value.task.phase])status.textContent=phases[value.task.phase];
+      }
     }catch{if(current===generation){healthy=false;status.textContent='登记状态未确认；请保持页面开启等待恢复，不要重复启动';}}
     finally{polling=false;render();}
   }
@@ -67,7 +71,11 @@
     finally{busy=false;render();}
   }
   get('scan').addEventListener('click',()=>{if(!get('scan').disabled)void act('scan',{});});
-  get('start').addEventListener('click',()=>{if(!get('start').disabled)void act('start',{phone_id:target.value});});
+  get('start').addEventListener('click',()=>{
+    if(get('start').disabled)return;
+    if(!globalThis.confirm('完成蓝牙数字核对后，将切换到 CarPlay 热点，当前页面可能短暂断开。失败会恢复原热点；重新连接后可继续查看本轮结果。是否开始？'))return;
+    void act('start',{phone_id:target.value,handoff_fingerprint:snapshot?.handoff?.fingerprint||'',confirm_handoff:'yes'});
+  });
   get('confirm').addEventListener('click',()=>{if(!get('confirm').disabled)void act('confirm',{request_id:snapshot.task.request_id,digits:snapshot.task.prompt.digits});});
   for(const action of ['cancel','reconcile'])get(action).addEventListener('click',()=>{if(!get(action).disabled)void act(action,{request_id:snapshot.task.request_id});});
   target.addEventListener('change',render);

@@ -337,6 +337,11 @@ func main() {
 		logger.Error("初始化本机自动化接口失败", "error", err)
 		os.Exit(1)
 	}
+	handoffRecovery, cancelHandoffRecovery := context.WithTimeout(ctx, 40*time.Second)
+	if err := deviceAdmin.RecoverCarPlayHandoff(handoffRecovery); err != nil {
+		logger.Error("CarPlay 首次登记热点恢复未完成，保留恢复记录", "error", err)
+	}
+	cancelHandoffRecovery()
 	mediaInspector, err := media.NewInspector(runner, media.Config{
 		FFmpegPath: cfg.FFmpegPath, FFprobePath: cfg.FFprobePath, Timeout: cfg.MediaProbeTimeout,
 	})
@@ -457,6 +462,9 @@ func main() {
 			cfg.CarPlayServiceSettings, runtime, runtime)
 		if err != nil {
 			logger.Info("当前平台未启用 CarPlay 首次登记")
+		}
+		if carPlayPairing != nil {
+			carPlayPairing.ConfigureHandoff(deviceAdmin)
 		}
 	}
 	apiHandler := api.NewHandler(

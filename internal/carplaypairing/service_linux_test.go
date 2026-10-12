@@ -150,14 +150,27 @@ func TestServiceClientWorkflowWithActualPythonProvisioning(t *testing.T) {
 	if module == "" {
 		t.Skip("需要实际 Python 登记模块；板端隔离测试提供源码路径")
 	}
-	for _, pairFails := range []bool{false, true} {
-		t.Run(map[bool]string{false: "verified_video", true: "pair_failed_cleanup"}[pairFails], func(t *testing.T) {
+	for _, scenario := range []struct {
+		name                  string
+		pairFails, onboarding bool
+	}{
+		{"verified_video", false, false}, {"pair_failed_cleanup", true, false},
+		{"onboarding_verified_video", false, true}, {"onboarding_pair_failed", true, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			pairFails := scenario.pairFails
 			c := serviceFixture(t)
+			if scenario.onboarding {
+				body, _ := json.Marshal(map[string]any{"running": false, "cleanup_complete": true, "onboarding_ready": true, "provisioning": serviceProvisioning{State: "idle"}})
+				if err := os.WriteFile(filepath.Join(c.runtime, "status.json"), body, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			childCtx, childCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer childCancel()
 			program := `import importlib.util,json,pathlib,sys,time,os
 spec=importlib.util.spec_from_file_location('flow',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-root=pathlib.Path(sys.argv[2]);flow=m.Provisioning(root);events=[]
+root=pathlib.Path(sys.argv[2]);flow=m.Provisioning(root);events=[];onboarding=sys.argv[3]=='onboarding'
 def switch(mode,phone,seconds):
  events.append(mode);return True
 while True:
@@ -165,7 +178,8 @@ while True:
  if flow.active and flow.state['state']=='enrolling':
   flow.observe(dict(stage='phone_media_success',session_verified=True,media=dict(frames=4,source_connected=True,codec_ready=True)),flow.active['phone_id'])
   switch('resume',None,0)
- temporary=root/'status-writing';temporary.write_text(json.dumps(dict(running=True,provisioning=flow.snapshot())));temporary.chmod(0o600);temporary.replace(root/'status.json')
+ running=not onboarding or flow.state['state']=='video_verified'
+ temporary=root/'status-writing';temporary.write_text(json.dumps(dict(running=running,cleanup_complete=True,onboarding_ready=onboarding and not running,provisioning=flow.snapshot())));temporary.chmod(0o600);temporary.replace(root/'status.json')
  try:
   request,_=m.read_request(root/'provisioning-request.json')
   if request['action']=='cancel' and not flow.state['running']:
@@ -173,7 +187,11 @@ while True:
  except FileNotFoundError:pass
  time.sleep(.01)
 `
-			cmd := exec.CommandContext(childCtx, "python3", "-c", program, module, c.runtime)
+			mode := "active"
+			if scenario.onboarding {
+				mode = "onboarding"
+			}
+			cmd := exec.CommandContext(childCtx, "python3", "-c", program, module, c.runtime, mode)
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -189,9 +207,14 @@ while True:
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			prompt, _ := NewConfirmation(ctx, 2*time.Second)
+			handoff := &workflowHandoff{paired: &calls}
+			prompt.handoff = handoff
 			err := c.runner(pair)(ctx, testPhone, prompt)
 			if (err != nil) != pairFails || errors.Is(err, ErrCleanupPending) || calls != 1 {
 				t.Fatal(err, calls)
+			}
+			if handoff.begun == pairFails || handoff.success == pairFails || !handoff.finished {
+				t.Fatal("配对与交接顺序错误", handoff)
 			}
 			if err := cmd.Wait(); err != nil {
 				t.Fatal(err)
@@ -219,4 +242,25 @@ while True:
 			}
 		})
 	}
+}
+
+type workflowHandoff struct {
+	paired                   *int
+	begun, finished, success bool
+}
+
+func (h *workflowHandoff) PlanCarPlayHandoff(context.Context) (HandoffPlan, error) {
+	return HandoffPlan{}, nil
+}
+func (h *workflowHandoff) BeginCarPlayHandoff(context.Context, string, string, HandoffPlan) error {
+	if *h.paired != 1 {
+		return errors.New("在数字核对之前交接热点")
+	}
+	h.begun = true
+	return nil
+}
+func (h *workflowHandoff) FinishCarPlayHandoff(_ context.Context, _ string, success bool) error {
+	h.finished = true
+	h.success = success
+	return nil
 }

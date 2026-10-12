@@ -6,15 +6,35 @@ const vm=require('node:vm');
 const nonce='a'.repeat(32),phone='02:11:22:33:44:55';
 const task=(state='idle',running=false)=>({state,running,request_id:state==='idle'?'':nonce,phone_id:state==='idle'?'':phone,prompt:{request_id:nonce,state:'waiting_native'}});
 const flush=()=>new Promise(setImmediate);
-function fixture(fetcher){
+function fixture(fetcher,confirm=()=>true){
   const nodes=new Map();let poll;
   for(const id of ['panel','device','status','prompt','digits','scan','start','confirm','cancel','reconcile'])nodes.set('carplay-pairing-'+id,{value:'',textContent:'',disabled:false,hidden:false,offsetParent:{},children:[],handlers:{},addEventListener(name,handler){this.handlers[name]=handler;},replaceChildren(){this.children=[];},appendChild(node){this.children.push(node);}});
   const calls=[];
-  const context={document:{hidden:false,getElementById:id=>nodes.get(id),createElement:()=>({})},AbortController,setTimeout,clearTimeout,setInterval:callback=>{poll=callback;},fetch:async(path,options)=>{calls.push({path,...options});return fetcher(path,options);}};
+  const context={confirm,document:{hidden:false,getElementById:id=>nodes.get(id),createElement:()=>({})},AbortController,setTimeout,clearTimeout,setInterval:callback=>{poll=callback;},fetch:async(path,options)=>{calls.push({path,...options});return fetcher(path,options);}};
   vm.runInNewContext(fs.readFileSync('internal/webui/assets/carplay-pairing.js','utf8'),context);
   return {nodes,calls,load:()=>context.TeslaBoxCarPlayPairing.load(),get:id=>nodes.get('carplay-pairing-'+id),click:async id=>{nodes.get('carplay-pairing-'+id).handlers.click();await flush();},change:()=>nodes.get('carplay-pairing-device').handlers.change(),poll:async()=>{poll();await flush();}};
 }
 const reply=value=>({ok:true,json:async()=>value});
+
+test('拒绝交接确认不启动任务；确认绑定当前配置指纹',async()=>{
+  let approved=false;
+  const ui=fixture((path,options)=>{
+    if(path.endsWith('/start')){
+      assert.deepEqual(JSON.parse(options.body),{phone_id:phone,handoff_fingerprint:'current',confirm_handoff:'yes'});
+      return reply(task('pairing',true));
+    }
+    return reply({available:true,scanning:false,handoff:{fingerprint:'current',required:true},task:task()});
+  },()=>approved);
+  await ui.load();ui.get('device').value=phone;ui.change();
+  await ui.click('start');assert.equal(ui.calls.filter(c=>c.method==='POST').length,0);
+  approved=true;await ui.click('start');assert.equal(ui.calls.filter(c=>c.path.endsWith('/start')).length,1);
+});
+
+test('网络方案未就绪仍能扫描，但不能开始交接',async()=>{
+  const ui=fixture(()=>reply({available:true,start_available:false,scanning:false,task:task()}));
+  await ui.load();ui.get('device').value=phone;ui.change();
+  assert.equal(ui.get('scan').disabled,false);assert.equal(ui.get('start').disabled,true);
+});
 
 test('刷新只读状态，未就绪不允许搜索和启动，也不持久化数字',async()=>{
   const ui=fixture(()=>reply({available:false,scanning:false,task:task()}));

@@ -70,7 +70,15 @@ func registerCarPlayPairingRoutes(mux *http.ServeMux, manager *carplaypairing.Ma
 		if manager != nil {
 			status = manager.Status()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"available": available, "scanning": manager != nil && manager.Scanning(), "task": status})
+		plan := carplaypairing.HandoffPlan{}
+		startAvailable := available
+		if available {
+			var err error
+			plan, err = manager.HandoffPlan(r.Context())
+			startAvailable = err == nil
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"available": available, "scan_available": available, "start_available": startAvailable,
+			"handoff": plan, "scanning": manager != nil && manager.Scanning(), "task": status})
 	})
 	ready := func(w http.ResponseWriter) bool {
 		w.Header().Set("Cache-Control", "no-store")
@@ -120,7 +128,7 @@ func registerCarPlayPairingRoutes(mux *http.ServeMux, manager *carplaypairing.Ma
 		if !ready(w) {
 			return
 		}
-		input, ok := pairingInput(w, r, "phone_id")
+		input, ok := pairingInput(w, r, "phone_id", "handoff_fingerprint", "confirm_handoff")
 		if !ok {
 			return
 		}
@@ -128,7 +136,7 @@ func registerCarPlayPairingRoutes(mux *http.ServeMux, manager *carplaypairing.Ma
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "CarPlay 首次登记尚未就绪"})
 			return
 		}
-		status, err := manager.Start(parent, input["phone_id"], 120*time.Second)
+		status, err := manager.StartConfirmed(parent, input["phone_id"], 120*time.Second, input["handoff_fingerprint"], input["confirm_handoff"] == "yes")
 		if err != nil {
 			result(w, err)
 			return

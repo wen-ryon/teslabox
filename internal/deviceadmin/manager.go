@@ -202,6 +202,8 @@ type APUpdate struct {
 
 // Manager 串行执行会改变网络状态的命令，避免多个页面操作互相覆盖。
 type Manager struct {
+	carPlayEnrollmentHandoff *carPlayEnrollmentHandoff
+	carPlayEnrollmentLive    string
 	runner                   system.Runner
 	logger                   *slog.Logger
 	configuredWiFiInterface  string
@@ -271,6 +273,10 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 	manager.carPlayInternetProbe = probeCarPlayInternet
 	manager.carPlayPANProfileCreate = createCarPlayPANProfile
 	manager.carPlayPANInterface = activeCarPlayPANInterface
+	if err := manager.loadHandoff(); err != nil {
+		manager.carPlayRecoveryUncertain = true
+		logger.Error("CarPlay 热点交接记录无法确认，暂停网络变更")
+	}
 	return manager
 }
 

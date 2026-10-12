@@ -738,7 +738,7 @@ func (s *Service) writeOperationError(w http.ResponseWriter, message string, err
 	}
 	if errors.Is(err, deviceadmin.ErrAPActive) {
 		status = http.StatusConflict
-		response["error"] = "热点正在占用无线网卡，当前设备不支持 AP+STA 并发"
+		response["error"] = "普通热点正在使用，请在首次登记中确认热点交接"
 	}
 	if errors.Is(err, deviceadmin.ErrWiFiUnavailable) {
 		response["error"] = deviceadmin.ErrWiFiUnavailable.Error()

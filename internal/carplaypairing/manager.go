@@ -21,6 +21,7 @@ type PairRunner func(context.Context, string, *Confirmation) error
 
 // TaskStatus 不保存原始错误或配对日志；数字仅在本轮等待确认时返回。
 type TaskStatus struct {
+	Phase     string             `json:"phase,omitempty"`
 	RequestID string             `json:"request_id"`
 	PhoneID   string             `json:"phone_id"`
 	State     string             `json:"state"`
@@ -30,6 +31,7 @@ type TaskStatus struct {
 }
 
 type pairingTask struct {
+	handoff        HandoffPlan
 	confirmation   *Confirmation
 	status         TaskStatus
 	cancel         context.CancelFunc
@@ -39,11 +41,13 @@ type pairingTask struct {
 
 // Manager 保留最后一轮状态并互斥持有当前任务，不操作录像、热点或系统默认 Agent。
 type Manager struct {
+	handoff        NetworkHandoff
 	mu             sync.Mutex
 	run            PairRunner
 	current        *pairingTask
 	completedState string
 	reconcile      func(context.Context, string, string, time.Time) error
+	recoveredVideo func(string) bool
 	ready          func() bool
 	closed         bool
 	scanner        func(context.Context) ([]Device, error)
@@ -61,6 +65,13 @@ func NewManager(run PairRunner) (*Manager, error) {
 
 // Start 使用应用生命周期上下文；HTTP 请求返回不能取消已经确认启动的任务。
 func (m *Manager) Start(parent context.Context, phone string, window time.Duration) (TaskStatus, error) {
+	if m.handoff != nil {
+		return TaskStatus{}, errors.New("首次登记需要明确确认热点交接")
+	}
+	return m.start(parent, phone, window, HandoffPlan{})
+}
+
+func (m *Manager) start(parent context.Context, phone string, window time.Duration, plan HandoffPlan) (TaskStatus, error) {
 	if parent == nil || parent.Err() != nil || !phoneAddress.MatchString(phone) || phone == "00:00:00:00:00:00" {
 		return TaskStatus{}, errors.New("配对需要有效应用上下文和明确手机蓝牙地址")
 	}
@@ -80,7 +91,8 @@ func (m *Manager) Start(parent context.Context, phone string, window time.Durati
 	}
 	prompt := confirmation.Status()
 	task := &pairingTask{confirmation: confirmation, cancel: cancel, done: make(chan struct{}),
-		status: TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
+		handoff: plan,
+		status:  TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
 	m.current = task
 	go m.execute(ctx, task)
 	return m.snapshotLocked(task), nil
@@ -133,12 +145,14 @@ func (m *Manager) Close(ctx context.Context) error {
 }
 
 func (m *Manager) execute(ctx context.Context, task *pairingTask) {
+	task.confirmation.handoff = m.handoff
+	task.confirmation.handoffPlan = task.handoff
 	err := m.run(ctx, task.status.PhoneID, task.confirmation)
 	// 执行器退出前仍占有互斥槽；取消和到期不代表进程已停止。
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.completedState
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && !(err == nil && m.completedState == "video_verified") {
 		state = "canceled"
 	} else if err != nil {
 		state = "failed"
@@ -174,6 +188,9 @@ func (m *Manager) Reconcile(ctx context.Context, requestID string) error {
 	if err == nil {
 		task.cleanupPending = false
 		task.status.State = "failed"
+		if m.recoveredVideo != nil && m.recoveredVideo(requestID) {
+			task.status.State = "video_verified"
+		}
 	}
 	return err
 }
@@ -181,6 +198,7 @@ func (m *Manager) Reconcile(ctx context.Context, requestID string) error {
 func (m *Manager) snapshotLocked(task *pairingTask) TaskStatus {
 	status := task.status
 	status.Prompt = task.confirmation.Status()
+	status.Phase = task.confirmation.currentPhase()
 	if !status.Running {
 		status.Prompt.Digits = ""
 	}

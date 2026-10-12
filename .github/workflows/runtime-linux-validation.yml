@@ -24,6 +24,8 @@ env:
 jobs:
   go:
     name: Linux AMD64 Go, vet and race
+    env:
+      TESLABOX_PROVISIONING_TEST_MODULE: ${{ github.workspace }}/experiments/carplay-native/scripts/carplay_provisioning.py
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

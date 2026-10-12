@@ -26,11 +26,12 @@ type serviceRequest struct {
 }
 
 type serviceProvisioning struct {
-	ServiceActive bool   `json:"-"`
-	RequestID     string `json:"request_id"`
-	PhoneID       string `json:"phone_id"`
-	State         string `json:"state"`
-	Running       bool   `json:"running"`
+	ServiceActive   bool   `json:"-"`
+	OnboardingReady bool   `json:"-"`
+	RequestID       string `json:"request_id"`
+	PhoneID         string `json:"phone_id"`
+	State           string `json:"state"`
+	Running         bool   `json:"running"`
 }
 
 type serviceClient struct{ runtime string }
@@ -47,7 +48,7 @@ func NewProvisioningManager(binary, directory, runtime string) (*Manager, error)
 		return nil, err
 	}
 	m.completedState = "video_verified"
-	m.reconcile = client.reconcile
+	m.bindServiceRecovery(client)
 	return m, nil
 }
 
@@ -70,6 +71,7 @@ func (c *serviceClient) directory() error {
 
 func (c *serviceClient) status() (serviceProvisioning, error) {
 	var status struct {
+		OnboardingReady bool                 `json:"onboarding_ready"`
 		Provisioning    *serviceProvisioning `json:"provisioning"`
 		Running         *bool                `json:"running"`
 		CleanupComplete *bool                `json:"cleanup_complete"`
@@ -101,6 +103,7 @@ func (c *serviceClient) status() (serviceProvisioning, error) {
 	}
 	p := *status.Provisioning
 	p.ServiceActive = *status.Running
+	p.OnboardingReady = status.OnboardingReady && !*status.Running && status.CleanupComplete != nil && *status.CleanupComplete
 	if p.State == "idle" && !p.Running && p.RequestID == "" && p.PhoneID == "" {
 		return p, nil
 	}
@@ -221,7 +224,7 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 		if initial.Running {
 			return ErrBusy
 		}
-		if !initial.ServiceActive {
+		if !initial.ServiceActive && !initial.OnboardingReady {
 			return errors.New("登记服务尚未运行")
 		}
 		deadline, ok := ctx.Deadline()
@@ -231,10 +234,18 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 		request := serviceRequest{RequestID: confirmation.Status().RequestID, PhoneID: phone, Action: "pause", ExpiresAtMS: deadline.UnixMilli()}
 		// 写请求后即承担恢复责任，不能把等待暂停超时解释为尚未改动服务。
 		defer func() {
-			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 50*time.Second)
 			defer cancel()
+			if result != nil {
+				confirmation.setPhase("restoring")
+			}
 			if err := c.release(cleanup, request); err != nil {
 				result = ErrCleanupPending
+			}
+			if confirmation.handoff != nil {
+				if err := confirmation.handoff.FinishCarPlayHandoff(cleanup, request.RequestID, result == nil); err != nil {
+					result = ErrCleanupPending
+				}
 			}
 		}()
 		if err := c.write(request); err != nil {
@@ -249,7 +260,14 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if confirmation.handoff != nil {
+			confirmation.setPhase("network_handoff")
+			if err := confirmation.handoff.BeginCarPlayHandoff(ctx, request.RequestID, phone, confirmation.handoffPlan); err != nil {
+				return err
+			}
+		}
 		request.Action = "enroll"
+		confirmation.setPhase("waiting_video")
 		if err := c.write(request); err != nil {
 			return err
 		}
@@ -272,4 +290,24 @@ func (c *serviceClient) reconcile(ctx context.Context, id, phone string, expires
 	}
 	defer claim.Close()
 	return c.release(ctx, serviceRequest{RequestID: id, PhoneID: phone, ExpiresAtMS: expires.UnixMilli()})
+}
+
+func (m *Manager) bindServiceRecovery(client *serviceClient) {
+	m.recoveredVideo = func(id string) bool {
+		state, err := client.status()
+		return err == nil && state.RequestID == id && state.State == "video_verified"
+	}
+	m.reconcile = func(ctx context.Context, id, phone string, expires time.Time) error {
+		if err := client.reconcile(ctx, id, phone, expires); err != nil {
+			return err
+		}
+		if m.handoff == nil {
+			return nil
+		}
+		state, err := client.status()
+		if err != nil {
+			return err
+		}
+		return m.handoff.FinishCarPlayHandoff(ctx, id, state.State == "video_verified")
+	}
 }

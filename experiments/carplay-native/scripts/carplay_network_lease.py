@@ -14,6 +14,10 @@ class UpstreamNotReady(RuntimeError):
     """仅表示管理器明确返回的上游信道过渡状态，不包含命令正文或凭据。"""
 
 
+class OrdinaryAPActive(RuntimeError):
+    """普通热点仍归用户所有，服务必须等待确认，不能以重启抢占。"""
+
+
 class NetworkLease:
     """租约续期失败时停止媒体；意外退出由 TeslaBox 到期恢复原网络。"""
 
@@ -69,6 +73,11 @@ class NetworkLease:
         except UnicodeDecodeError:
             raise failed("invalid_response") from None
         if result.returncode != 0:
+            if operation == "acquire" and result.stderr.strip() in {
+                "自动化接口返回 409：普通热点正在使用，请在首次登记中确认热点交接",
+                "自动化接口返回 409：热点正在占用无线网卡，当前设备不支持 AP+STA 并发",
+            }:
+                raise OrdinaryAPActive("等待普通热点交接确认") from None
             pending = {
                 "自动化接口返回 422：无法确认 CarPlay 续租时的上游信道",
                 "自动化接口返回 409：无法读取共享无线设备的上游活动信道",

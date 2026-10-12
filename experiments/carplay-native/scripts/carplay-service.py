@@ -828,6 +828,7 @@ def run(settings, runtime, stopped):
             handoff_recovery = HandoffRecovery()
             inventory.start()
             write_installation_ready(runtime, settings)
+            network_handoff_required = False
             while not stopped.is_set():
                 # 暂停时不申请热点、不启动接收端；恢复仍由同一常驻进程负责。
                 current_user_settings, current_display = user_settings_module.load(user_settings_path)
@@ -846,6 +847,17 @@ def run(settings, runtime, stopped):
                     stopped.wait(2)
                     continue
                 selected_phone = phone_state["selected"]
+                enrollment_network = selected_phone is None or network_handoff_required
+                # 新机先保留管理热点；只有明确的登记请求才进入网络交接和视频验收。
+                if enrollment_network:
+                    provisioning.poll(lambda *unused: None)
+                    if not provisioning.active or provisioning.snapshot().get("state") != "enrolling":
+                        write_status(runtime, dict(running=False, enabled=True, cleanup_complete=True,
+                            onboarding_ready=True, phones=phone_state, provisioning=provisioning.snapshot()))
+                        stopped.wait(1)
+                        continue
+                    selected_phone = provisioning.active["phone_id"]
+                    network_handoff_required = False
                 paired_phone = selected_phone if selected_phone_is_paired(base, selected_phone) else None
                 network = network_module.NetworkLease(settings["vehicle_channels"], stopped, phone=paired_phone)
                 update_upstream_readiness(network, current_user_settings["network"])
@@ -893,7 +905,9 @@ def run(settings, runtime, stopped):
                         bridge.wait_ready(stopped)
                         publish_proxy_token(runtime, folder / "browser-token")
                         receiver_arguments = (receiver_arguments_for(node, root, binary, folder, listen, peer_network,
-                            paired_phone, settings.get("phone_bt", ""), authentication["protocol"], identity_directory=identity_directory) if paired_phone else None)
+                            paired_phone, settings.get("phone_bt", ""), authentication["protocol"],
+                            enrollment_seconds=max(1, min(120, int(provisioning.deadline - time.monotonic()) + 1)) if provisioning.active and provisioning.state["state"] == "enrolling" else None,
+                            identity_directory=identity_directory) if paired_phone else None)
                         receiver = replace_phone_receiver(None, children, receiver_arguments,
                             identity_directory, stopped)
                         def switch_provisioning(mode, target, seconds):
@@ -956,11 +970,16 @@ def run(settings, runtime, stopped):
                                     print("CARPLAY_SERVICE network_policy_changed=true", flush=True)
                                     break
                                 provisioning.poll(switch_provisioning)
+                                if enrollment_network and not provisioning.active and provisioning.state["state"] != "video_verified":
+                                    break
                                 phone_state = inventory.annotate(phone_module.selection(phone_module.read_registry(identity_directory), next_user_settings["phone_id"], settings.get("phone_bt", "")))
                                 if provisioning.observe(dict(receiver.latest) if receiver else {}, phone_state.get("last_successful")):
                                     # 登记成功后退出限时进程，下一轮转为正常接收；热点和浏览器桥接保持。
                                     switch_provisioning("resume", None, 0)
                                 next_selected = phone_state["selected"]
+                                if next_selected is None and not provisioning.active:
+                                    # 取消与超时只有在 finally 释放自有租约之后才发布终态。
+                                    break
                                 next_paired = next_selected if selected_phone_is_paired(base, next_selected) else None
                                 if provisioning.active:
                                     next_paired = provisioning.active["phone_id"] if provisioning.state["state"] == "enrolling" else None
@@ -1026,6 +1045,9 @@ def run(settings, runtime, stopped):
                                 if any(child.child.poll() is not None or child.failed.is_set() for child in children if child is not receiver):
                                     raise RuntimeError("服务自有进程失败")
                             stopped.wait(2)
+                except network_module.OrdinaryAPActive:
+                    network_handoff_required = True
+                    print("CARPLAY_SERVICE awaiting_network_handoff=true", flush=True)
                 finally:
                     if peer_return is not None:
                         clean = peer_return.close() and clean

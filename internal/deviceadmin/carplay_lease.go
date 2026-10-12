@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"github.com/wen-ryon/teslabox/internal/carplaysettings"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -45,7 +46,7 @@ func carPlayNetworkBusy() error {
 }
 
 func (m *Manager) carPlayBlocksWiFiLocked() bool {
-	return m.carPlayRecoveryUncertain || m.carPlayWiFiReconnect || m.carPlayNetworkHold != nil &&
+	return m.carPlayRecoveryUncertain || m.carPlayWiFiReconnect || m.carPlayEnrollmentHandoff != nil && (!m.carPlayEnrollmentHandoff.Committed || m.carPlayEnrollmentHandoff.Restoring) || m.carPlayNetworkHold != nil &&
 		(m.carPlayNetworkHold.Plan.DisableWiFiUpstream || m.carPlayNetworkHold.Plan.ConcurrencyMode == "same_channel" || m.carPlayNetworkHold.Plan.ConcurrencyMode == "exclusive")
 }
 
@@ -58,7 +59,7 @@ func (m *Manager) carPlayBluetoothWiFiGuardLocked() error {
 }
 
 func (m *Manager) carPlayNetworkReservedLocked() bool {
-	return m.carPlayRecoveryUncertain || m.carPlayWiFiReconnect || m.carPlayNetworkHold != nil
+	return m.carPlayRecoveryUncertain || m.carPlayWiFiReconnect || m.carPlayNetworkHold != nil || m.carPlayEnrollmentHandoff != nil && (!m.carPlayEnrollmentHandoff.Committed || m.carPlayEnrollmentHandoff.Restoring)
 }
 
 // GuardCarPlayRecovery 在无法信任恢复记录时保留当前网络，不猜测连接身份或阻止其他业务启动。
@@ -155,6 +156,9 @@ func (m *Manager) AcquireCarPlayNetwork(ctx context.Context, owner string, reque
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.carPlayRecoveryUncertain || m.carPlayWiFiReconnect {
+		return CarPlayNetworkLease{}, carPlayNetworkBusy()
+	}
+	if value := m.carPlayEnrollmentHandoff; value != nil && (value.Restoring || !value.Committed && m.carPlayEnrollmentLive != value.Operation) {
 		return CarPlayNetworkLease{}, carPlayNetworkBusy()
 	}
 	if checkpoint == nil || !carPlayOwnerPattern.MatchString(owner) || !expiresAt.After(time.Now()) || expiresAt.After(time.Now().Add(time.Hour)) {
@@ -459,5 +463,18 @@ func (m *Manager) ReleaseCarPlayNetwork(ctx context.Context, owner string, check
 		return err
 	}
 	m.carPlayNetworkHold = nil
+	if value := m.carPlayEnrollmentHandoff; value != nil {
+		enabled := true
+		if m.carPlaySettingsPath != "" {
+			store, err := carplaysettings.New(m.carPlaySettingsPath)
+			if err != nil {
+				return err
+			}
+			enabled = store.Settings().Enabled
+		}
+		if !value.Committed || !enabled {
+			return m.restoreHandoffLocked(ctx)
+		}
+	}
 	return nil
 }
