@@ -77,6 +77,10 @@ func main() {
 		}
 		os.Exit(1)
 	}
+	if err := updater.CheckStartupProtection(context.Background()); err != nil {
+		logger.Error("更新恢复能力检查失败", "error", err)
+		os.Exit(1)
+	}
 	// 风扇控制必须先于存储、网络和媒体初始化接管硬件，避免启动负载叠加。
 	fanManager, err := fancontrol.New(fancontrol.Config{
 		StatePath:       "/var/lib/teslabox-system/fan-settings.json",
@@ -422,6 +426,7 @@ func main() {
 		CurrentVersion: buildversion.Version, CurrentCommit: buildversion.Commit,
 		DownloadDir: cfg.UpdateDownloadDir, RequestPath: cfg.UpdateRequestPath,
 		ResultPath: cfg.UpdateResultPath, MaximumSize: cfg.UpdateMaxBytes, Logger: logger,
+		ExportStatePath: cfg.ExportStatePath,
 		CanInstall: func() error {
 			if manager.Snapshot().GadgetStatus.Bound {
 				return errors.New("USB Gadget 尚未安全断开，请确认已拔掉 OTG 后重试")
@@ -487,19 +492,26 @@ func main() {
 	if runtimeManager == nil {
 		handler = carplaybundle.HealthHandler(handler)
 	}
-	go deviceAdmin.Run(ctx)
+	handler = updater.ActivationHandler(handler)
+	go func() { updater.WaitActivation(ctx); deviceAdmin.Run(ctx) }()
 	go func() {
+		updater.WaitActivation(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 		if runErr := automationService.Run(ctx); runErr != nil && ctx.Err() == nil {
 			logger.Error("本机自动化接口异常退出", "error", runErr)
 		}
 	}()
 	go func() {
+		updater.WaitActivation(ctx)
 		if runtimeManager != nil {
 			runtimeManager.WaitReady(ctx, "media")
 		}
 		mediaExporter.Run(ctx)
 	}()
 	go func() {
+		updater.WaitActivation(ctx)
 		if runtimeManager != nil {
 			runtimeManager.WaitReady(ctx, "media", "nas")
 		}
@@ -508,13 +520,22 @@ func main() {
 	autoUploadDone := make(chan struct{})
 	go func() {
 		defer close(autoUploadDone)
+		updater.WaitActivation(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 		if runtimeManager != nil && !runtimeManager.WaitReady(ctx, "media", "nas") {
 			return
 		}
 		api.RunEventUploadsInLocation(ctx, manager, nasUploads, mediaInspector, logger, teslaTimeLocation)
 	}()
 	// 上传和导出构造器先恢复缓存引用，清理器最后启动。
-	go recordingCache.Run(ctx)
+	go func() {
+		updater.WaitActivation(ctx)
+		if ctx.Err() == nil {
+			recordingCache.Run(ctx)
+		}
+	}()
 	go fanManager.Run(ctx)
 	watchReloadSignal(ctx, manager, reloadCh)
 

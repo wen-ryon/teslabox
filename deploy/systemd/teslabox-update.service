@@ -5,8 +5,9 @@ After=local-fs.target
 [Service]
 Type=oneshot
 User=root
+EnvironmentFile=-/etc/teslabox/teslabox.env
 ExecStart=/usr/local/libexec/teslabox-update-helper
-TimeoutStartSec=120
+TimeoutStartSec=240
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

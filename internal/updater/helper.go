@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
@@ -14,19 +15,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 // HelperConfig 固定安装助手允许访问的目录、目标程序和健康检查地址。
 type HelperConfig struct {
-	RequestPath string
-	ResultPath  string
-	DownloadDir string
-	BackupDir   string
-	TargetPath  string
-	Service     string
-	HealthURL   string
-	Timeout     time.Duration
+	RequestPath     string
+	ResultPath      string
+	DownloadDir     string
+	BackupDir       string
+	TargetPath      string
+	ExportStatePath string
+	Service         string
+	HealthURL       string
+	Timeout         time.Duration
 }
 
 const latestBackupName = "teslabox.previous.backup"
@@ -47,33 +50,25 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 	if err := verifyLocalPackage(packagePath, request); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", err)
 	}
-	if err := os.MkdirAll(config.BackupDir, 0o700); err != nil {
+	if err := plainPath(config.BackupDir); err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", err)
+	}
+	if err := durableMkdirAll(config.BackupDir, 0o700); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("创建备份目录: %w", err))
 	}
-	backupPath := filepath.Join(config.BackupDir, latestBackupName)
-	if err := copyFileAtomic(config.TargetPath, backupPath, 0o700); err != nil {
-		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("备份当前程序: %w", err))
+	unlock, err := lockInstallation(config.BackupDir)
+	if err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", err)
 	}
-	if err := cleanupVersionBackups(config.BackupDir); err != nil {
-		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("清理过期更新备份: %w", err))
+	release := sync.OnceFunc(unlock)
+	defer release()
+	ops := serviceOperations(config)
+	ops.resumeUnchanged = func(ctx context.Context) error {
+		release()
+		return restartAndWaitHealthy(ctx, config.Service, config.HealthURL, config.TargetPath, false)
 	}
-	if err := copyFileAtomic(packagePath, config.TargetPath, 0o755); err != nil {
-		return finishInstall(config.ResultPath, request.Version, "failed", fmt.Errorf("安装新程序: %w", err))
-	}
-	installCtx, cancel := context.WithTimeout(ctx, config.Timeout)
-	defer cancel()
-	if err := restartAndWaitHealthy(installCtx, config.Service, config.HealthURL); err != nil {
-		rollbackErr := copyFileAtomic(backupPath, config.TargetPath, 0o755)
-		if rollbackErr == nil {
-			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), config.Timeout)
-			rollbackErr = restartAndWaitHealthy(rollbackCtx, config.Service, config.HealthURL)
-			rollbackCancel()
-		}
-		message := fmt.Errorf("新版健康检查失败并已回滚: %w", err)
-		if rollbackErr != nil {
-			message = errors.Join(message, fmt.Errorf("回滚失败: %w", rollbackErr))
-		}
-		return finishInstall(config.ResultPath, request.Version, "failed", message)
+	if err := transactionalInstall(ctx, config, request, packagePath, ops); err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", err)
 	}
 	if err := finishInstall(config.ResultPath, request.Version, "success", nil); err != nil {
 		return err
@@ -151,23 +146,36 @@ func verifyLocalPackage(path string, request InstallRequest) error {
 	if err != nil {
 		return err
 	}
-	if info.Size() != request.Size {
+	if info.Size() != request.Size || request.Size > 128<<20 || request.Size <= 0 {
 		return errors.New("安装包长度校验失败")
 	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return fmt.Errorf("计算安装包摘要: %w", err)
+	data, err := io.ReadAll(io.LimitReader(file, (128<<20)+1))
+	if err != nil {
+		return err
 	}
-	if hex.EncodeToString(hash.Sum(nil)) != request.SHA256 {
+	hash := sha256.Sum256(data)
+	if int64(len(data)) != request.Size || hex.EncodeToString(hash[:]) != request.SHA256 {
 		return errors.New("安装包 SHA-256 校验失败")
 	}
-	elfFile, err := elf.Open(path)
+	// 摘要、ELF 类型和只读能力声明必须来自同一份已认证字节，不能重新按路径打开。
+	elfFile, err := elf.NewFile(bytes.NewReader(data))
 	if err != nil {
 		return errors.New("安装包不是有效的 Linux ELF 程序")
 	}
 	defer elfFile.Close()
 	if elfFile.Machine != elf.EM_AARCH64 || (elfFile.Type != elf.ET_EXEC && elfFile.Type != elf.ET_DYN) {
 		return errors.New("安装包不是可执行的 ARM64 程序")
+	}
+	rodata := elfFile.Section(".rodata")
+	if rodata == nil || rodata.Size > 128<<20 || rodata.Type != elf.SHT_PROGBITS || rodata.Flags&elf.SHF_ALLOC == 0 || rodata.Flags&elf.SHF_WRITE != 0 {
+		return errors.New("目标程序缺少可信的更新保护声明，替换前拒绝安装")
+	}
+	declaration, err := rodata.Data()
+	if err != nil {
+		return err
+	}
+	if bytes.Count(declaration, []byte(ProgramTransactionCapability)) != 1 {
+		return errors.New("目标程序不支持状态回滚保护，替换前拒绝安装")
 	}
 	return nil
 }
@@ -229,15 +237,19 @@ func cleanupVersionBackups(directory string) error {
 	return nil
 }
 
-func restartAndWaitHealthy(ctx context.Context, service, healthURL string) error {
+func restartAndWaitHealthy(ctx context.Context, service, healthURL, target string, requireProcessHeader bool) error {
 	if service != "teslabox.service" {
 		return errors.New("不允许重启未知服务")
 	}
 	if healthURL != "http://127.0.0.1/healthz" {
 		return errors.New("健康检查地址无效")
 	}
-	if output, err := exec.CommandContext(ctx, "systemctl", "restart", service).CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, "systemctl", "start", service).CombinedOutput(); err != nil {
 		return fmt.Errorf("重启服务: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	pid, err := verifyRunningProgram(ctx, service, target)
+	if err != nil {
+		return err
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	ticker := time.NewTicker(time.Second)
@@ -248,7 +260,14 @@ func restartAndWaitHealthy(ctx context.Context, service, healthURL string) error
 			response, requestErr := client.Do(request)
 			if requestErr == nil {
 				response.Body.Close()
-				if response.StatusCode == http.StatusOK {
+				if response.StatusCode == http.StatusOK && (!requireProcessHeader || response.Header.Get("X-TeslaBox-Process") == pid) {
+					actual, err := verifyRunningProgram(ctx, service, target)
+					if err != nil {
+						return err
+					}
+					if actual != pid {
+						return errors.New("健康检查期间主进程已变化")
+					}
 					return nil
 				}
 			}
@@ -259,6 +278,34 @@ func restartAndWaitHealthy(ctx context.Context, service, healthURL string) error
 		case <-ticker.C:
 		}
 	}
+}
+
+func verifyRunningProgram(ctx context.Context, service, target string) (string, error) {
+	out, err := exec.CommandContext(ctx, "systemctl", "show", service, "--property=MainPID", "--value").Output()
+	if err != nil {
+		return "", err
+	}
+	pid := strings.TrimSpace(string(out))
+	if pid == "" || pid == "0" {
+		return "", errors.New("服务没有主进程")
+	}
+	for _, c := range pid {
+		if c < '0' || c > '9' {
+			return "", errors.New("服务进程标识无效")
+		}
+	}
+	executable, err := os.Stat(filepath.Join("/proc", pid, "exe"))
+	if err != nil {
+		return "", err
+	}
+	installed, err := os.Lstat(target)
+	if err != nil {
+		return "", err
+	}
+	if !installed.Mode().IsRegular() || !os.SameFile(executable, installed) {
+		return "", errors.New("运行进程不是本次安装的程序")
+	}
+	return pid, nil
 }
 
 func finishInstall(path, version, status string, cause error) error {

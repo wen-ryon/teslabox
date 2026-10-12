@@ -3,7 +3,7 @@ name: RC1 isolated Linux validation
 # 仅候选分支测试，不接生产密钥、不构建签名包、不修改发布通道。
 on:
   push:
-    branches: [codex/rc1-runtime-linux-validation]
+    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback]
   workflow_dispatch:
 
 permissions:
@@ -106,6 +106,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.3'
@@ -115,15 +116,28 @@ jobs:
           mkdir -p validation-logs
           git rev-parse HEAD | tee validation-logs/commit.txt
           echo 'Linux AMD64 filesystem transactions; not Debian ARM64 tools or board acceptance.' | tee validation-logs/scope.txt
+      - name: Published 0.1.31 reader accepts restored state
+        run: |
+          export TESLABOX_ROLLBACK_EVIDENCE="$RUNNER_TEMP/rollback-state"
+          baseline=c270094e6fac5d3e38c45a9e2ab76c2f6fe84e94
+          git cat-file -e "$baseline^{commit}"
+          go test -count=1 -run '^TestTransactionalInstallLegacyExporterFailure$' -v ./internal/updater 2>&1 | tee validation-logs/rollback-migration.log
+          legacy="$RUNNER_TEMP/published-0.1.31-reader"
+          git worktree add --detach "$legacy" "$baseline"
+          cp scripts/rollback-legacy-reader_test.go.txt "$legacy/internal/media/rollback_legacy_reader_test.go"
+          (cd "$legacy" && go test -count=1 -run '^TestRollbackRestoredStateWithPublishedReader$' -v ./internal/media) 2>&1 | tee validation-logs/published-reader.log
+          printf '%s\n' "$baseline" > validation-logs/published-baseline.txt
+          sha256sum "$TESLABOX_ROLLBACK_EVIDENCE"/*.json | tee validation-logs/rollback-state-digests.txt
       - name: Real Linux media A-B-A and legacy rollback
         # root 仅用于临时目录的所有权反例，不启动服务，不访问目标板。
         run: |
-          sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 go test -count=1 -json ./internal/mediabundle ./internal/carplaybundle ./internal/runtimecomponents 2>&1 | tee validation-logs/transactions.jsonl
+          sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 go test -count=1 -json ./internal/mediabundle ./internal/carplaybundle ./internal/runtimecomponents ./internal/updater 2>&1 | tee validation-logs/transactions.jsonl
           python3 - <<'PY'
           import json
           from pathlib import Path
           events = [json.loads(line) for line in Path('validation-logs/transactions.jsonl').read_text().splitlines() if line.startswith('{')]
-          required = ['TestMediaVersionsRollbackAndLegacyRetention', 'TestMediaFailedPreflightPreservesActive', 'TestMediaExistingVersionRejectsChangedLibraryAlias', 'TestStageArchiveRejectsOtherOwnedVersionInRootInstaller']
+          required = ['TestMediaVersionsRollbackAndLegacyRetention', 'TestMediaFailedPreflightPreservesActive', 'TestMediaExistingVersionRejectsChangedLibraryAlias', 'TestStageArchiveRejectsOtherOwnedVersionInRootInstaller', 'TestTransactionLinuxLockAndMetadata', 'TestTransactionLinuxLockAndMetadata/other_owner', 'TestRecoverBeforeStartAfterInterruptedActivation', 'TestTransactionalInstallLegacyExporterFailure']
+          required += ['TestRestoreRetriesTargetDirectorySync', 'TestCommitSyncAndStopFailureRejectsStartAfterUnlock', 'TestRecoverNonterminalCommitIsolation', 'TestRecoverRejectsInvalidCommitIsolation', 'TestCommitCleanupFailureDoesNotRollbackCommittedState']
           for name in required:
               assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), f'{name} did not execute and pass'
           PY
@@ -134,6 +148,10 @@ jobs:
       - name: Codec diagnostics preserve runtime across restart
         if: ${{ !cancelled() }}
         run: go test -tags integration -count=1 -run '^TestCodecDiagnosticPreservesVersionIntegrityAcrossRestart$' -v ./internal/carplaybundle 2>&1 | tee validation-logs/codec-integrity.log
+      - name: Isolated systemd start permission and process identity
+        if: ${{ !cancelled() }}
+        # 只创建唯一命名的临时 sleep 测试服务，绝不启动 teslabox.service。
+        run: sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted TESLABOX_TEST_SYSTEMD=1 go test -count=1 -run '^TestUpdaterRealSystemdStartConsumesSinglePermission$' -v ./internal/updater 2>&1 | tee validation-logs/update-systemd.log
       - name: CarPlay fcntl activation and recovery
         if: ${{ !cancelled() }}
         run: python3 -m unittest discover -s internal/carplaybundle -p 'test_runtime_*.py' -v 2>&1 | tee validation-logs/carplay-transactions.log
@@ -141,6 +159,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           bash -n deploy/install.sh
+          sh -n deploy/scripts/install-teslabox-update.sh
+          python3 scripts/test-update-bootstrap.py -v 2>&1 | tee validation-logs/update-bootstrap.log
           bash scripts/test-install-apt-snapshot.sh 2>&1 | tee validation-logs/installer-shell.log
       - name: Preserve transaction evidence
         if: ${{ always() }}

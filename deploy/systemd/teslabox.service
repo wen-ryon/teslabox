@@ -10,6 +10,7 @@ User=root
 EnvironmentFile=-/etc/teslabox/teslabox.env
 RuntimeDirectory=teslabox/snapshots
 RuntimeDirectoryMode=0750
+ExecStartPre=/usr/local/libexec/teslabox-update-helper --recover
 ExecStart=/usr/local/bin/teslabox
 Restart=on-failure
 RestartSec=3

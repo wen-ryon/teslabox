@@ -1,0 +1,25 @@
+package media
+
+import (
+    "context"
+    "os"
+    "path/filepath"
+    "testing"
+    "time"
+)
+
+type rollbackProbeRunner struct{}
+func (rollbackProbeRunner) RunProgress(context.Context,string,[]string,func(time.Duration)) error { panic("不得转码") }
+
+// 此探针只复制到固定正式旧源码的临时工作树，不替换或模拟旧版读取器。
+func TestRollbackRestoredStateWithPublishedReader(t *testing.T) {
+    root:=os.Getenv("TESLABOX_ROLLBACK_EVIDENCE")
+    if root==""{t.Fatal("缺少迁移/恢复证据目录")}
+    cfg:=ExportConfig{FFmpegPath:"/opt/ffmpeg",OutputDir:t.TempDir(),StatePath:filepath.Join(root,"restored.json"),QueueSize:1}
+    exporter,err:=NewExporter(rollbackProbeRunner{},cfg)
+    if err!=nil{t.Fatal("正式旧版本读取恢复状态失败",err)}
+    history:=exporter.History()
+    if len(history)!=1 || history[0].ID!="0123456789abcdef01234567" || history[0].OutputBytes!=12 || exporter.Settings().RetainCount!=3 {t.Fatalf("旧历史未完整恢复: %+v",history)}
+    cfg.StatePath=filepath.Join(root,"failed-v2.json")
+    if _,err=NewExporter(rollbackProbeRunner{},cfg);err==nil{t.Fatal("反例未生效：旧版错误地接受了 v2")}
+}

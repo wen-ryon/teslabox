@@ -76,6 +76,7 @@ type Config struct {
 	DownloadDir      string
 	RequestPath      string
 	ResultPath       string
+	ExportStatePath  string
 	MaximumSize      int64
 	Logger           *slog.Logger
 	CanInstall       func() error
@@ -530,6 +531,11 @@ func (m *Manager) Install(ctx context.Context) (Status, error) {
 	}
 	if m.manifest == nil || m.packagePath == "" || m.Status().State != StateDownloaded {
 		return m.Status(), errors.New("请先完成更新下载")
+	}
+	if m.config.ExportStatePath != "" {
+		if err := RefuseIncompatibleDowngrade(m.manifest.Version, m.config.ExportStatePath); err != nil {
+			return m.Status(), err
+		}
 	}
 	if m.config.CanInstall != nil {
 		if err := m.config.CanInstall(); err != nil {
