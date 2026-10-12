@@ -63,7 +63,8 @@ def selection(value, requested="", legacy=""):
     if not isinstance(requested, str) or requested and not PHONE.fullmatch(requested) or not isinstance(legacy, str) or legacy and not PHONE.fullmatch(legacy):
         raise ValueError("CarPlay 选择手机不合法")
     if value is None:
-        return dict(selected=legacy if not requested or requested == legacy else None,
+        # 新机没有旧身份时必须返回 None，空字符串会被后续配对检查当成非法手机。
+        return dict(selected=legacy if legacy and (not requested or requested == legacy) else None,
                     phones=[dict(id=legacy)] if legacy else [], last_successful=None, legacy_pending=True)
     validate_registry(value)
     phones = [dict(id=entry["bluetooth"]) for entry in value["phones"]]
