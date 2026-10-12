@@ -36,6 +36,11 @@ func phoneProperties(ctx context.Context, conn *dbus.Conn, owner string, path db
 	return props, err
 }
 
+func incomingLinkReady(props map[string]dbus.Variant) bool {
+	// Paired 可能来自旧缓存；本轮连接及 SDP 完成前不能关闭系统配对入口。
+	return props["Paired"].Value() == true && props["Connected"].Value() == true && props["ServicesResolved"].Value() == true
+}
+
 func verifyIncomingPhone(ctx context.Context, phone string) error {
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
@@ -48,7 +53,7 @@ func verifyIncomingPhone(ctx context.Context, phone string) error {
 	}
 	path := dbus.ObjectPath("/org/bluez/hci0/dev_" + strings.ReplaceAll(phone, ":", "_"))
 	props, err := phoneProperties(ctx, conn, owner, path)
-	if err != nil || incomingPhone(path, props) != phone || props["Paired"].Value() != true {
+	if err != nil || incomingPhone(path, props) != phone || !incomingLinkReady(props) {
 		return errors.New("手机主动配对的系统身份尚未确认")
 	}
 	return nil
@@ -62,6 +67,14 @@ type incomingAgent struct {
 	manager  *Manager
 	pending  dbus.ObjectPath
 	deadline time.Time
+	logger   *slog.Logger
+}
+
+func (a *incomingAgent) logCallback(method, result string) {
+	if a.logger != nil {
+		// 只记录阶段与结果，不写配对数字、手机名称或密钥。
+		a.logger.Info("CarPlay 蓝牙配对回调", "method", method, "result", result)
+	}
 }
 
 func rejected() *dbus.Error {
@@ -96,26 +109,42 @@ func (a *incomingAgent) authorize(sender dbus.Sender, path dbus.ObjectPath) *dbu
 
 // RequestAuthorization 仅接收开启功能且尚未登记时由手机主动发起的系统配对。
 func (a *incomingAgent) RequestAuthorization(sender dbus.Sender, device dbus.ObjectPath) *dbus.Error {
-	return a.authorize(sender, device)
+	err := a.authorize(sender, device)
+	result := "accepted"
+	if err != nil {
+		result = "rejected"
+	}
+	a.logCallback("RequestAuthorization", result)
+	return err
 }
 
 // RequestConfirmation 不自动批准需要两端数字核对的协议，避免把无屏确认伪装成数字验收。
 func (a *incomingAgent) RequestConfirmation(sender dbus.Sender, device dbus.ObjectPath, passkey uint32) *dbus.Error {
+	a.logCallback("RequestConfirmation", "unsupported_numeric_confirmation")
 	return rejected()
 }
 
 // RequestPinCode 不支持旧式固定 PIN 配对。
 func (a *incomingAgent) RequestPinCode(sender dbus.Sender, device dbus.ObjectPath) (string, *dbus.Error) {
+	a.logCallback("RequestPinCode", "unsupported")
 	return "", rejected()
 }
 
 // RequestPasskey 不接受缺少用户输入的口令请求。
 func (a *incomingAgent) RequestPasskey(sender dbus.Sender, device dbus.ObjectPath) (uint32, *dbus.Error) {
+	a.logCallback("RequestPasskey", "unsupported")
 	return 0, rejected()
 }
 
 // AuthorizeService 只允许当前本轮已经系统配对的手机继续服务发现。
-func (a *incomingAgent) AuthorizeService(sender dbus.Sender, device dbus.ObjectPath, uuid string) *dbus.Error {
+func (a *incomingAgent) AuthorizeService(sender dbus.Sender, device dbus.ObjectPath, uuid string) (result *dbus.Error) {
+	defer func() {
+		outcome := "accepted"
+		if result != nil {
+			outcome = "rejected"
+		}
+		a.logCallback("AuthorizeService", outcome)
+	}()
 	a.mu.Lock()
 	pending := a.pending
 	a.mu.Unlock()
@@ -139,6 +168,7 @@ func (a *incomingAgent) Cancel(sender dbus.Sender) *dbus.Error {
 	a.mu.Lock()
 	a.pending = ""
 	a.mu.Unlock()
+	a.logCallback("Cancel", "cleared")
 	return nil
 }
 
@@ -149,7 +179,7 @@ func (m *Manager) startIncoming(ctx context.Context, phone string) (TaskStatus, 
 	if !m.incomingAvailable() {
 		return TaskStatus{}, ErrBusy
 	}
-	// 只有真实 Paired 才能交接热点；单纯点击连接或收到广播不能接管管理网络。
+	// 只有本轮连接与服务发现完成才能交接热点，旧 Paired 缓存不能接管管理网络。
 	if err := verifyIncomingPhone(ctx, phone); err != nil {
 		return TaskStatus{}, err
 	}
@@ -249,7 +279,7 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 		}
 		original[key] = value
 	}
-	a := &incomingAgent{ctx: ctx, conn: conn, owner: owner, manager: m}
+	a := &incomingAgent{ctx: ctx, conn: conn, owner: owner, manager: m, logger: logger}
 	if err := conn.Export(a, incomingAgentPath, "org.bluez.Agent1"); err != nil {
 		return err
 	}
@@ -289,6 +319,8 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	lastPendingState := ""
+	var lastPaired, lastConnected, lastResolved bool
 	for {
 		open := m.incomingAvailable()
 		a.mu.Lock()
@@ -321,14 +353,36 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 			return err
 		}
 		m.setIncomingListening(open && registered)
+		if pending == "" {
+			lastPendingState = ""
+		}
 		if pending != "" {
 			if !open || time.Now().After(deadline) {
+				logger.Info("CarPlay 蓝牙配对等待结束", "expired", time.Now().After(deadline), "registration_available", open)
 				a.mu.Lock()
 				a.pending = ""
 				a.mu.Unlock()
 			} else {
-				props, err := phoneProperties(ctx, conn, owner, pending)
-				if err == nil && props["Paired"].Value() == true {
+				readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				props, err := phoneProperties(readCtx, conn, owner, pending)
+				cancel()
+				state := "unavailable"
+				if err == nil {
+					state = "pairing"
+					if props["Paired"].Value() == true {
+						state = "waiting_services"
+					}
+					if incomingLinkReady(props) {
+						state = "ready"
+					}
+				}
+				paired, connected, resolved := props["Paired"].Value() == true, props["Connected"].Value() == true, props["ServicesResolved"].Value() == true
+				if state != lastPendingState || paired != lastPaired || connected != lastConnected || resolved != lastResolved {
+					logger.Info("CarPlay 蓝牙配对链路状态", "state", state, "paired", paired, "connected", connected, "services_resolved", resolved)
+					lastPendingState = state
+					lastPaired, lastConnected, lastResolved = paired, connected, resolved
+				}
+				if err == nil && incomingLinkReady(props) {
 					phone := incomingPhone(pending, props)
 					if phone == "" {
 						a.mu.Lock()
@@ -368,7 +422,17 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 			}
 			changed, ok := signal.Body[1].(map[string]dbus.Variant)
 			if ok && changed["Connected"].Value() == true {
-				_ = a.authorize(dbus.Sender(owner), signal.Path)
+				if a.authorize(dbus.Sender(owner), signal.Path) == nil {
+					a.logCallback("Connected", "waiting_pairing_and_services")
+				}
+			}
+			if ok && changed["Connected"].Value() == false {
+				a.mu.Lock()
+				if a.pending == signal.Path {
+					a.pending = ""
+					a.logCallback("Disconnected", "cleared")
+				}
+				a.mu.Unlock()
 			}
 		}
 	}

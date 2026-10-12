@@ -101,6 +101,32 @@ func TestIncomingPhoneIdentityRejectsNonPhoneAndWrongAdapter(t *testing.T) {
 	}
 }
 
+func TestIncomingLinkRequiresCurrentConnectionAndServices(t *testing.T) {
+	for _, state := range []struct {
+		name      string
+		paired    bool
+		connected bool
+		resolved  bool
+		ready     bool
+	}{
+		{"旧配对缓存", true, false, false, false},
+		{"ACL已连接但服务未完成", true, true, false, false},
+		{"未完成配对", false, true, true, false},
+		{"断开后残留服务", true, false, true, false},
+		{"本轮链路就绪", true, true, true, true},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			props := map[string]dbus.Variant{"Paired": dbus.MakeVariant(state.paired), "Connected": dbus.MakeVariant(state.connected), "ServicesResolved": dbus.MakeVariant(state.resolved)}
+			if incomingLinkReady(props) != state.ready {
+				t.Fatal("缓存或未完成连接被当作就绪", state)
+			}
+		})
+	}
+	if incomingLinkReady(nil) {
+		t.Fatal("缺失属性被当作就绪")
+	}
+}
+
 func TestIncomingWindowRejectsDisabledBusyAndCleanupPending(t *testing.T) {
 	for _, state := range []string{"disabled", "closed", "scanning", "pairing", "cleanup_pending"} {
 		t.Run(state, func(t *testing.T) {
@@ -140,6 +166,7 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 		"Alias": dbus.MakeVariant("rock-3a"), "Pairable": dbus.MakeVariant(false), "Discoverable": dbus.MakeVariant(false), "PairableTimeout": dbus.MakeVariant(uint32(0)), "DiscoverableTimeout": dbus.MakeVariant(uint32(180)),
 	}, phone: map[string]dbus.Variant{
 		"Address": dbus.MakeVariant(testPhone), "Adapter": dbus.MakeVariant(dbus.ObjectPath("/org/bluez/hci0")), "AddressType": dbus.MakeVariant("public"), "Icon": dbus.MakeVariant("phone"), "Paired": dbus.MakeVariant(false),
+		"Connected": dbus.MakeVariant(true), "ServicesResolved": dbus.MakeVariant(false),
 	}}
 	phonePath := dbus.ObjectPath("/org/bluez/hci0/dev_02_11_22_33_44_55")
 	for _, entry := range []struct {
@@ -211,6 +238,22 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 		f.mu.Lock()
 		f.phone["Paired"] = dbus.MakeVariant(true)
 		f.mu.Unlock()
+	}
+	// 缓存配对和新 ACL 连接不能证明本轮服务发现完成，不能提前关闭配对入口。
+	select {
+	case <-started:
+		t.Fatal("服务发现尚未完成就开始登记")
+	case <-time.After(1100 * time.Millisecond):
+	}
+	f.mu.Lock()
+	if f.trusted || f.registered == "" || f.adapter["Pairable"].Value() != true {
+		f.mu.Unlock()
+		t.Fatal("服务发现期间提前交接或关闭配对入口")
+	}
+	f.phone["ServicesResolved"] = dbus.MakeVariant(true)
+	f.mu.Unlock()
+	if err := old.conn.Emit(phonePath, "org.freedesktop.DBus.Properties.PropertiesChanged", "org.bluez.Device1", map[string]dbus.Variant{"ServicesResolved": dbus.MakeVariant(true)}, []string{}); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case ok := <-started:
