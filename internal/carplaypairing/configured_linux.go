@@ -73,6 +73,9 @@ func NewConfiguredProvisioningManager(settingsPath, directory, runtime string) (
 	}
 	client := &serviceClient{runtime: runtime}
 	pair := func(ctx context.Context, phone string, confirmation *Confirmation) error {
+		if confirmation.incoming {
+			return verifyIncomingPhone(ctx, phone)
+		}
 		binary, digest, err := configuredBinary(settingsPath)
 		if err != nil {
 			return err
@@ -87,6 +90,10 @@ func NewConfiguredProvisioningManager(settingsPath, directory, runtime string) (
 	m.completedState = "video_verified"
 	m.bindServiceRecovery(client)
 	m.scanner = scanBlueZ
+	m.incomingReady = func() bool {
+		status, err := client.status()
+		return err == nil && status.OnboardingReady && m.Ready()
+	}
 	m.ready = func() bool {
 		if status, err := client.status(); err != nil || !status.ServiceActive && !status.OnboardingReady {
 			return false

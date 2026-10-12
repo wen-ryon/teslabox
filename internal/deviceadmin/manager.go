@@ -1600,7 +1600,15 @@ func (m *Manager) activeWirelessChannel(ctx context.Context, interfaceName strin
 	if err != nil {
 		return "", 0
 	}
-	return parseIWInterfaceChannel(string(output))
+	if band, channel := parseIWInterfaceChannel(string(output)); channel != 0 {
+		return band, channel
+	}
+	// 部分厂商驱动不在 info 中返回信道，关联链路仍提供实际频率。
+	output, err = m.run(ctx, "/usr/sbin/iw", "dev", interfaceName, "link")
+	if err != nil {
+		return "", 0
+	}
+	return parseIWLinkChannel(string(output))
 }
 
 type apRuntime struct {

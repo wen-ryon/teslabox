@@ -78,7 +78,8 @@ func registerCarPlayPairingRoutes(mux *http.ServeMux, manager *carplaypairing.Ma
 			startAvailable = err == nil
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"available": available, "scan_available": available, "start_available": startAvailable,
-			"handoff": plan, "scanning": manager != nil && manager.Scanning(), "task": status})
+			"incoming_available": manager != nil && manager.IncomingListening(),
+			"handoff":            plan, "scanning": manager != nil && manager.Scanning(), "task": status})
 	})
 	ready := func(w http.ResponseWriter) bool {
 		w.Header().Set("Cache-Control", "no-store")

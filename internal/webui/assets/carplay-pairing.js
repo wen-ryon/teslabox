@@ -5,7 +5,7 @@
   if(!panel)return;
   const target=get('device'),status=get('status'),prompt=get('prompt'),digits=get('digits');
   const idPattern=/^[a-f0-9]{32}$/,phonePattern=/^(?:[A-F0-9]{2}:){5}[A-F0-9]{2}$/;
-  const states={idle:'尚未登记；请搜索并选择手机',pairing:'正在配对并等待本轮画面',canceling:'正在取消，等待本轮资源清理',canceled:'本轮已取消，可重新搜索',failed:'本轮登记未完成，可重新搜索并重试',cleanup_pending:'本轮清理尚未确认，请先核对清理状态',video_verified:'登记完成：已收到本轮手机新画面',bluetooth_paired:'蓝牙已配对，尚未完成视频登记'};
+  const states={idle:'尚未登记；请在 iPhone 蓝牙设置连接 TeslaBox CarPlay',pairing:'手机已发起连接，正在等待本轮画面',canceling:'正在取消，等待本轮资源清理',canceled:'本轮已取消；可在手机上断开后重新连接 TeslaBox CarPlay',failed:'本轮登记未完成；请在手机上断开后重新连接，仍失败时下载 CarPlay 日志',cleanup_pending:'本轮清理尚未确认，请先核对清理状态',video_verified:'登记完成：已收到本轮手机新画面',bluetooth_paired:'蓝牙已配对，尚未完成视频登记'};
   let snapshot=null,healthy=false,busy=false,polling=false,loaded=false,generation=0;
   const validTask=task=>task&&typeof task.running==='boolean'&&Object.hasOwn(states,task.state)&&
     (task.state==='idle'?task.request_id==='':idPattern.test(task.request_id)&&phonePattern.test(task.phone_id))&&task.prompt&&
@@ -42,6 +42,11 @@
       if(typeof value.available!=='boolean'||typeof value.scanning!=='boolean'||!validTask(value.task))throw new Error('登记状态暂不可用');
       snapshot=value;healthy=true;
       status.textContent=!value.available?'首次登记服务尚未就绪':value.scanning?'正在搜索蓝牙设备':states[value.task.state];
+      if(value.available&&value.task.state==='idle'&&value.incoming_available===false)status.textContent='手机主动配对入口尚未就绪，请稍候；持续失败时下载 CarPlay 日志';
+      if(value.task.state==='failed'&&value.task.failure_phase){
+        const failures={bluetooth_pairing:'手机系统配对未完成',network_handoff:'热点交接失败',waiting_video:'未收到本轮手机画面'};
+        if(failures[value.task.failure_phase])status.textContent=failures[value.task.failure_phase]+'；请在手机上断开后重新连接，仍失败时下载 CarPlay 日志';
+      }
       if(value.task.running&&value.task.phase){
         const phases={network_handoff:'正在交接热点；页面短暂断开后会继续读取同一任务',waiting_video:'正在等待手机连接与本轮视频首帧',restoring:'正在清理本轮连接并恢复原热点，请勿重复启动'};
         if(phases[value.task.phase])status.textContent=phases[value.task.phase];

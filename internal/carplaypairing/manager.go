@@ -3,6 +3,7 @@ package carplaypairing
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -21,16 +22,18 @@ type PairRunner func(context.Context, string, *Confirmation) error
 
 // TaskStatus 不保存原始错误或配对日志；数字仅在本轮等待确认时返回。
 type TaskStatus struct {
-	Phase     string             `json:"phase,omitempty"`
-	RequestID string             `json:"request_id"`
-	PhoneID   string             `json:"phone_id"`
-	State     string             `json:"state"`
-	Running   bool               `json:"running"`
-	ExpiresAt time.Time          `json:"expires_at"`
-	Prompt    ConfirmationStatus `json:"prompt"`
+	FailurePhase string             `json:"failure_phase,omitempty"`
+	Phase        string             `json:"phase,omitempty"`
+	RequestID    string             `json:"request_id"`
+	PhoneID      string             `json:"phone_id"`
+	State        string             `json:"state"`
+	Running      bool               `json:"running"`
+	ExpiresAt    time.Time          `json:"expires_at"`
+	Prompt       ConfirmationStatus `json:"prompt"`
 }
 
 type pairingTask struct {
+	incoming       bool
 	handoff        HandoffPlan
 	confirmation   *Confirmation
 	status         TaskStatus
@@ -41,18 +44,23 @@ type pairingTask struct {
 
 // Manager 保留最后一轮状态并互斥持有当前任务，不操作录像、热点或系统默认 Agent。
 type Manager struct {
-	handoff        NetworkHandoff
-	mu             sync.Mutex
-	run            PairRunner
-	current        *pairingTask
-	completedState string
-	reconcile      func(context.Context, string, string, time.Time) error
-	recoveredVideo func(string) bool
-	ready          func() bool
-	closed         bool
-	scanner        func(context.Context) ([]Device, error)
-	scanCancel     context.CancelFunc
-	scanDone       chan struct{}
+	logger            *slog.Logger
+	incomingCancel    context.CancelFunc
+	incomingDone      chan struct{}
+	incomingReady     func() bool
+	incomingListening bool
+	handoff           NetworkHandoff
+	mu                sync.Mutex
+	run               PairRunner
+	current           *pairingTask
+	completedState    string
+	reconcile         func(context.Context, string, string, time.Time) error
+	recoveredVideo    func(string) bool
+	ready             func() bool
+	closed            bool
+	scanner           func(context.Context) ([]Device, error)
+	scanCancel        context.CancelFunc
+	scanDone          chan struct{}
 }
 
 // NewManager 要求真实配对执行器，避免管理入口仅显示模拟成功。
@@ -71,7 +79,7 @@ func (m *Manager) Start(parent context.Context, phone string, window time.Durati
 	return m.start(parent, phone, window, HandoffPlan{})
 }
 
-func (m *Manager) start(parent context.Context, phone string, window time.Duration, plan HandoffPlan) (TaskStatus, error) {
+func (m *Manager) start(parent context.Context, phone string, window time.Duration, plan HandoffPlan, incoming ...bool) (TaskStatus, error) {
 	if parent == nil || parent.Err() != nil || !phoneAddress.MatchString(phone) || phone == "00:00:00:00:00:00" {
 		return TaskStatus{}, errors.New("配对需要有效应用上下文和明确手机蓝牙地址")
 	}
@@ -91,8 +99,9 @@ func (m *Manager) start(parent context.Context, phone string, window time.Durati
 	}
 	prompt := confirmation.Status()
 	task := &pairingTask{confirmation: confirmation, cancel: cancel, done: make(chan struct{}),
-		handoff: plan,
-		status:  TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
+		incoming: len(incoming) == 1 && incoming[0],
+		handoff:  plan,
+		status:   TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
 	m.current = task
 	go m.execute(ctx, task)
 	return m.snapshotLocked(task), nil
@@ -106,6 +115,19 @@ func (m *Manager) Ready() bool {
 	return !closed && (ready == nil || ready())
 }
 
+// IncomingListening 仅在系统 Agent 和可发现状态实际设置成功后报告入口可用。
+func (m *Manager) IncomingListening() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.closed && m.incomingListening
+}
+
+func (m *Manager) setIncomingListening(value bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.incomingListening = value
+}
+
 // Close 随应用退出取消自有任务，等待真实退出；观察超时不会假装资源已经释放。
 func (m *Manager) Close(ctx context.Context) error {
 	if ctx == nil {
@@ -113,6 +135,10 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	m.closed = true
+	incomingDone := m.incomingDone
+	if m.incomingCancel != nil {
+		m.incomingCancel()
+	}
 	scanDone := m.scanDone
 	if m.scanCancel != nil {
 		m.scanCancel()
@@ -123,6 +149,13 @@ func (m *Manager) Close(ctx context.Context) error {
 		task.confirmation.cancel()
 	}
 	m.mu.Unlock()
+	if incomingDone != nil {
+		select {
+		case <-incomingDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if scanDone != nil {
 		select {
 		case <-scanDone:
@@ -145,6 +178,7 @@ func (m *Manager) Close(ctx context.Context) error {
 }
 
 func (m *Manager) execute(ctx context.Context, task *pairingTask) {
+	task.confirmation.incoming = task.incoming
 	task.confirmation.handoff = m.handoff
 	task.confirmation.handoffPlan = task.handoff
 	err := m.run(ctx, task.status.PhoneID, task.confirmation)
@@ -163,6 +197,9 @@ func (m *Manager) execute(ctx context.Context, task *pairingTask) {
 	task.cancel()
 	task.confirmation.cancel()
 	task.status.State, task.status.Running = state, false
+	if m.logger != nil {
+		m.logger.Info("CarPlay 登记任务结束", "request_id", task.status.RequestID, "state", state, "failure_phase", task.confirmation.failedPhase())
+	}
 	close(task.done)
 }
 
@@ -199,6 +236,7 @@ func (m *Manager) snapshotLocked(task *pairingTask) TaskStatus {
 	status := task.status
 	status.Prompt = task.confirmation.Status()
 	status.Phase = task.confirmation.currentPhase()
+	status.FailurePhase = task.confirmation.failedPhase()
 	if !status.Running {
 		status.Prompt.Digits = ""
 	}

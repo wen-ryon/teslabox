@@ -16,6 +16,29 @@ function fixture(fetcher,confirm=()=>true){
 }
 const reply=value=>({ok:true,json:async()=>value});
 
+test('首次登记指引手机主动连接，页面加载不搜索或开始登记',async()=>{
+  const ui=fixture(()=>reply({available:true,scanning:false,task:task()}));
+  await ui.load();await ui.poll();
+  assert.match(ui.get('status').textContent,/iPhone.*TeslaBox CarPlay/);
+  assert.ok(ui.calls.every(c=>c.method==='GET'));
+  const html=fs.readFileSync('internal/webui/assets/index.html','utf8');
+  assert.match(html,/id="carplay-pairing-scan"[^>]*hidden/);
+  assert.match(html,/id="carplay-pairing-start"[^>]*hidden/);
+});
+
+test('登记失败提示区分系统配对、热点交接和视频首帧',async()=>{
+  for(const [phase,message] of [['bluetooth_pairing','手机系统配对未完成'],['network_handoff','热点交接失败'],['waiting_video','未收到本轮手机画面']]){
+    const failed=task('failed');failed.failure_phase=phase;
+    const ui=fixture(()=>reply({available:true,scanning:false,task:failed}));await ui.load();
+    assert.ok(ui.get('status').textContent.startsWith(message));
+  }
+});
+
+test('蓝牙入口未实际开放时不提示手机连接',async()=>{
+  const ui=fixture(()=>reply({available:true,incoming_available:false,scanning:false,task:task()}));await ui.load();
+  assert.match(ui.get('status').textContent,/主动配对入口尚未就绪/);
+});
+
 test('拒绝交接确认不启动任务；确认绑定当前配置指纹',async()=>{
   let approved=false;
   const ui=fixture((path,options)=>{

@@ -33,19 +33,33 @@ type ConfirmationStatus struct {
 
 // Confirmation 由一次配对任务持有，数字只保存在内存，不能复用到下一轮。
 type Confirmation struct {
-	phase       string
-	handoff     NetworkHandoff
-	handoffPlan HandoffPlan
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	status      ConfirmationStatus
-	served      bool
-	decision    chan string
+	failurePhase string
+	incoming     bool
+	phase        string
+	handoff      NetworkHandoff
+	handoffPlan  HandoffPlan
+	mu           sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	status       ConfirmationStatus
+	served       bool
+	decision     chan string
 }
 
 func (c *Confirmation) setPhase(phase string) { c.mu.Lock(); defer c.mu.Unlock(); c.phase = phase }
 func (c *Confirmation) currentPhase() string  { c.mu.Lock(); defer c.mu.Unlock(); return c.phase }
+
+func (c *Confirmation) recordFailurePhase() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failurePhase = c.phase
+}
+
+func (c *Confirmation) failedPhase() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failurePhase
+}
 
 // NewConfirmation 要求明确的限时窗口，避免管理页离开后无限等待。
 func NewConfirmation(parent context.Context, window time.Duration) (*Confirmation, error) {

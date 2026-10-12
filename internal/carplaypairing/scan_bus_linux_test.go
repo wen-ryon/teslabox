@@ -16,6 +16,7 @@ import (
 )
 
 type discoveryFixture struct {
+	conn     *dbus.Conn
 	mu       sync.Mutex
 	sessions map[dbus.Sender]bool
 	filters  map[dbus.Sender]string
@@ -98,7 +99,7 @@ func privateDiscoveryBus(t *testing.T) (context.Context, string, *discoveryFixtu
 	if _, err := conn.RequestName("org.bluez", dbus.NameFlagDoNotQueue); err != nil {
 		t.Fatal(err)
 	}
-	f := &discoveryFixture{sessions: make(map[dbus.Sender]bool), filters: make(map[dbus.Sender]string)}
+	f := &discoveryFixture{conn: conn, sessions: make(map[dbus.Sender]bool), filters: make(map[dbus.Sender]string)}
 	for _, export := range []struct {
 		path  dbus.ObjectPath
 		iface string

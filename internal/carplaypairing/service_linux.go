@@ -237,6 +237,7 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 50*time.Second)
 			defer cancel()
 			if result != nil {
+				confirmation.recordFailurePhase()
 				confirmation.setPhase("restoring")
 			}
 			if err := c.release(cleanup, request); err != nil {
@@ -254,6 +255,7 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 		if err := c.wait(ctx, request, "paused"); err != nil {
 			return err
 		}
+		confirmation.setPhase("bluetooth_pairing")
 		if err := pair(ctx, phone, confirmation); err != nil {
 			return err
 		}

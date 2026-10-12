@@ -288,10 +288,10 @@
         </form>
         <div id="carplay-pairing-panel" class="settings-card carplay-settings-card">
           <h3>登记手机</h3>
-          <p>保持 iPhone 停留在“设置 → 蓝牙”，先搜索并选择你的手机。配对会短暂替换 CarPlay 接收会话；录像继续运行。只有收到本轮新画面才算登记完成。</p>
-          <button id="carplay-pairing-scan" type="button" class="secondary" disabled>搜索蓝牙设备</button>
-          <label>待登记手机<select id="carplay-pairing-device" disabled><option value="">请先搜索并选择手机</option></select></label>
-          <button id="carplay-pairing-start" type="button" disabled>开始登记（120 秒）</button>
+            <p>开启 CarPlay 后，在 iPhone“设置 → 蓝牙”中连接 TeslaBox CarPlay，并在手机上确认配对。无需在此搜索或开始登记；热点交接和视频登记自动进行，只有收到本轮新画面才算完成。手机已配对但尚未登记时，可在手机上断开后重新连接。</p>
+            <button id="carplay-pairing-scan" type="button" class="secondary" hidden disabled>搜索蓝牙设备</button>
+            <label hidden>待登记手机<select id="carplay-pairing-device" disabled><option value="">请先搜索并选择手机</option></select></label>
+            <button id="carplay-pairing-start" type="button" hidden disabled>开始登记（120 秒）</button>
           <p id="carplay-pairing-status" role="status">登记服务等待检测</p>
           <div id="carplay-pairing-prompt" hidden>
             <p>请核对 iPhone 与这里显示的六位数字：<strong id="carplay-pairing-digits"></strong>。只有两端一致才确认，并在 iPhone 上同意配对及 CarPlay 提示。</p>

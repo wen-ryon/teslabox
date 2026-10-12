@@ -465,6 +465,7 @@ func main() {
 		}
 		if carPlayPairing != nil {
 			carPlayPairing.ConfigureHandoff(deviceAdmin)
+			carPlayPairing.StartIncoming(ctx, logger)
 		}
 	}
 	apiHandler := api.NewHandler(

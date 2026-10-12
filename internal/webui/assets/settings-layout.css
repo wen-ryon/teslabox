@@ -111,6 +111,7 @@
 #carplay-pairing-panel > label { max-width: 560px; }
 #carplay-pairing-status { margin-top: 16px; color: var(--muted); }
 #carplay-pairing-prompt:not([hidden]) { padding: 16px; border: 1px solid var(--accent); border-radius: 12px; background: var(--accent-soft); }
+#carplay-pairing-panel [hidden] { display: none !important; }
 #carplay-pairing-prompt button { margin-top: 14px; }
 #carplay-pairing-digits { font-variant-numeric: tabular-nums; letter-spacing: .15em; color: var(--text); }
 @media (max-width: 759px) {
