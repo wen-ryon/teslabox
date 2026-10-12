@@ -100,7 +100,7 @@ func TestEnrollmentHandoffRestoresAfterInterruptedStages(t *testing.T) {
 }
 
 func TestEnrollmentHandoffDoesNotOverwriteChangedProfileOrOwnedLease(t *testing.T) {
-	for _, change := range []string{"config", "autoconnect", "active", "lease"} {
+	for _, change := range []string{"config", "autoconnect", "active", "lease", "unknown_recovery"} {
 		t.Run(change, func(t *testing.T) {
 			m, r := handoffFixture(t)
 			if err := m.suspendHandoffLocked(context.Background()); err != nil {
@@ -113,6 +113,8 @@ func TestEnrollmentHandoffDoesNotOverwriteChangedProfileOrOwnedLease(t *testing.
 				r.auto = true
 			case "active":
 				r.active = true
+			case "unknown_recovery":
+				m.carPlayRecoveryUncertain = true
 			case "lease":
 				lease := testCarPlayLease()
 				m.carPlayNetworkHold = &lease

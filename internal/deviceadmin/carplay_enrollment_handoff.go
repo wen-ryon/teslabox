@@ -239,7 +239,7 @@ func (m *Manager) restoreHandoffLocked(ctx context.Context) error {
 	if value == nil {
 		return nil
 	}
-	if m.carPlayNetworkHold != nil {
+	if m.carPlayNetworkHold != nil || m.carPlayRecoveryUncertain {
 		return carPlayNetworkBusy()
 	}
 	hash, auto, active, err := m.handoffProfile(ctx, value.UUID)
