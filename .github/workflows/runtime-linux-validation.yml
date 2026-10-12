@@ -3,7 +3,7 @@ name: RC1 isolated Linux validation
 # 仅候选分支测试，不接生产密钥、不构建签名包、不修改发布通道。
 on:
   push:
-    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback]
+    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback, codex/carplay-phone-initiated-enrollment]
   workflow_dispatch:
 
 permissions:
