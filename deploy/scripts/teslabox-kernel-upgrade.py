@@ -91,22 +91,27 @@ def write_json(path, value):
 def selected_menu(data, target, old):
     """只改默认标签，旧内核入口必须原样保留，不能依赖字典遍历或包排序。"""
     text = data.decode("utf-8")
-    label = None
+    entry = None
     found = {}
     for line in text.splitlines():
         parts = line.split()
         if not parts:
             continue
         if parts[0].lower() == "label" and len(parts) == 2:
-            label = parts[1]
-        if parts[0].lower() in ("linux", "kernel") and len(parts) == 2 and label:
+            entry = {"label": parts[1], "recovery": False}
+        if entry and parts[0].lower() == "append":
+            entry["recovery"] = bool(set(parts[1:]) & {"single", "rescue", "emergency", "systemd.unit=rescue.target", "systemd.unit=emergency.target"})
+        if entry and "(rescue target)" in line.lower():
+            entry["recovery"] = True
+        if parts[0].lower() in ("linux", "kernel") and len(parts) == 2 and entry:
             image = PurePosixPath(parts[1]).name
             if image.startswith("vmlinuz-"):
-                found.setdefault(image.removeprefix("vmlinuz-"), []).append(label)
-    if old not in found or target not in found or len(found[target]) != 1:
+                found.setdefault(image.removeprefix("vmlinuz-"), []).append(entry)
+    normal = [item["label"] for item in found.get(target, []) if not item["recovery"]]
+    if old not in found or len(normal) != 1:
         raise RuntimeError("启动菜单缺少唯一新入口或原内核回滚入口")
     lines = [line for line in text.splitlines() if not line.strip().lower().startswith("default ")]
-    return ("default " + found[target][0] + "\n" + "\n".join(lines) + "\n").encode()
+    return ("default " + normal[0] + "\n" + "\n".join(lines) + "\n").encode()
 
 
 def validate_archive(path, files):

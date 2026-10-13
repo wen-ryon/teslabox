@@ -156,6 +156,10 @@ func (g rootKernelActions) action(ctx context.Context, action string) ([]byte, e
 	if err := plainPath(kernelControllerPath); err != nil {
 		return nil, err
 	}
+	// root 脚本也必须符合普通文件、所有权与写权限约束，不能只检查父目录。
+	if _, _, err := snapshotFile(kernelControllerPath, 128<<10); err != nil {
+		return nil, err
+	}
 	p, err := ReadKernelPolicy(kernelPolicyPath)
 	if err != nil {
 		return nil, err

@@ -28,6 +28,12 @@ class ArchiveMenuTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 k.selected_menu(menu, k.RELEASE, "old")
 
+    def test_debian_normal_and_rescue_entries_are_not_ambiguous(self):
+        menu = b"label old\n linux /boot/vmlinuz-old\nlabel l0\n linux /boot/vmlinuz-5.10.160-teslabox3\n append root=test quiet\nlabel l0r\n menu label new (rescue target)\n linux /boot/vmlinuz-5.10.160-teslabox3\n append root=test single\n"
+        result = k.selected_menu(menu, k.RELEASE, "old")
+        self.assertTrue(result.startswith(b"default l0\n"))
+        self.assertIn(b"label l0r\n", result)
+
     def test_exact_members_and_tampered_duplicate_link_extra_rejected(self):
         for mode in ("good", "digest", "duplicate", "link", "extra"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
