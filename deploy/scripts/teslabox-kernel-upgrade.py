@@ -325,6 +325,8 @@ class KernelUpgrade:
         old_menu = regular(self.menu)
         # 旧入口必须在任何包脚本执行前确认存在，不能用新生成菜单替代回滚基线。
         selected_menu(old_menu, self.running, self.running)
+        # 下载缓存也可能由隔离验证提供，暂存目录不能隐式依赖下载函数创建。
+        mkdir(self.base)
         archive = self.download()
         entries = validate_archive(archive, self.policy["files"])
         stage = Path(tempfile.mkdtemp(prefix="stage-", dir=self.base))
