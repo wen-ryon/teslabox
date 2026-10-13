@@ -1,9 +1,9 @@
-name: RC1 isolated Linux validation
+name: RC1 fixed playback candidate validation
 
 # 仅候选分支测试，不接生产密钥、不构建签名包、不修改发布通道。
 on:
   push:
-    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback, codex/carplay-phone-initiated-enrollment]
+    branches: [codex/rc1-playback-validation-b8fffd69]
   workflow_dispatch:
 
 permissions:
@@ -31,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: b8fffd69130400b7616ace8900f30c9210819c36
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -39,6 +40,7 @@ jobs:
       - name: Record source and toolchain
         run: |
           mkdir -p validation-logs
+          test "$(git rev-parse HEAD)" = b8fffd69130400b7616ace8900f30c9210819c36
           git rev-parse HEAD | tee validation-logs/commit.txt
           go version | tee validation-logs/go-version.txt
           uname -a | tee validation-logs/platform.txt
@@ -107,6 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: b8fffd69130400b7616ace8900f30c9210819c36
           persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -116,6 +119,7 @@ jobs:
       - name: Record source and scope
         run: |
           mkdir -p validation-logs
+          test "$(git rev-parse HEAD)" = b8fffd69130400b7616ace8900f30c9210819c36
           git rev-parse HEAD | tee validation-logs/commit.txt
           echo 'Linux AMD64 filesystem transactions; not Debian ARM64 tools or board acceptance.' | tee validation-logs/scope.txt
       - name: Published 0.1.31 reader accepts restored state
@@ -180,6 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: b8fffd69130400b7616ace8900f30c9210819c36
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -188,10 +193,11 @@ jobs:
       - name: Record source and Node
         run: |
           mkdir -p validation-logs
+          test "$(git rev-parse HEAD)" = b8fffd69130400b7616ace8900f30c9210819c36
           git rev-parse HEAD | tee validation-logs/commit.txt
           node --version | tee validation-logs/node-version.txt
       - name: All frontend tests
-        run: node --test --test-reporter=tap internal/webui/*test.cjs 2>&1 | tee validation-logs/node-tests.log
+        run: node --test --test-reporter=tap internal/webui/*test.cjs internal/webui/*test.js 2>&1 | tee validation-logs/node-tests.log
       - name: Preserve frontend evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
