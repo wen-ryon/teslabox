@@ -406,7 +406,14 @@
         <article class="settings-card appearance-settings">
           <p class="muted">主题、显示大小、字体与兼容模式修改后立即生效，仅保存在当前浏览器。</p>
           <div class="display-scale-control">
-            <label for="settings-display-scale"><span>显示大小</span><span class="display-scale-value"><input id="settings-display-scale" type="number" min="50" max="200" step="1" value="100" inputmode="numeric" aria-label="页面显示大小百分比"><span>%</span><button id="settings-display-reset" class="ghost compact" type="button">恢复 100%</button></span></label>
+            <label for="settings-display-scale"><span>显示大小</span><span class="display-scale-value"><input id="settings-display-scale" type="number" min="50" max="200" step="1" value="100" inputmode="numeric" aria-label="页面显示大小百分比"><span>%</span></span></label>
+            <div class="display-scale-presets" role="group" aria-label="显示大小快捷档位">
+              <button class="ghost compact" type="button" data-display-scale="50">50%</button>
+              <button class="ghost compact" type="button" data-display-scale="75">75%</button>
+              <button id="settings-display-reset" class="ghost compact" type="button">恢复 100%</button>
+              <button class="ghost compact" type="button" data-display-scale="125">125%</button>
+              <button class="ghost compact" type="button" data-display-scale="150">150%</button>
+            </div>
             <input id="settings-display-slider" type="range" min="50" max="200" step="1" value="100" aria-label="拖动调整页面显示大小">
           </div>
           <p class="appearance-help">可调整为 50%～200%，每次 1%；拖动松开或输入完成后生效，仅缩放 TeslaBox 管理页面。</p>

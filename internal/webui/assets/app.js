@@ -509,6 +509,9 @@ $("settings-display-scale").addEventListener("change", event => updateDisplaySca
 $("settings-display-slider").addEventListener("input", event => { $("settings-display-scale").value = event.target.value; });
 $("settings-display-slider").addEventListener("change", event => updateDisplayScale(event.target.value));
 $("settings-display-reset").addEventListener("click", () => updateDisplayScale(100));
+document.querySelectorAll("[data-display-scale]").forEach(button => {
+  button.addEventListener("click", () => updateDisplayScale(button.dataset.displayScale));
+});
 $("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
 $("tesla-browser-compatibility").addEventListener("change", (event) => applyTeslaBrowserCompatibility(event.target.checked));
 $("wifi-scan").addEventListener("click", scanWiFi);
