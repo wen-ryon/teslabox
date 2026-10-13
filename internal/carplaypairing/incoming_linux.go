@@ -118,10 +118,19 @@ func (a *incomingAgent) RequestAuthorization(sender dbus.Sender, device dbus.Obj
 	return err
 }
 
-// RequestConfirmation 不自动批准需要两端数字核对的协议，避免把无屏确认伪装成数字验收。
+// RequestConfirmation 按手机端确认流程自动接收，仍限制为本轮未登记手机且不记录配对数字。
 func (a *incomingAgent) RequestConfirmation(sender dbus.Sender, device dbus.ObjectPath, passkey uint32) *dbus.Error {
-	a.logCallback("RequestConfirmation", "unsupported_numeric_confirmation")
-	return rejected()
+	if passkey > 999999 {
+		a.logCallback("RequestConfirmation", "invalid_passkey")
+		return rejected()
+	}
+	err := a.authorize(sender, device)
+	result := "accepted"
+	if err != nil {
+		result = "rejected"
+	}
+	a.logCallback("RequestConfirmation", result)
+	return err
 }
 
 // RequestPinCode 不支持旧式固定 PIN 配对。
@@ -327,7 +336,9 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 		pending, deadline := a.pending, a.deadline
 		a.mu.Unlock()
 		if open && !registered {
-			if err := agents.CallWithContext(ctx, "org.bluez.AgentManager1.RegisterAgent", 0, incomingAgentPath, "NoInputNoOutput").Err; err != nil {
+			// 双方使用数字确认能力，避免旧配对记录被 BlueZ 的 JustWorksRepairing 策略提前拒绝。
+			// 手机仍需确认；板端按产品既定流程接收，不宣称用户核对过两端数字。
+			if err := agents.CallWithContext(ctx, "org.bluez.AgentManager1.RegisterAgent", 0, incomingAgentPath, "DisplayYesNo").Err; err != nil {
 				return err
 			}
 			registered = true

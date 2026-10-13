@@ -145,6 +145,10 @@ func TestIncomingWindowRejectsDisabledBusyAndCleanupPending(t *testing.T) {
 			if m.incomingAvailable() {
 				t.Fatal("非待登记状态仍允许新手机")
 			}
+			a := &incomingAgent{ctx: context.Background(), owner: ":1.1", manager: m}
+			if a.RequestConfirmation(dbus.Sender(":1.1"), "/org/bluez/hci0/dev_02_11_22_33_44_55", 123456) == nil {
+				t.Fatal("非待登记状态自动批准了数字确认")
+			}
 		})
 	}
 }
@@ -206,7 +210,7 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	capability := f.capability
 	trusted := f.trusted
 	f.mu.Unlock()
-	if capability != "NoInputNoOutput" || trusted {
+	if capability != "DisplayYesNo" || trusted {
 		t.Fatal("首次配对能力或信任边界错误")
 	}
 	attacker, err := dbus.Connect(address, dbus.WithContext(ctx))
@@ -216,6 +220,12 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	defer attacker.Close()
 	if attacker.Object(target, incomingAgentPath).CallWithContext(ctx, "org.bluez.Agent1.RequestAuthorization", 0, phonePath).Err == nil {
 		t.Fatal("非BlueZ调用者取得授权")
+	}
+	if attacker.Object(target, incomingAgentPath).CallWithContext(ctx, "org.bluez.Agent1.RequestConfirmation", 0, phonePath, uint32(123456)).Err == nil {
+		t.Fatal("非BlueZ调用者取得数字确认授权")
+	}
+	if old.conn.Object(target, incomingAgentPath).CallWithContext(ctx, "org.bluez.Agent1.RequestConfirmation", 0, phonePath, uint32(1000000)).Err == nil {
+		t.Fatal("非法配对数字被接受")
 	}
 	select {
 	case <-started:
@@ -231,14 +241,14 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 		if err := old.conn.Emit(phonePath, "org.freedesktop.DBus.Properties.PropertiesChanged", "org.bluez.Device1", map[string]dbus.Variant{"Connected": dbus.MakeVariant(true)}, []string{}); err != nil {
 			t.Fatal(err)
 		}
-	} else {
-		if err := old.conn.Object(target, incomingAgentPath).CallWithContext(ctx, "org.bluez.Agent1.RequestAuthorization", 0, phonePath).Err; err != nil {
-			t.Fatal(err)
-		}
-		f.mu.Lock()
-		f.phone["Paired"] = dbus.MakeVariant(true)
-		f.mu.Unlock()
 	}
+	// 新手机和已有缓存的手机都必须能通过本轮 BlueZ 数字确认回调。
+	if err := old.conn.Object(target, incomingAgentPath).CallWithContext(ctx, "org.bluez.Agent1.RequestConfirmation", 0, phonePath, uint32(123456)).Err; err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.phone["Paired"] = dbus.MakeVariant(true)
+	f.mu.Unlock()
 	// 缓存配对和新 ACL 连接不能证明本轮服务发现完成，不能提前关闭配对入口。
 	select {
 	case <-started:
