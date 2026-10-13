@@ -1,6 +1,7 @@
 """隔离文件系统与命令替身；不连接板子，不执行真实 dpkg、重启或驱动操作。"""
 
 import importlib.util
+import gzip
 import io
 import json
 import os
@@ -16,6 +17,28 @@ spec.loader.exec_module(k)
 
 
 class ArchiveMenuTests(unittest.TestCase):
+    def test_exact_frozen_image_pins_include_deb_and_postinst_output(self):
+        self.assertEqual(k.IMAGE_FORMS, {
+            (9_968_257, "8fce4f9877dabfd8ad0eef2ee91f5901eb1d51341085834daeb53e8790e32516"),
+            (29_547_008, "fcf5b2c420ccc7573baf70ee2a3ea4db9ebce82b4e47fadba2f70d8f8e12bb27"),
+        })
+
+    def test_exact_compressed_and_raw_forms_only(self):
+        raw = b"frozen ARM64 Image fixture"
+        compressed = gzip.compress(raw, mtime=0)
+        forms = {(len(raw), k.digest(raw)), (len(compressed), k.digest(compressed))}
+        with patch.object(k, "IMAGE_FORMS", forms):
+            self.assertTrue(k.frozen_image(raw))
+            self.assertTrue(k.frozen_image(compressed))
+            # 同一解压内容的另一 gzip 封装也不能绕过冻结字节摘要。
+            self.assertFalse(k.frozen_image(gzip.compress(raw, mtime=1)))
+            for data in (raw[:-1], raw + b"extra", b"X" + raw[1:], compressed[:-1], compressed + b"extra"):
+                self.assertFalse(k.frozen_image(data))
+
+    def test_correct_digest_with_wrong_length_is_rejected(self):
+        with patch.object(k, "digest", return_value="8fce4f9877dabfd8ad0eef2ee91f5901eb1d51341085834daeb53e8790e32516"):
+            self.assertFalse(k.frozen_image(b"wrong-size"))
+
     def test_default_changes_but_old_entry_remains(self):
         old = b"default old\nlabel old\n linux /boot/vmlinuz-old\nlabel new\n linux /boot/vmlinuz-5.10.160-teslabox3\n"
         menu = k.selected_menu(old, k.RELEASE, "old")
@@ -58,6 +81,46 @@ class ArchiveMenuTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "Linux fsync/ownership tests run in CI")
 class TransactionTests(unittest.TestCase):
+    def test_runtime_accepts_postinst_image_but_rejects_tamper_and_bad_dtb(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "usr/lib/modules").mkdir(parents=True)
+            (root / "lib").mkdir()
+            (root / "lib/modules").symlink_to("../usr/lib/modules")
+            base = root / "usr/lib/modules" / k.RELEASE
+            modules = {name: base / "kernel" / (name + ".ko") for name in ("8852be", "cfg80211", "mac80211", "compat", "mt7921e", "btusb", "rtk_btusb")}
+            for name, path in modules.items():
+                k.durable(path, name.encode())
+            image = root / ("boot/vmlinuz-" + k.RELEASE)
+            initrd = root / ("boot/initrd.img-" + k.RELEASE)
+            dtb = root / ("usr/lib/linux-image-" + k.RELEASE + "/rockchip/rk3568-rock-3a.dtb")
+            raw = b"frozen Image"
+            compressed = gzip.compress(raw, mtime=0)
+            forms = {(len(raw), k.digest(raw)), (len(compressed), k.digest(compressed))}
+            k.durable(initrd, b"initramfs")
+            k.durable(dtb, b"frozen DTB")
+            def run(args):
+                return str(modules[args[-1]].relative_to(root)) if args[4] == "filename" else k.RELEASE + " SMP"
+            # modinfo 的生产路径是绝对路径，测试根目录只做路径映射。
+            def command(args):
+                return "/" + run(args) if args[4] == "filename" else run(args)
+            upgrade = k.KernelUpgrade({"files": {}}, root=root, run=command, running=k.RELEASE, boot_id="boot-2")
+            with patch.object(k, "IMAGE_FORMS", forms), patch.object(k, "APFIX", k.digest(b"8852be")), patch.object(k, "DTB", k.digest(b"frozen DTB")):
+                for data in (compressed, raw):
+                    k.durable(image, data)
+                    self.assertTrue(upgrade.runtime_ok())
+                k.durable(image, raw + b"tampered")
+                with self.assertRaisesRegex(RuntimeError, "冻结产物"):
+                    upgrade.runtime_ok()
+                k.durable(image, raw)
+                k.durable(dtb, b"different DTB")
+                with self.assertRaisesRegex(RuntimeError, "冻结产物"):
+                    upgrade.runtime_ok()
+                k.durable(dtb, b"frozen DTB")
+                initrd.unlink()
+                with self.assertRaisesRegex(RuntimeError, "initramfs 缺失"):
+                    upgrade.runtime_ok()
+
     def fixture(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

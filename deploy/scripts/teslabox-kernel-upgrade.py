@@ -18,8 +18,12 @@ import urllib.request
 RELEASE = "5.10.160-teslabox3"
 VERSION = "0.2.0-rc.1"
 APFIX = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
-# deb 中 vmlinuz 是封装后的镜像，不能误用构建目录原始 Image 的摘要。
-IMAGE = "8fce4f9877dabfd8ad0eef2ee91f5901eb1d51341085834daeb53e8790e32516"
+# Radxa 的内核 postinst 钩子可把冻结 deb 的 gzip 镜像解压为原始 Image。
+# 两种长度/摘要均从同一冻结 deb 核实，不能接受任意 gzip 或现场未知镜像。
+IMAGE_FORMS = {
+    (9_968_257, "8fce4f9877dabfd8ad0eef2ee91f5901eb1d51341085834daeb53e8790e32516"),
+    (29_547_008, "fcf5b2c420ccc7573baf70ee2a3ea4db9ebce82b4e47fadba2f70d8f8e12bb27"),
+}
 DTB = "81d7869cffcef5b9f5a2e55294f3ffb253453228ecdf6406103de9f0c02bb31d"
 POLICY = "/usr/local/share/teslabox/kernel/rc1.json"
 HELPER = "/usr/local/libexec/teslabox-update-helper"
@@ -29,6 +33,11 @@ FIRMWARE_NAMES = {"BT_RAM_CODE_MT7922_1_1_hdr.bin", "WIFI_MT7922_patch_mcu_1_1_h
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def frozen_image(data):
+    """只接受同一冻结镜像的已核实存储形式，避免把解压行为误判为篡改。"""
+    return (len(data), digest(data)) in IMAGE_FORMS
 
 
 def safe(path):
@@ -213,7 +222,7 @@ class KernelUpgrade:
         dtb = self.root / ("usr/lib/linux-image-" + RELEASE + "/rockchip/rk3568-rock-3a.dtb")
         if not dtb.is_file():
             raise RuntimeError("ROCK 3A 设备树缺失")
-        if digest(regular(image.resolve(strict=True))) != IMAGE or digest(regular(dtb)) != DTB:
+        if not frozen_image(regular(image.resolve(strict=True))) or digest(regular(dtb)) != DTB:
             raise RuntimeError("实际内核镜像或设备树不是冻结产物")
         return True
 
