@@ -225,11 +225,13 @@ const pageGuideSteps = [
   {target:"nav-toggle", title:"页面从这里切换", detail:"点击左上角 TeslaBox 标志可以打开主导航，切换概览、录像备份、导出管理、媒体中心、日志中心和设置中心。"},
   {target:"live-indicator", title:"设备连接状态", detail:"这里表示管理页面能否正常连接 TeslaBox 服务。显示“设备在线”时，页面可以继续读取设备状态。"},
   {target:"internet-indicator", title:"互联网状态", detail:"这里表示 TeslaBox 当前是否能够访问互联网。无互联网不影响车机写入录像和局域网查看。"},
-  {target:"appearance-toggle", title:"页面设置", detail:"点击右上角齿轮可以切换主题、全局字体和车机浏览器兼容模式，也可以退出管理页面。"},
+  {target:"appearance-settings-title", page:"settings", section:"appearance-settings-section", title:"页面设置", detail:"在设置中心 → 系统 → 页面设置中切换主题、显示大小、全局字体和车机浏览器兼容模式，也可以退出管理页面。修改立即生效，仅保存在当前浏览器。"},
 ];
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
 applyUIFont(state.uiFont);
+$("settings-display-scale").value = String(TeslaBoxPageDisplay.getPercent());
+$("settings-display-slider").value = String(TeslaBoxPageDisplay.getPercent());
 applyTeslaBrowserCompatibility(readPreference("teslabox-tesla-browser-compatibility", "false") === "true");
 applyViewState();
 showPage(state.page, false);
@@ -438,18 +440,11 @@ loginForm.addEventListener("submit", async (event) => {
 
 $("logout-button").addEventListener("click", async () => {
   await requestResponse("/api/v1/auth/logout", { method: "POST", loadingMessage:"正在退出管理页面…" });
-  closeAppearanceMenu();
   closePasswordModal(true);
   closePlayer();
   showLogin();
 });
 $("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
-$("appearance-toggle").addEventListener("click", (event) => {
-  event.stopPropagation();
-  toggleAppearanceMenu();
-});
-$("appearance-menu").addEventListener("click", (event) => event.stopPropagation());
-document.addEventListener("click", closeAppearanceMenu);
 $("nav-toggle").addEventListener("click", openNavigation);
 $("nav-close").addEventListener("click", closeNavigation);
 $("nav-backdrop").addEventListener("click", closeNavigation);
@@ -503,6 +498,17 @@ document.querySelectorAll("[data-log-source]").forEach((button) => button.addEve
   document.querySelectorAll("[data-log-source]").forEach((item) => item.classList.toggle("active", item === button));
   loadLogs();
 }));
+function updateDisplayScale(value) {
+  const selected = String(TeslaBoxPageDisplay.apply(value));
+  $("settings-display-scale").value = selected;
+  $("settings-display-slider").value = selected;
+  window.dispatchEvent(new Event("resize"));
+}
+$("settings-display-scale").addEventListener("change", event => updateDisplayScale(event.target.value));
+// 拖动中只显示预览值，松开再缩放，避免滑块本身移动导致跳值。
+$("settings-display-slider").addEventListener("input", event => { $("settings-display-scale").value = event.target.value; });
+$("settings-display-slider").addEventListener("change", event => updateDisplayScale(event.target.value));
+$("settings-display-reset").addEventListener("click", () => updateDisplayScale(100));
 $("settings-font-size").addEventListener("change", (event) => applyUIFont(event.target.value));
 $("tesla-browser-compatibility").addEventListener("change", (event) => applyTeslaBrowserCompatibility(event.target.checked));
 $("wifi-scan").addEventListener("click", scanWiFi);
@@ -617,7 +623,6 @@ document.addEventListener("keydown", (event) => {
   else if (!$("password-modal").hidden) closePasswordModal(false);
   else if (!$("export-modal").hidden) closeExportModal();
   else if (!$("wifi-modal").hidden) closeWiFiModal();
-  else if (!$("appearance-menu").hidden) closeAppearanceMenu();
   else if (!$("nav-drawer").hidden) closeNavigation();
   else if (!playerModal.hidden) closePlayer();
 });
@@ -672,7 +677,6 @@ async function refreshRecordings() {
 }
 
 function openNavigation() {
-  closeAppearanceMenu();
   $("nav-drawer").hidden = false;
   $("nav-backdrop").hidden = false;
   $("nav-toggle").setAttribute("aria-expanded", "true");
@@ -742,18 +746,6 @@ async function changeManagementPassword(event) {
   }
 }
 
-function toggleAppearanceMenu() {
-  const shouldOpen = $("appearance-menu").hidden;
-  closeNavigation();
-  $("appearance-menu").hidden = !shouldOpen;
-  $("appearance-toggle").setAttribute("aria-expanded", String(shouldOpen));
-}
-
-function closeAppearanceMenu() {
-  $("appearance-menu").hidden = true;
-  $("appearance-toggle").setAttribute("aria-expanded", "false");
-}
-
 function showPage(page, updateHistory) {
   state.page = ["media", "settings", "logs", "backup", "exports"].includes(page) ? page : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
@@ -764,7 +756,6 @@ function showPage(page, updateHistory) {
   $("exports-page").hidden = state.page !== "exports";
   document.querySelectorAll("[data-page-link]").forEach((element) => element.classList.toggle("active", element.dataset.pageLink === state.page));
   closeNavigation();
-  closeAppearanceMenu();
   const pagePath = state.page === "dashboard" ? "/" : `/${state.page}`;
   if (updateHistory) window.history.pushState({page:state.page}, "", pagePath);
   if (state.page === "media" && !appView.hidden) loadMediaAssets();
@@ -2750,13 +2741,14 @@ function startPageGuide() {
 function clearPageGuideTarget() {
   document.querySelectorAll(".page-guide-target").forEach((element) => element.classList.remove("page-guide-target"));
   document.querySelectorAll(".page-guide-host").forEach((element) => element.classList.remove("page-guide-host"));
-  closeAppearanceMenu();
 }
 
 function renderPageGuideStep(index) {
   pageGuideIndex = Math.max(0, Math.min(pageGuideSteps.length - 1, index));
   clearPageGuideTarget();
   const step = pageGuideSteps[pageGuideIndex];
+  showPage(step.page || "dashboard", false);
+  if (step.section) activateSettingsTab(step.section, false);
   const target = $(step.target);
   target.classList.add("page-guide-target");
   target.closest(".topbar")?.classList.add("page-guide-host");
@@ -2773,13 +2765,14 @@ function positionPageGuide() {
   const target = step ? $(step.target) : null;
   const card = $("page-guide-card");
   if (!target || !card) return;
-  const targetRect = target.getBoundingClientRect();
-  const cardRect = card.getBoundingClientRect();
+  const targetRect = TeslaBoxPageDisplay.rect(target);
+  const cardRect = TeslaBoxPageDisplay.rect(card);
+  const viewport = TeslaBoxPageDisplay.viewport();
   const margin = 14;
-  const top = targetRect.bottom + margin + cardRect.height <= window.innerHeight
+  const top = targetRect.bottom + margin + cardRect.height <= viewport.height
     ? targetRect.bottom + margin
     : Math.max(margin, targetRect.top - cardRect.height - margin);
-  const left = Math.max(margin, Math.min(window.innerWidth - cardRect.width - margin, targetRect.left + targetRect.width / 2 - cardRect.width / 2));
+  const left = Math.max(margin, Math.min(viewport.width - cardRect.width - margin, targetRect.left + targetRect.width / 2 - cardRect.width / 2));
   card.style.top = `${top}px`;
   card.style.left = `${left}px`;
 }
@@ -3280,10 +3273,11 @@ function createRecordingMenu(session) {
     panel.hidden = false;
     button.setAttribute("aria-expanded", "true");
     // 固定定位使下拉菜单不被卡片的圆角裁剪，窄屏和靠近底部时仍留在可视区域。
-    const anchor = button.getBoundingClientRect();
-    const box = panel.getBoundingClientRect();
-    panel.style.left = `${Math.max(8, Math.min(anchor.right-box.width, window.innerWidth-box.width-8))}px`;
-    panel.style.top = `${Math.max(8, Math.min(anchor.bottom+6, window.innerHeight-box.height-8))}px`;
+    const anchor = TeslaBoxPageDisplay.rect(button);
+    const box = TeslaBoxPageDisplay.rect(panel);
+    const viewport = TeslaBoxPageDisplay.viewport();
+    panel.style.left = `${Math.max(8, Math.min(anchor.right-box.width, viewport.width-box.width-8))}px`;
+    panel.style.top = `${Math.max(8, Math.min(anchor.bottom+6, viewport.height-box.height-8))}px`;
     activeRecordingMenu = {container, button, panel};
     panel.querySelector("[role='menuitem']:not(:disabled)")?.focus({preventScroll:true});
   });
@@ -4992,9 +4986,9 @@ function fitCompositeFrame() {
   }
   resetFullscreenCompositeGrid();
   const panel = document.querySelector(".player-panel");
-  const frameHeight = mainVideoFrame.getBoundingClientRect().height;
+  const frameHeight = TeslaBoxPageDisplay.rect(mainVideoFrame).height;
   const fixedHeight = Math.max(0, panel.scrollHeight-frameHeight);
-  const availableHeight = Math.max(180, window.innerHeight-40-fixedHeight);
+  const availableHeight = Math.max(180, TeslaBoxPageDisplay.viewport().height-40-fixedHeight);
   const availableWidth = Math.max(240, panel.clientWidth-2);
   mainVideoFrame.style.width = `${Math.floor(Math.min(availableWidth, availableHeight*activeCompositeAspect))}px`;
 }
@@ -5011,8 +5005,8 @@ function handlePlayerViewportChange() {
 
 function fitFullscreenCompositeGrid() {
   if (!isPlayerFullscreen()) return;
-  const telemetryHeight = $("playback-telemetry").getBoundingClientRect().height;
-  const controlsHeight = document.querySelector(".unified-controls").getBoundingClientRect().height;
+  const telemetryHeight = TeslaBoxPageDisplay.rect($("playback-telemetry")).height;
+  const controlsHeight = TeslaBoxPageDisplay.rect(document.querySelector(".unified-controls")).height;
   const availableWidth = sessionPlayerView.clientWidth || window.innerWidth;
   const availableHeight = Math.max(120,(sessionPlayerView.clientHeight || window.innerHeight)-telemetryHeight-controlsHeight);
   const aspect = fullscreenPlaybackAspect();

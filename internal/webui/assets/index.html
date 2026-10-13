@@ -5,14 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
+  <script src="/page-display.js?v=20261013-1"></script>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20260906-2">
+  <link rel="stylesheet" href="/app.css?v=20261013-page-display-1">
   <link rel="stylesheet" href="/settings-layout.css?v=20261011-runtime-1">
   <link rel="stylesheet" href="/nas-upload.css?v=20261011-runtime-1">
   <script src="/nas-upload.js?v=20261011-runtime-1" defer></script>
-  <script src="/settings-layout.js?v=20261011-runtime-1" defer></script>
+  <script src="/settings-layout.js?v=20261013-page-display-1" defer></script>
   <script src="/runtime-components.js?v=20261011-components-1" defer></script>
-  <script src="/app.js?v=20261011-runtime-1" defer></script>
+  <script src="/app.js?v=20261013-page-display-1" defer></script>
   <script src="/carplay-pairing.js?v=20261011-runtime-1" defer></script>
   <script src="/carplay-settings.js?v=20261011-runtime-1" defer></script>
 </head>
@@ -43,17 +44,6 @@
       <div class="top-actions">
         <span id="live-indicator" class="live-indicator"><i></i><span>正在连接</span></span>
         <span id="internet-indicator" class="internet-indicator"><i></i><span>检测互联网</span></span>
-        <div class="appearance-control">
-          <button id="appearance-toggle" class="ghost appearance-toggle" type="button" aria-label="打开页面设置" aria-haspopup="true" aria-expanded="false" aria-controls="appearance-menu"><span aria-hidden="true">⚙</span></button>
-          <div id="appearance-menu" class="appearance-menu" role="group" aria-label="页面设置" hidden>
-            <div class="appearance-menu-head"><strong>页面设置</strong><small>主题、字体与兼容模式保存在当前浏览器</small></div>
-            <label for="theme-select"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
-            <label for="settings-font-size"><span>页面字体</span><select id="settings-font-size" aria-label="调整全部页面字体大小"><option value="compact">紧凑 · 12px</option><option value="small">较小 · 13px</option><option value="medium" selected>标准 · 14px</option><option value="large">较大 · 15px</option><option value="xlarge">最大 · 16px</option></select></label>
-            <label class="appearance-compatibility" for="tesla-browser-compatibility"><span>车机兼容</span><span class="appearance-switch-row"><input id="tesla-browser-compatibility" type="checkbox"><i aria-hidden="true"></i><span>页面内选择器</span></span></label>
-            <p class="appearance-help">当特斯拉车机浏览器无法操作原生下拉框时开启。</p>
-            <div class="appearance-menu-footer"><button id="logout-button" class="ghost" type="button">退出管理页面</button></div>
-          </div>
-        </div>
       </div>
     </header>
     <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-relevant="additions"></div>
@@ -409,6 +399,23 @@
           </section>
         </article>
 		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。正式新版可携带经过二次校验的 FFmpeg/MPP/RGA 媒体运行时；指定版本不会回退内核、驱动或 systemd，也不会主动降级媒体运行时。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
+      </section>
+
+      <section id="appearance-settings-section" class="settings-section" aria-labelledby="appearance-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">APPEARANCE</p><h2 id="appearance-settings-title">页面设置</h2></div></div>
+        <article class="settings-card appearance-settings">
+          <p class="muted">主题、显示大小、字体与兼容模式修改后立即生效，仅保存在当前浏览器。</p>
+          <div class="display-scale-control">
+            <label for="settings-display-scale"><span>显示大小</span><span class="display-scale-value"><input id="settings-display-scale" type="number" min="50" max="200" step="1" value="100" inputmode="numeric" aria-label="页面显示大小百分比"><span>%</span><button id="settings-display-reset" class="ghost compact" type="button">恢复 100%</button></span></label>
+            <input id="settings-display-slider" type="range" min="50" max="200" step="1" value="100" aria-label="拖动调整页面显示大小">
+          </div>
+          <p class="appearance-help">可调整为 50%～200%，每次 1%；拖动松开或输入完成后生效，仅缩放 TeslaBox 管理页面。</p>
+          <label for="theme-select"><span>主题</span><select id="theme-select" aria-label="页面强调色"><option value="blue">电光蓝</option><option value="green">松石绿</option><option value="red">赛车红</option></select></label>
+          <label for="settings-font-size"><span>页面字体</span><select id="settings-font-size" aria-label="调整全部页面字体大小"><option value="compact">紧凑 · 12px</option><option value="small">较小 · 13px</option><option value="medium" selected>标准 · 14px</option><option value="large">较大 · 15px</option><option value="xlarge">最大 · 16px</option></select></label>
+          <label class="appearance-compatibility" for="tesla-browser-compatibility"><span>车机兼容</span><span class="appearance-switch-row"><input id="tesla-browser-compatibility" type="checkbox"><i aria-hidden="true"></i><span>页面内选择器</span></span></label>
+          <p class="appearance-help">当特斯拉车机浏览器无法操作原生下拉框时开启。</p>
+          <div class="appearance-menu-footer"><button id="logout-button" class="ghost" type="button">退出管理页面</button></div>
+        </article>
       </section>
 
       <section id="settings-panel-9" class="settings-section power-section" aria-labelledby="power-title">

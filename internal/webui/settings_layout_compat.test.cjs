@@ -67,6 +67,20 @@ test("完整初始化保留导出节点，CarPlay 位于网络下面，重复初
   assert.equal(model.sections.get("settings-panel-5").parent.id,"exports-content");
   assert.equal(model.document.getElementById("export-retain-count"),model.retain);
 });
+
+test("页面设置从系统菜单和直接书签进入，返回切换保留现有分类", () => {
+  const model = environment({hash:"#system/appearance-settings-section"});
+  model.layout.initialize();
+  const section = model.sections.get("appearance-settings-section");
+  assert.equal(section.parent.id,"settings-group-system");
+  assert.equal(section.hidden,false);
+  model.layout.selectSection("carplay-settings-section");
+  assert.equal(section.parent.hidden,true);
+  model.layout.selectSection("appearance-settings-section");
+  assert.equal(section.hidden,false);
+  assert.equal(model.sections.get("carplay-settings-section").parent.hidden,true);
+  assert.equal(model.store.get("teslabox-settings-group"),"system");
+});
 test("旧设置 localStorage 区段 ID 恢复导出，旧区段书签同样有效", () => {
   for (const options of [{saved:"settings-panel-5"},{hash:"#settings-panel-5"},{hash:"#settings-tab=settings-panel-5"},{hash:"#storage/settings-panel-5"}]) {
     const model = environment(options);model.layout.initialize();

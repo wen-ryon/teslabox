@@ -8,7 +8,7 @@
     {id:"storage", title:"存储管理", detail:"外接存储与媒体写入恢复", icon:["M5 4h14l3 12v4H2v-4L5 4Z", "M2 16h20", "M6 18h.01M10 18h.01"], titles:["storage-settings-title","maintenance-settings-title"]},
     {id:"thermal", title:"散热与风扇", detail:"温度、风扇转速与场景策略", icon:["M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z", "M12 10V5a3 3 0 0 1 6 0c0 3-3 4-4 5", "M14 12h5a3 3 0 0 1 0 6c-3 0-4-3-5-4", "M12 14v5a3 3 0 0 1-6 0c0-3 3-4 4-5", "M10 12H5a3 3 0 0 1 0-6c3 0 4 3 5 4"], titles:["fan-settings-title"]},
     {id:"security", title:"安全与账户", detail:"管理登录与账户安全", icon:["M12 3 3 7v6c0 5 9 9 9 9s9-4 9-9V7l-9-4Z", "m8 12 3 3 5-6"], titles:["security-title"]},
-    {id:"system", title:"系统", detail:"系统更新、设备信息与电源", icon:["M4 7h7m4 0h5M4 17h3m4 0h9", "M15 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z", "M11 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"], titles:["update-title","power-title"]},
+    {id:"system", title:"系统", detail:"页面设置、系统更新与电源", icon:["M4 7h7m4 0h5M4 17h3m4 0h9", "M15 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z", "M11 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"], titles:["appearance-settings-title","update-title","power-title"]},
   ];
   const drafts = new Set();
   const mobile = window.matchMedia("(max-width: 759px)");
@@ -25,17 +25,19 @@
     "maintenance-settings-title": "诊断媒体写入异常，选择恢复方式",
     "fan-settings-title": "查看温度，调整风扇与场景策略",
     "security-title": "管理登录密码与账户安全",
+    "appearance-settings-title": "主题、显示大小、字体与车机兼容",
     "update-title": "查看版本，检查并安装系统更新",
     "power-title": "查看设备信息，管理断开与电源",
   };
   const functionIcons = {
-    "carplay-settings-title": ["M3 5h18v12H3Z","M8 21h8M12 17v4"],
+    "carplay-settings-title": ["M3 5h18v12H3Z", "M8 21h8M12 17v4"],
     "wifi-settings-title": ["M5 12a11 11 0 0 1 14 0", "M8.5 15.5a5.5 5.5 0 0 1 7 0", "M12 19h.01"],
     "ap-settings-title": ["M12 13v8M8 21h8", "M14 11a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z", "M7 7a6 6 0 0 0 0 8M17 7a6 6 0 0 1 0 8", "M4 4a10 10 0 0 0 0 14M20 4a10 10 0 0 1 0 14"],
     "storage-settings-title": ["M3 7h7l2 2h9v11H3V7Z", "M3 7V4h7l2 3h7v2"],
     "maintenance-settings-title": ["M14 6a5 5 0 0 0-6 6L3 17a3 3 0 0 0 4 4l5-5a5 5 0 0 0 6-6l-3 3-4-4 3-3Z"],
     "fan-settings-title": ["M9 14.5V5a3 3 0 0 1 6 0v9.5a5 5 0 1 1-6 0Z", "M12 8v10M17 6h3M17 10h2"],
     "security-title": ["M13 9a4 4 0 1 1 8 0 4 4 0 0 1-8 0Z", "m14 12-9 9H2v-3l9-9M7 16l2 2"],
+    "appearance-settings-title": ["M4 4h16v12H4Z", "M8 20h8M12 16v4"],
     "update-title": ["M12 3v12m-4-4 4 4 4-4", "M4 16v5h16v-5"],
     "power-title": ["M12 3v9", "M6 5a9 9 0 1 0 12 0"],
   };
