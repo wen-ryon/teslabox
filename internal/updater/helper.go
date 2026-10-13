@@ -30,6 +30,7 @@ type HelperConfig struct {
 	Service         string
 	HealthURL       string
 	Timeout         time.Duration
+	KernelResume    bool
 }
 
 const latestBackupName = "teslabox.previous.backup"
@@ -67,13 +68,31 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 		release()
 		return restartAndWaitHealthy(ctx, config.Service, config.HealthURL, config.TargetPath, false)
 	}
-	if err := transactionalInstall(ctx, config, request, packagePath, ops); err != nil {
+	gate := rootKernelActions{config: config, request: request}
+	waiting, err := installWithKernel(ctx, request.Version == KernelUpgradeVersion, gate, func() error {
+		return transactionalInstall(ctx, config, request, packagePath, ops)
+	})
+	if err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", err)
+	}
+	if waiting {
+		if err := finishInstall(config.ResultPath, request.Version, "installing", nil); err != nil {
+			return err
+		}
+		// 安装锁不能跨重启阻止旧版服务恢复；主程序和导出状态此时尚未替换。
+		release()
+		rebootCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		if err := exec.CommandContext(rebootCtx, "systemctl", "reboot").Run(); err != nil {
+			_, rollbackErr := gate.action(context.Background(), "rollback")
+			return finishInstall(config.ResultPath, request.Version, "failed", errors.Join(err, rollbackErr))
+		}
+		return nil
 	}
 	if err := finishInstall(config.ResultPath, request.Version, "success", nil); err != nil {
 		return err
 	}
-	if !request.RebootAfterInstall {
+	if !request.RebootAfterInstall || config.KernelResume {
 		return nil
 	}
 	rebootCtx, rebootCancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -3,7 +3,7 @@ name: RC1 isolated Linux validation
 # 仅候选分支测试，不接生产密钥、不构建签名包、不修改发布通道。
 on:
   push:
-    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback, codex/carplay-phone-initiated-enrollment]
+    branches: [codex/rc1-runtime-linux-validation, codex/update-state-rollback, codex/carplay-phone-initiated-enrollment, codex/rc1-kernel-upgrade]
   workflow_dispatch:
 
 permissions:
@@ -164,6 +164,12 @@ jobs:
           sh -n deploy/scripts/install-teslabox-update.sh
           python3 scripts/test-update-bootstrap.py -v 2>&1 | tee validation-logs/update-bootstrap.log
           bash scripts/test-install-apt-snapshot.sh 2>&1 | tee validation-logs/installer-shell.log
+      - name: Mandatory kernel upgrade isolated failure paths
+        if: ${{ !cancelled() }}
+        # 全部命令为测试替身；不执行真实内核安装或重启，不访问测试板。
+        run: |
+          python3 scripts/test-kernel-upgrade.py -v 2>&1 | tee validation-logs/kernel-upgrade.log
+          python3 scripts/test-kernel-bootstrap.py -v 2>&1 | tee validation-logs/kernel-bootstrap.log
       - name: Preserve transaction evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

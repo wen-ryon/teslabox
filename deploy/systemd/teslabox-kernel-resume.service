@@ -1,0 +1,16 @@
+[Unit]
+Description=TeslaBox resume signed upgrade after kernel boot
+After=network-online.target teslabox.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/teslabox/teslabox.env
+ExecStart=/usr/local/libexec/teslabox-update-helper --kernel-resume
+TimeoutStartSec=900
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wen-ryon/teslabox/internal/version"
 )
 
 // DefaultBackupDir 固定事务目录，避免用户请求控制恢复路径。
@@ -97,9 +99,29 @@ func CheckStartupProtection(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return checkStartupProtection(func(name string, args ...string) ([]byte, error) {
+	run := func(name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).Output()
-	})
+	}
+	if err := checkStartupProtection(run); err != nil {
+		return err
+	}
+	if version.Version == KernelUpgradeVersion {
+		return checkKernelStartup(run)
+	}
+	return nil
+}
+
+func checkKernelStartup(run func(string, ...string) ([]byte, error)) error {
+	// 旧 959 助手仅支持程序/状态事务，不能把它误当作已具备内核强依赖保护。
+	out, err := run("/usr/local/libexec/teslabox-update-helper", "--kernel-protocol")
+	if err != nil || strings.TrimSpace(string(out)) != "teslabox-kernel-first-v1" {
+		return errors.New("必须先安装支持 teslabox3 强制升级的维护助手；未执行状态迁移")
+	}
+	out, err = run("/usr/local/libexec/teslabox-update-helper", "--kernel-verify")
+	if err != nil || strings.TrimSpace(string(out)) != "teslabox-kernel-ready-v1" {
+		return errors.New("teslabox3 或 apfix6 尚未确认，拒绝启动 RC1；未执行状态迁移")
+	}
+	return nil
 }
 
 func checkStartupProtection(run func(string, ...string) ([]byte, error)) error {
