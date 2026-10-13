@@ -74,25 +74,25 @@ test('保存后读回旧帧率时不得显示已保存',async()=>{
   assert.equal(button.disabled,false);
 });
 
-test('手机选择加载已登记列表并保存，自动模式保存空身份，不使用IP地址',async()=>{
+test('隐藏多手机入口后不获取列表，保存画质仍保留既有手机身份',async()=>{
   const fields=new Map(['network','quality','fps','recovery_priority','enabled'].map(name=>['carplay-'+name,{value:''}]));
   const children=[];
   const phone={value:'',get firstChild(){return children[0];},removeChild(){children.shift();},appendChild(node){children.push(node);}};
   fields.set('carplay-phone_id',phone);fields.set('carplay-phone-status',{textContent:''});
   let submit,saved;
-  const original={revision:1,phone_id:'',enabled:true,recovery_priority:'internet',network:'auto',quality:720,fps:30};
+  const original={revision:1,phone_id:'02:00:00:00:00:01',enabled:true,recovery_priority:'internet',network:'auto',quality:720,fps:30};
   fields.set('carplay-settings-form',{offsetParent:{},addEventListener:(_,callback)=>{submit=callback;},querySelector:()=>({disabled:false})});
   fields.set('carplay-settings-notice',{textContent:''});fields.set('carplay-network-status',{textContent:''});
   const context={document:{getElementById:id=>fields.get(id),createElement:()=>({value:'',textContent:''}),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
     fetch:async(path,options={})=>{
       if(path==='/carplay/api/network')return {ok:true,json:async()=>({internet:true})};
-      if(path==='/carplay/api/phones')return {ok:true,json:async()=>({selected:'02:00:00:00:00:01',phones:[{id:'02:00:00:00:00:01'},{id:'02:00:00:00:00:02'}]})};
+      if(path==='/carplay/api/phones')assert.fail('隐藏入口不应获取手机列表');
       if(options.method==='PUT')saved={...JSON.parse(options.body),revision:(saved?.revision||1)+1};
       return {ok:true,json:async()=>saved||original};
     }};
   vm.runInNewContext(fs.readFileSync('internal/webui/assets/carplay-settings.js','utf8'),context);
   await context.TeslaBoxCarPlaySettings.load();
-  assert.deepEqual(children.map(node=>node.value),['','02:00:00:00:00:01','02:00:00:00:00:02']);
-  phone.value='02:00:00:00:00:02';await submit({preventDefault(){}});assert.equal(saved.phone_id,phone.value);
-  phone.value='';await submit({preventDefault(){}});assert.equal(saved.phone_id,'');
+  assert.deepEqual(children,[]);
+  phone.value='02:00:00:00:00:02';await submit({preventDefault(){}});assert.equal(saved.phone_id,original.phone_id);
+  phone.value='';await submit({preventDefault(){}});assert.equal(saved.phone_id,original.phone_id);
 });

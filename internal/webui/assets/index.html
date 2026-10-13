@@ -257,15 +257,19 @@
         <div class="settings-section-heading"><h2 id="carplay-settings-title">CarPlay</h2><button id="settings-carplay-return" class="secondary" type="button">返回 CarPlay 画面</button></div>
         <form id="carplay-settings-form" class="settings-form carplay-settings-form">
           <div class="settings-card carplay-settings-card">
-          <div class="carplay-card-heading"><h3>连接与网络</h3><p>选择连接手机与上游网络，管理热点信道变化时的恢复方式。</p></div>
+          <div class="carplay-card-heading"><h3>连接与网络</h3><p>选择上游网络，管理热点信道变化时的恢复方式。</p></div>
           <label class="toggle-choice carplay-enable"><input id="carplay-enabled" type="checkbox" checked><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>开启 CarPlay 功能</strong><small>关闭后停止 CarPlay 接收会话。</small></span></label>
           <label class="toggle-choice carplay-enable"><input id="carplay-auto_play" type="checkbox"><span class="toggle-choice-control" aria-hidden="true"></span><span class="toggle-choice-copy"><strong>连接后自动播放音乐</strong><small>默认关闭。开启后，下次手机连接成功时尝试恢复当前音乐；刷新页面不会重复播放。</small></span></label>
           <div class="carplay-fields">
+          <!-- 多手机选择暂不开放，保留现有配对与自动连接。
           <label>连接手机<select id="carplay-phone_id"><option value="">自动：上次成功连接的手机</option></select></label>
+          -->
           <label>网络来源<select id="carplay-network"><option value="auto">自动：有线 / 无线优先，蓝牙共享回退</option><option value="wifi">无线 Wi-Fi</option><option value="ethernet">有线网络</option><option value="bluetooth">蓝牙共享网络</option></select></label>
           <label>上游信道变化时<select id="carplay-recovery_priority"><option value="internet">保证联网优先</option><option value="carplay">保证 CarPlay 优先</option></select></label>
           </div>
+          <!-- 多手机选择暂不开放，保留现有配对与自动连接。
           <p id="carplay-phone-status" class="carplay-status" role="status">正在读取已登记手机。切换手机会短暂重建 CarPlay 连接，录像继续运行。</p>
+          -->
           <p class="carplay-help">联网优先：原 Wi-Fi 换信道后短暂重建热点，自动恢复连接。CarPlay 优先：保持当前会话，不为恢复上游重建热点。关闭 CarPlay 后可在网络设置中手动重连 Wi-Fi；热点可能短暂断开，录像继续运行。</p>
           <p id="carplay-network-status" class="carplay-status" role="status">网络状态等待检测；没有外网时，本地画面仍可运行。</p>
           </div>
