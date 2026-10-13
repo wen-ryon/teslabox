@@ -453,7 +453,7 @@ func TestHandlerServesPlaybackFailureFallback(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"requestPlaybackFallback", "playbackFallbackLadder", "effectivePlaybackQuality", "usesServerTranscode", "loadServerSingle", "timeline_start_seconds",
-		"waitForMetadata(sessionVideo, 15000)", "function waitForMetadata(video, timeout = 4000)",
+		"waitForMetadata(sessionVideo, 15000, token)", "function waitForMetadata(video, timeout = 4000, token = loadToken)",
 		"原画不可用，已自动切换到高清合成", "已自动降至", "已自动切换到单路原画", "播放连续卡顿超过 8 秒", `sessionVideo.addEventListener("error"`,
 		"refreshRecordings", `request("/api/v1/scan"`, "timelinePositionPending", "eventCameraView", "track-segment continuous",
 		"pendingCompositeTracks", "releaseCompositeTrackMap", "token !== loadToken", `element.preload = "metadata"`,

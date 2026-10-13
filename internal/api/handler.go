@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -325,6 +326,8 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		serveThumbnail(w, r, state, controller, logger)
 	})
 	mux.HandleFunc("GET /api/v1/videos/{id}/content", func(w http.ResponseWriter, r *http.Request) {
+		w, finishProbe := beginPlaybackProbe(w, r, logger, "original")
+		defer finishProbe()
 		if settings.fanAdmin != nil {
 			end := settings.fanAdmin.Begin("single")
 			defer end()
@@ -548,6 +551,7 @@ func registerGadgetAdminRoutes(mux *http.ServeMux, admin GadgetAdmin, power Powe
 }
 
 func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *slog.Logger) {
+	registerPlaybackTraceRoute(mux, logger)
 	mux.HandleFunc("GET /api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
 		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 		if source == "" {
@@ -572,6 +576,11 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的日志来源"})
 			return
 		}
+		probeID := r.URL.Query().Get("probe_id")
+		if probeID != "" && !validPlaybackProbeID(probeID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "诊断编号无效"})
+			return
+		}
 		var bundle diagnostics.Bundle
 		var err error
 		if source != "" {
@@ -582,6 +591,14 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 			} else {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "分类日志下载暂不可用"})
 				return
+			}
+		} else if probeID != "" {
+			if focused, ok := manager.(interface {
+				BundleForPlaybackProbe(context.Context, string) (diagnostics.Bundle, error)
+			}); ok {
+				bundle, err = focused.BundleForPlaybackProbe(r.Context(), probeID)
+			} else {
+				bundle, err = manager.Bundle(r.Context())
 			}
 		} else {
 			bundle, err = manager.Bundle(r.Context())
@@ -608,6 +625,11 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 		event.normalize()
 		logger.Warn("客户端播放诊断",
 			"event", event.Event,
+			"probe_id", event.ProbeID,
+			"probe_stage", event.ProbeStage,
+			"probe_case", event.ProbeCase,
+			"probe_track", event.ProbeTrack,
+			"elapsed_ms", event.ElapsedMS,
 			"reason", event.Reason,
 			"session_id", event.SessionID,
 			"group_id", event.GroupID,
@@ -623,6 +645,12 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 			"stalls", event.Stalls,
 			"media_error_code", event.MediaErrorCode,
 			"ready_state", event.ReadyState,
+			"network_state", event.NetworkState,
+			"current_time_seconds", event.CurrentTimeSeconds,
+			"video_width", event.VideoWidth,
+			"video_height", event.VideoHeight,
+			"total_frames", event.TotalFrames,
+			"dropped_frames", event.DroppedFrames,
 			"user_agent", normalizeDiagnosticText(r.UserAgent(), 240),
 		)
 		writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
@@ -630,28 +658,42 @@ func registerDiagnosticsRoutes(mux *http.ServeMux, manager Diagnostics, logger *
 }
 
 type clientDiagnosticEvent struct {
-	Event            string  `json:"event"`
-	Reason           string  `json:"reason"`
-	SessionID        string  `json:"session_id"`
-	GroupID          string  `json:"group_id"`
-	Display          string  `json:"display"`
-	Quality          string  `json:"quality"`
-	EffectiveQuality string  `json:"effective_quality"`
-	AccessPath       string  `json:"access_path"`
-	NetworkType      string  `json:"network_type"`
-	DownlinkMbps     float64 `json:"downlink_mbps"`
-	RTTMS            int     `json:"rtt_ms"`
-	MediaMbps        float64 `json:"media_mbps"`
-	BufferSeconds    float64 `json:"buffer_seconds"`
-	Stalls           int     `json:"stalls"`
-	MediaErrorCode   int     `json:"media_error_code"`
-	ReadyState       int     `json:"ready_state"`
+	Event              string  `json:"event"`
+	ProbeID            string  `json:"probe_id"`
+	ProbeStage         string  `json:"probe_stage"`
+	ProbeCase          string  `json:"probe_case"`
+	ProbeTrack         string  `json:"probe_track"`
+	ElapsedMS          int     `json:"elapsed_ms"`
+	Reason             string  `json:"reason"`
+	SessionID          string  `json:"session_id"`
+	GroupID            string  `json:"group_id"`
+	Display            string  `json:"display"`
+	Quality            string  `json:"quality"`
+	EffectiveQuality   string  `json:"effective_quality"`
+	AccessPath         string  `json:"access_path"`
+	NetworkType        string  `json:"network_type"`
+	DownlinkMbps       float64 `json:"downlink_mbps"`
+	RTTMS              int     `json:"rtt_ms"`
+	MediaMbps          float64 `json:"media_mbps"`
+	BufferSeconds      float64 `json:"buffer_seconds"`
+	Stalls             int     `json:"stalls"`
+	MediaErrorCode     int     `json:"media_error_code"`
+	ReadyState         int     `json:"ready_state"`
+	NetworkState       int     `json:"network_state"`
+	CurrentTimeSeconds float64 `json:"current_time_seconds"`
+	VideoWidth         int     `json:"video_width"`
+	VideoHeight        int     `json:"video_height"`
+	TotalFrames        int     `json:"total_frames"`
+	DroppedFrames      int     `json:"dropped_frames"`
 }
 
 func (e *clientDiagnosticEvent) valid() bool {
 	switch strings.ToLower(strings.TrimSpace(e.Event)) {
 	case "media_error", "load_failed", "fallback_requested", "playback_stall":
 		return true
+	case "probe_start", "probe_event", "probe_end":
+		return validPlaybackProbeID(e.ProbeID) && (e.ProbeStage == "original" || e.ProbeStage == "transcoded") &&
+			validPlaybackProbeToken(e.ProbeCase, 80) && validPlaybackProbeToken(e.ProbeTrack, 40)
 	default:
 		return false
 	}
@@ -659,6 +701,13 @@ func (e *clientDiagnosticEvent) valid() bool {
 
 func (e *clientDiagnosticEvent) normalize() {
 	e.Event = normalizeDiagnosticText(strings.ToLower(e.Event), 32)
+	if !validPlaybackProbeID(e.ProbeID) {
+		e.ProbeID = ""
+	}
+	e.ProbeStage = normalizeDiagnosticText(e.ProbeStage, 32)
+	e.ProbeCase = normalizeDiagnosticText(e.ProbeCase, 80)
+	e.ProbeTrack = normalizeDiagnosticText(e.ProbeTrack, 40)
+	e.ElapsedMS = max(0, min(e.ElapsedMS, 120000))
 	e.Reason = normalizeDiagnosticText(e.Reason, 180)
 	e.SessionID = normalizeDiagnosticText(e.SessionID, 96)
 	e.GroupID = normalizeDiagnosticText(e.GroupID, 96)
@@ -674,6 +723,12 @@ func (e *clientDiagnosticEvent) normalize() {
 	e.Stalls = max(0, min(e.Stalls, 100000))
 	e.MediaErrorCode = max(0, min(e.MediaErrorCode, 10))
 	e.ReadyState = max(0, min(e.ReadyState, 4))
+	e.NetworkState = max(0, min(e.NetworkState, 3))
+	e.CurrentTimeSeconds = max(0, min(e.CurrentTimeSeconds, 86400))
+	e.VideoWidth = max(0, min(e.VideoWidth, 16384))
+	e.VideoHeight = max(0, min(e.VideoHeight, 16384))
+	e.TotalFrames = max(0, min(e.TotalFrames, 10000000))
+	e.DroppedFrames = max(0, min(e.DroppedFrames, 10000000))
 }
 
 func normalizeDiagnosticText(value string, limit int) string {
@@ -1027,10 +1082,19 @@ func writeExportError(w http.ResponseWriter, logger *slog.Logger, message string
 }
 
 func registerCompositeRoutes(mux *http.ServeMux, controller Controller, compositor MediaCompositor, logger *slog.Logger) {
-	mux.HandleFunc("GET /api/v1/video-groups/{id}/composite", func(w http.ResponseWriter, r *http.Request) {
+	hls := newPlaybackHLSManager()
+	hls.register(mux, logger)
+	serve := func(w http.ResponseWriter, r *http.Request) {
+		w, finishProbe := beginPlaybackProbe(w, r, logger, "transcoded")
+		defer finishProbe()
 		activateMedia(controller, logger, r.Context())
 		state, release := controller.AcquireMediaSnapshot()
-		defer release()
+		releaseOnReturn := true
+		defer func() {
+			if releaseOnReturn {
+				release()
+			}
+		}()
 		if !checkRequestedSnapshot(w, r, state) {
 			return
 		}
@@ -1078,13 +1142,40 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 			}
 			inputOffsets[video.Camera] = offset
 		}
-		tracked := &countingWriter{ResponseWriter: w}
-		w.Header().Set("Content-Type", "video/mp4")
-		w.Header().Set("Cache-Control", "no-store")
 		request := media.CompositeRequest{
 			Layout: r.URL.Query().Get("layout"), Quality: r.URL.Query().Get("quality"), Camera: r.URL.Query().Get("camera"),
 			Inputs: inputs, InputOffsets: inputOffsets,
 		}
+		if r.Method == http.MethodPost {
+			probe := r.URL.Query()
+			hlsLogger := logger.With("probe_id", normalizeDiagnosticText(probe.Get("probe_id"), 64), "group_id", selected.ID,
+				"layout", request.Layout, "quality", request.Quality, "camera", request.Camera)
+			session, err := hls.start(r.Context(), compositor, request, release, hlsLogger, probe)
+			if err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "HLS 播放暂不可用，请关闭其他压缩播放后重试"})
+				return
+			}
+			releaseOnReturn = false
+			if err := session.waitReady(r.Context()); err != nil {
+				session.cancel()
+				hlsLogger.Warn("HLS 播放准备失败", "error", err)
+				var inputErr *media.InputError
+				if errors.As(err, &inputErr) {
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": inputErr.Message})
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "HLS 分片准备失败，请稍后重试"})
+				return
+			}
+			base := "/api/v1/playback-hls/" + session.id
+			hlsLogger.Info("HLS 播放已就绪", "hls_session", session.id)
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusCreated, map[string]string{"url": base + "/index.m3u8", "session_url": base})
+			return
+		}
+		tracked := &countingWriter{ResponseWriter: w}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "no-store")
 		startedAt := time.Now()
 		logger.Info("实时合成录像开始",
 			"group_id", selected.ID,
@@ -1140,7 +1231,9 @@ func registerCompositeRoutes(mux *http.ServeMux, controller Controller, composit
 			return
 		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "实时合成暂不可用"})
-	})
+	}
+	mux.HandleFunc("GET /api/v1/video-groups/{id}/composite", serve)
+	mux.HandleFunc("POST /api/v1/video-groups/{id}/composite/hls", serve)
 }
 
 func registerMediaRoutes(mux *http.ServeMux, controller Controller, inspector MediaInspector, logger *slog.Logger) {
@@ -2318,27 +2411,28 @@ type videoMomentRef struct {
 }
 
 type videoSession struct {
-	MomentRefs      []videoMomentRef        `json:"moment_refs,omitempty"`
-	Cached          bool                    `json:"cached,omitempty"`
-	Coverage        []recentCoverage        `json:"coverage,omitempty"`
-	SnapshotID      string                  `json:"snapshot_id,omitempty"`
-	RecentWindow    bool                    `json:"recent_window,omitempty"`
-	DurationState   string                  `json:"duration_state"`
-	DurationPending bool                    `json:"duration_pending"`
-	ID              string                  `json:"id"`
-	ClipType        string                  `json:"clip_type"`
-	Event           string                  `json:"event,omitempty"`
-	EventMetadata   *teslacam.EventMetadata `json:"event_metadata,omitempty"`
-	ThumbnailID     string                  `json:"-"`
-	ThumbnailURL    string                  `json:"thumbnail_url,omitempty"`
-	StartAt         time.Time               `json:"start_at"`
-	EndAt           time.Time               `json:"end_at"`
-	Duration        float64                 `json:"duration_seconds"`
-	SegmentCount    int                     `json:"segment_count"`
-	TotalSize       int64                   `json:"total_size"`
-	Complete        bool                    `json:"complete"`
-	Cameras         []string                `json:"cameras"`
-	Moments         []videoGroup            `json:"moments,omitempty"`
+	Cached               bool                    `json:"cached,omitempty"`
+	Coverage             []recentCoverage        `json:"coverage,omitempty"`
+	SnapshotID           string                  `json:"snapshot_id,omitempty"`
+	RecentWindow         bool                    `json:"recent_window,omitempty"`
+	DurationState        string                  `json:"duration_state"`
+	DurationPending      bool                    `json:"duration_pending"`
+	DurationDisplayKnown bool                    `json:"duration_display_known,omitempty"`
+	ID                   string                  `json:"id"`
+	ClipType             string                  `json:"clip_type"`
+	Event                string                  `json:"event,omitempty"`
+	EventMetadata        *teslacam.EventMetadata `json:"event_metadata,omitempty"`
+	ThumbnailID          string                  `json:"-"`
+	ThumbnailURL         string                  `json:"thumbnail_url,omitempty"`
+	StartAt              time.Time               `json:"start_at"`
+	EndAt                time.Time               `json:"end_at"`
+	Duration             float64                 `json:"duration_seconds"`
+	SegmentCount         int                     `json:"segment_count"`
+	TotalSize            int64                   `json:"total_size"`
+	Complete             bool                    `json:"complete"`
+	Cameras              []string                `json:"cameras"`
+	Moments              []videoGroup            `json:"moments,omitempty"`
+	MomentRefs           []videoMomentRef        `json:"moment_refs,omitempty"`
 }
 
 type videoSessionListResponse struct {
@@ -2467,6 +2561,7 @@ func writeVideoSessionPage(w http.ResponseWriter, r *http.Request, sessions []vi
 		if items[index].RecentWindow {
 			items[index].Coverage = recentSessionCoverage(items[index])
 		}
+		// 上传计数只需要分钟身份，不应为了显示徽标重新借用磁盘快照。
 		items[index].MomentRefs = make([]videoMomentRef, 0, len(items[index].Moments))
 		for _, moment := range items[index].Moments {
 			items[index].MomentRefs = append(items[index].MomentRefs, videoMomentRef{ID: moment.ID, RecordedAt: moment.RecordedAt})
@@ -2741,6 +2836,7 @@ func refineVideoSessionDurations(snapshotRoot string, session *videoSession) {
 		}
 	}
 	assignSessionTimeline(session)
+	session.DurationDisplayKnown = recentDurationDisplayKnown(*session)
 }
 
 func finalizeVideoGroup(group *videoGroup) {
@@ -2999,4 +3095,172 @@ func (w *countingWriter) Write(value []byte) (int, error) {
 	count, err := w.ResponseWriter.Write(value)
 	w.written += int64(count)
 	return count, err
+}
+
+type playbackProbeWriter struct {
+	http.ResponseWriter
+	started       time.Time
+	firstByte     time.Duration
+	firstFragment time.Duration
+	fragmentSeen  bool
+	parseFragment bool
+	boxHeader     [16]byte
+	boxHeaderSize int
+	boxSkip       uint64
+	status        int
+	written       int64
+}
+
+func (w *playbackProbeWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *playbackProbeWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *playbackProbeWriter) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	count, err := w.ResponseWriter.Write(value)
+	if count > 0 && w.written == 0 {
+		w.firstByte = time.Since(w.started)
+	}
+	if count > 0 && w.parseFragment && !w.fragmentSeen {
+		w.inspectMP4Boxes(value[:count])
+	}
+	w.written += int64(count)
+	return count, err
+}
+
+func (w *playbackProbeWriter) inspectMP4Boxes(data []byte) {
+	for len(data) > 0 && !w.fragmentSeen {
+		if w.boxSkip > 0 {
+			count := min(uint64(len(data)), w.boxSkip)
+			data = data[int(count):]
+			w.boxSkip -= count
+			continue
+		}
+		needed := 8
+		if w.boxHeaderSize >= 8 && binary.BigEndian.Uint32(w.boxHeader[:4]) == 1 {
+			needed = 16
+		}
+		count := min(len(data), needed-w.boxHeaderSize)
+		copy(w.boxHeader[w.boxHeaderSize:], data[:count])
+		w.boxHeaderSize += count
+		data = data[count:]
+		if w.boxHeaderSize < needed {
+			continue
+		}
+		if needed == 8 && binary.BigEndian.Uint32(w.boxHeader[:4]) == 1 {
+			continue
+		}
+		size := uint64(binary.BigEndian.Uint32(w.boxHeader[:4]))
+		if needed == 16 {
+			size = binary.BigEndian.Uint64(w.boxHeader[8:16])
+		}
+		if string(w.boxHeader[4:8]) == "moof" {
+			w.firstFragment = time.Since(w.started)
+			w.fragmentSeen = true
+			return
+		}
+		if size == 0 {
+			w.boxSkip = ^uint64(0)
+		} else if size < uint64(needed) {
+			w.parseFragment = false
+			return
+		} else {
+			w.boxSkip = size - uint64(needed)
+		}
+		w.boxHeaderSize = 0
+	}
+}
+
+func validPlaybackProbeID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			if char < 'a' || char > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validPlaybackProbeToken(value string, limit int) bool {
+	if len(value) > limit {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func playbackProbeRangeResult(requested string, status int, contentRange string) string {
+	if requested == "" {
+		return "not_requested"
+	}
+	if status == http.StatusPartialContent && contentRange != "" {
+		return "partial"
+	}
+	if status == http.StatusOK {
+		return "ignored"
+	}
+	return "other"
+}
+
+func beginPlaybackProbe(w http.ResponseWriter, r *http.Request, logger *slog.Logger, stage string) (http.ResponseWriter, func()) {
+	id := r.URL.Query().Get("probe_id")
+	if !validPlaybackProbeID(id) {
+		return w, func() {}
+	}
+	tracked := &playbackProbeWriter{ResponseWriter: w, started: time.Now(), parseFragment: stage == "transcoded"}
+	probeCase := r.URL.Query().Get("probe_case")
+	probeTrack := r.URL.Query().Get("probe_track")
+	if !validPlaybackProbeToken(probeCase, 80) {
+		probeCase = ""
+	}
+	if !validPlaybackProbeToken(probeTrack, 40) {
+		probeTrack = ""
+	}
+	rangeHeader := r.Header.Get("Range")
+	if len(rangeHeader) > 80 || !strings.HasPrefix(rangeHeader, "bytes=") || strings.IndexFunc(strings.TrimPrefix(rangeHeader, "bytes="), func(char rune) bool {
+		return (char < '0' || char > '9') && char != '-' && char != ','
+	}) >= 0 {
+		rangeHeader = ""
+	}
+	logger.Info("播放诊断媒体请求开始", "probe_id", id, "probe_stage", stage,
+		"probe_case", probeCase, "probe_track", probeTrack, "range", rangeHeader)
+	return tracked, func() {
+		status := tracked.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		logger.Info("播放诊断媒体请求结束",
+			"probe_id", id,
+			"probe_stage", stage,
+			"probe_case", probeCase,
+			"probe_track", probeTrack,
+			"status", status,
+			"content_range", normalizeDiagnosticText(tracked.Header().Get("Content-Range"), 80),
+			"content_length", normalizeDiagnosticText(tracked.Header().Get("Content-Length"), 40),
+			"accept_ranges", normalizeDiagnosticText(tracked.Header().Get("Accept-Ranges"), 40),
+			"range_result", playbackProbeRangeResult(rangeHeader, status, tracked.Header().Get("Content-Range")),
+			"bytes", tracked.written,
+			"first_byte_ms", tracked.firstByte.Milliseconds(),
+			"first_fragment_ms", tracked.firstFragment.Milliseconds(),
+			"fragment_seen", tracked.fragmentSeen,
+			"duration_ms", time.Since(tracked.started).Milliseconds(),
+			"client_canceled", r.Context().Err() != nil,
+		)
+	}
 }

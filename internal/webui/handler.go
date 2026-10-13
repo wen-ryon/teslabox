@@ -89,6 +89,10 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	mux.HandleFunc("GET /nas-upload.js", serveEmbedded(assetFS, "nas-upload.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /nas-upload.css", serveEmbedded(assetFS, "nas-upload.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /settings-layout.css", serveEmbedded(assetFS, "settings-layout.css", "text/css; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /playback-trace.js", serveEmbedded(assetFS, "playback-trace.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /playback-hls.js", serveEmbedded(assetFS, "playback-hls.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /playback-probe-plan.js", serveEmbedded(assetFS, "playback-probe-plan.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /playback-probe-matrix.js", serveEmbedded(assetFS, "playback-probe-matrix.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /teslabox-logo.svg", serveEmbedded(assetFS, "teslabox-logo.svg", "image/svg+xml", "public, max-age=86400"))
 	mux.HandleFunc("GET /third-party-notices.txt", serveEmbedded(assetFS, "THIRD_PARTY_NOTICES.txt", "text/plain; charset=utf-8", "public, max-age=86400"))
 	mux.HandleFunc("GET /api/v1/auth/session", func(w http.ResponseWriter, r *http.Request) {

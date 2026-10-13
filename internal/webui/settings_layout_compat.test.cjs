@@ -114,7 +114,7 @@ test("app 初始化、设置跳转与认证后加载使用实际模块钩子", (
   const body = name => app.match(new RegExp("^function "+name+"\\([^\\n]*\\{.*?^}","ms"))[0];
   const calls = [];const nodes = new Map();
   const lookup = id => {if (!nodes.has(id)) nodes.set(id,{hidden:false});return nodes.get(id);};
-  const context = vm.createContext({globalThis:{TeslaBoxSettingsLayout:{initialize:() => calls.push("init"),enterPage:() => calls.push("enter"),selectSection:id => calls.push(id)},TeslaBoxCarPlaySettings:{load:() => calls.push("load")}},$ : lookup,loginView:lookup("login-view"),appView:lookup("app-view"),state:{authEnabled:true},document:{querySelectorAll:() => []},window:{history:{pushState(){}},scrollTo(){}},closeNavigation(){},closeAppearanceMenu(){},loadSettings:() => calls.push("settings"),loadMediaAssets(){},loadLogs(){},scheduleLogsRefresh(){}});
+  const context = vm.createContext({playbackProbeActive:false,globalThis:{TeslaBoxSettingsLayout:{initialize:() => calls.push("init"),enterPage:() => calls.push("enter"),selectSection:id => calls.push(id)},TeslaBoxCarPlaySettings:{load:() => calls.push("load")}},$ : lookup,loginView:lookup("login-view"),appView:lookup("app-view"),state:{authEnabled:true},document:{querySelectorAll:() => []},window:{history:{pushState(){}},scrollTo(){}},closeNavigation(){},closeAppearanceMenu(){},loadSettings:() => calls.push("settings"),loadMediaAssets(){},loadLogs(){},scheduleLogsRefresh(){}});
   for (const name of ["initializeSettingsTabs","activateSettingsTab","showApp","showPage"]) vm.runInContext(body(name),context);
   context.initializeSettingsTabs();context.activateSettingsTab("settings-panel-5");context.showApp();context.showPage("settings",false);
   assert.deepEqual(calls,["init","settings-panel-5","load","enter","settings"]);

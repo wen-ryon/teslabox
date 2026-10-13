@@ -10,6 +10,30 @@ import (
 	"unicode/utf8"
 )
 
+func TestPlaybackProbeJournalSectionIsBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{output: "normal log\n播放诊断 probe_id=012345 password=private\n"}
+	var report strings.Builder
+	writePlaybackProbeJournalSection(t.Context(), runner, &report, "")
+	if !strings.Contains(report.String(), "probe_id=012345") || strings.Contains(report.String(), "private") || strings.Contains(report.String(), "normal log") {
+		t.Fatalf("section = %q", report.String())
+	}
+	if runner.name != "journalctl" || !strings.Contains(strings.Join(runner.args, " "), "teslabox.service") {
+		t.Fatalf("command = %s %v", runner.name, runner.args)
+	}
+}
+
+func TestPlaybackProbeJournalSectionFiltersSpecificRun(t *testing.T) {
+	t.Parallel()
+	id := "0123456789abcdef0123456789abcdef"
+	runner := &fakeRunner{output: "播放诊断 probe_id=other\n播放诊断 probe_id=" + id + " probe_case=single-front-original password=private\n"}
+	var report strings.Builder
+	writePlaybackProbeJournalSection(t.Context(), runner, &report, id)
+	if !strings.Contains(report.String(), "probe_case=single-front-original") || strings.Contains(report.String(), "probe_id=other") || strings.Contains(report.String(), "private") {
+		t.Fatalf("section=%q", report.String())
+	}
+}
+
 type lsblkFallbackRunner struct {
 	calls []string
 }
@@ -295,5 +319,18 @@ func TestManagerBundleRejectsConcurrentGeneration(t *testing.T) {
 	close(runner.release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPlaybackTraceSectionDoesNotDisplaceFailures(t *testing.T) {
+	t.Parallel()
+	lines := []string{`{"msg":"客户端播放诊断","event":"load_failed","reason":"baseline_failure"}`}
+	for i := 0; i < 650; i++ {
+		lines = append(lines, `{"msg":"客户端播放诊断","event":"playback_trace","trace":{"phase":"seek","reason_code":"positioned"}}`)
+	}
+	var report strings.Builder
+	writePlaybackProbeJournalSection(t.Context(), &fakeRunner{output: strings.Join(lines, "\n")}, &report, "")
+	if !strings.Contains(report.String(), "baseline_failure") || strings.Count(report.String(), `"event":"playback_trace"`) != 650 {
+		t.Fatal("stage records displaced failure or exceeded limit")
 	}
 }

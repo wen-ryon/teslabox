@@ -204,6 +204,10 @@ let telemetryPrefetchTimer = 0;
 let passwordChangeForced = false;
 let updatePollTimer = 0;
 let logsRefreshTimer = 0;
+let playbackProbeRun = 0;
+let playbackProbeFinish = null;
+let playbackProbeActive = false;
+let playbackProbeLastID = "";
 let activeLogSource = "usb";
 const observedMediaEntries = new Set();
 const playbackDiagnosticLastSent = new Map();
@@ -459,6 +463,11 @@ $("logs-lines").addEventListener("change", loadLogs);
 $("logs-auto-refresh").addEventListener("click", toggleLogsAutoRefresh);
 $("logs-copy").addEventListener("click", copyLogs);
 $("logs-download-report").addEventListener("click", downloadDiagnosticReport);
+$("playback-probe-start").addEventListener("click", () => startPlaybackProbeMatrix());
+$("playback-probe-stop").addEventListener("click", () => stopPlaybackProbeMatrix("用户停止"));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && playbackProbeActive) stopPlaybackProbeMatrix("页面进入后台");
+});
 $("media-refresh").addEventListener("click", loadMediaAssets);
 $("media-boombox-upload").addEventListener("click", () => uploadMediaFiles("boombox"));
 $("media-wrap-upload").addEventListener("click", () => uploadMediaFiles("wrap"));
@@ -750,6 +759,7 @@ async function changeManagementPassword(event) {
 }
 
 function showPage(page, updateHistory) {
+  if (page !== "logs" && playbackProbeActive) stopPlaybackProbeMatrix("离开日志中心");
   state.page = ["media", "settings", "logs", "backup", "exports"].includes(page) ? page : "dashboard";
   $("dashboard-page").hidden = state.page !== "dashboard";
   $("media-page").hidden = state.page !== "media";
@@ -804,8 +814,12 @@ async function downloadDiagnosticReport() {
   button.disabled = true;
   button.textContent = "正在收集…";
   try {
+    await globalThis.TeslaBoxPlaybackTrace?.drain();
     const source = $("logs-download-source").value;
-    const reportPath = "/api/v1/diagnostics/report" + (source ? "?source=" + encodeURIComponent(source) : "");
+    const parameters = new URLSearchParams();
+    if (source) parameters.set("source", source);
+    else if (playbackProbeLastID) parameters.set("probe_id", playbackProbeLastID);
+    const reportPath = "/api/v1/diagnostics/report" + (parameters.size ? "?" + parameters : "");
     const response = await requestResponse(reportPath, {cache:"no-store", loadingMessage:"正在生成完整诊断报告…"});
     if (!response.ok) {
       let message = `生成诊断报告失败（HTTP ${response.status}）`;
@@ -830,6 +844,12 @@ async function downloadDiagnosticReport() {
     button.disabled = false;
     button.textContent = originalLabel;
   }
+}
+
+function playbackProbeID() {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function loadMediaAssets() {
@@ -1294,7 +1314,7 @@ async function warmRestartGadget() {
 }
 
 function renderLogs(report) {
-  const labels = {usb:"USB 枚举", media:"视频与转码", application:"TeslaBox 服务", network:"网络与热点"};
+  const labels = {usb:"USB 枚举", media:"视频与转码", application:"TeslaBox 服务", network:"网络与热点", carplay:"CarPlay 服务"};
   const lines = Array.isArray(report.lines) ? report.lines : [];
   const summaries = Array.isArray(report.summaries) ? report.summaries : [];
   const summary = $("logs-summary");
@@ -3145,6 +3165,7 @@ async function refreshRecordingDurations() {
               ![...recentSessions, ...archivedSessions].includes(session)) continue;
           session.duration_state = updated.duration_state;
           session.duration_pending = updated.duration_pending;
+          session.duration_display_known = updated.duration_display_known;
           session.duration_seconds = updated.duration_seconds;
           session.end_at = updated.end_at;
           for (const card of document.querySelectorAll(".session-card")) {
@@ -3594,6 +3615,18 @@ function sessionMediaURL(url) {
   return `${url}${url.includes("?") ? "&" : "?"}snapshot_id=${encodeURIComponent(activeSession.snapshot_id || "")}`;
 }
 
+function observePlaybackTrack(element, video, source, server = false) {
+  const reused = !server && element.dataset.videoId === video.id && element.getAttribute("src") === source && element.readyState >= 1 && !element.error;
+  globalThis.TeslaBoxPlaybackTrace?.watch(element, {
+    session_id:activeSession?.id || "", snapshot_id:activeSession?.snapshot_id || "",
+    video_id:video?.id || "", camera:video?.camera || activeCamera,
+    display:activeDisplay, quality:effectivePlaybackQuality,
+    transport:server ? (TeslaBoxHLS.supported(element) ? "hls" : "fmp4") : "range_mp4",
+    media_path:source.split("?")[0],
+  }, reused, source);
+  if (reused) globalThis.TeslaBoxPlaybackTrace?.arm(element);
+}
+
 async function openSessionPlayer(summary, camera, position, display, resolvePosition, autoplay = false) {
 	if (summary.cached) { setNotice("正在核对当前录像，完成后即可播放", false, false); return; }
 	const sequence = ++sessionOpenSequence;
@@ -3608,6 +3641,7 @@ async function openSessionPlayer(summary, camera, position, display, resolvePosi
 		position = Math.max(0, Math.min(Number(position) || 0, Number(session.duration_seconds) || 0));
 		closePlayerMedia();
     activeSession = session;
+    globalThis.TeslaBoxPlaybackTrace?.beginOperation();
     playbackWasPlaying = false;
     activeCamera = session.cameras.includes(camera) ? camera : preferredCamera(session);
     activeDisplay = display === "composite" ? normalizeDisplayMode(readPreference("teslabox-player-layout", "composite6")) : "single";
@@ -3704,7 +3738,7 @@ function sessionDurationLabel(session) {
   // 历史核对结果对用户就是录像时长，不暴露“缓存”等内部实现状态。
   if (session.duration_state === "cached") return formatDuration(session.duration_seconds);
   if (session.duration_state === "verified") return formatDuration(session.duration_seconds);
-  if (session.duration_state === "unavailable") return "部分文件不可读取";
+  if (session.duration_state === "unavailable") return session.duration_display_known ? formatDuration(session.duration_seconds) : "部分文件不可读取";
   if (session.cached && recordingSnapshotSpaceBlocked) return "待释放空间后核对";
   if (session.cached) return "待当前录像核对";
   if (Number(session.duration_seconds) > 0) return `约 ${formatDuration(session.duration_seconds)}`;
@@ -3751,7 +3785,65 @@ function renderEventMarker() {
 }
 
 async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1) {
+  const session = activeSession;
+  const pending = loadSessionPositionAttempt(position, autoplay, preferredMomentIndex);
+  const token = loadToken;
+  const loaded = await pending;
+  if (loaded || !session || token !== loadToken || activeSession !== session) return loaded;
+  // 原生 video 把 HTTP 409 显示成媒体错误 4；先核实快照，再决定是否重试。
+  try {
+    const refreshed = await refreshPlaybackSessionSnapshot(session, position, preferredMomentIndex,
+      () => token === loadToken && activeSession === session);
+    if (!refreshed || token !== loadToken || activeSession !== session) return false;
+    reportPlaybackDiagnostic("load_failed", "snapshot_refreshed:录像快照已更新，按原录像时刻重试一次");
+    activeSession = refreshed.session;
+    $("session-timeline").max = String(activeSession.duration_seconds);
+    $("total-time").textContent = formatDuration(activeSession.duration_seconds);
+    renderPlayerMeta(activeSession);
+    renderCameraSwitcher();
+    renderSegmentMarkers();
+    renderEventMarker();
+    // 只重试一次；快照再次轮换或视频确实损坏时不能形成无限请求。
+    return await loadSessionPositionAttempt(refreshed.position, autoplay, refreshed.momentIndex);
+  } catch (error) {
+    if (token !== loadToken || activeSession !== session) return false;
+    reportPlaybackDiagnostic("load_failed", `snapshot_refresh_failed:${error.status || ""}:${error.message}`);
+    showPlayerMessage(error.message || "录像状态发生变化，请刷新列表后重新打开");
+    return false;
+  }
+}
+
+async function refreshPlaybackSessionSnapshot(session, position, preferredMomentIndex, current) {
+  const endTrace = globalThis.TeslaBoxPlaybackTrace?.span(sessionVideo,"snapshot_check") || (()=>{});
+  const endpoint = `/api/v1/video-sessions/${encodeURIComponent(session.id)}`;
+  try {
+    await request(`${endpoint}?snapshot_id=${encodeURIComponent(session.snapshot_id || "")}`, {loading:false});
+    endTrace("unchanged");
+    return null;
+  } catch (error) {
+    endTrace(error.status === 409 ? "snapshot_expired" : "request_failed");
+    if (!current()) return null;
+    if (error.status !== 409) throw error;
+  }
+  // 循环窗口会覆盖，不能把旧窗口的相对秒数套在新的窗口上。
+  if (session.id.startsWith("rw-")) throw new Error("最近录像已更新或循环覆盖，请刷新列表后重新打开对应时间段");
+  const selected = selectMomentAtPosition(session, position, preferredMomentIndex);
+  if (!selected) throw new Error("原录像时刻已不可用，请刷新列表后重新选择");
+  const latest = await request(endpoint, {loading:false});
+  globalThis.TeslaBoxPlaybackTrace?.mark(sessionVideo,"snapshot_refresh","detail_received");
+  if (!current()) return null;
+  if (!latest.snapshot_id || latest.snapshot_id === session.snapshot_id) return null;
+  const momentIndex = latest.moments?.findIndex(moment => moment.id === selected.moment.id &&
+    moment.recorded_at === selected.moment.recorded_at) ?? -1;
+  if (latest.id !== session.id || momentIndex < 0) throw new Error("所选录像已被删除或更新，请刷新列表后重新选择");
+  const moment = latest.moments[momentIndex];
+  if (selected.localTime > timelineMomentDuration(moment)) throw new Error("所选录像时刻已不可用，请重新选择播放位置");
+  return {session:latest, momentIndex, position:timelineMomentStart(moment)+selected.localTime};
+}
+
+async function loadSessionPositionAttempt(position, autoplay, preferredMomentIndex = -1) {
   if (!activeSession) return false;
+  globalThis.TeslaBoxPlaybackTrace?.beginBatch();
   const requestID = ++timelinePositionRequestID;
   const token = ++loadToken;
   showPlayerLoading(token);
@@ -3778,21 +3870,24 @@ async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1
     $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
     $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
     const source = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`);
+    observePlaybackTrack(sessionVideo, activeVideo, source);
     delete sessionVideo.dataset.compositeKey;
     if (sessionVideo.dataset.videoId !== activeVideo.id || sessionVideo.getAttribute("src") !== source ||
         sessionVideo.readyState < 1 || sessionVideo.error) {
       sessionVideo.pause();
       sessionVideo.dataset.loadingToken = String(token);
       sessionVideo.dataset.videoId = activeVideo.id;
+      TeslaBoxHLS.release(sessionVideo);
       sessionVideo.src = source;
       sessionVideo.load();
-      const loaded = await waitForMetadata(sessionVideo, 8000);
+      globalThis.TeslaBoxPlaybackTrace?.arm(sessionVideo);
+      const loaded = await waitForMetadata(sessionVideo, 8000, token);
       if (token !== loadToken) return false;
       finishSessionVideoLoad(token);
       if (!loaded) {
         reportPlaybackDiagnostic("load_failed", "单路原画视频元数据加载失败");
         releaseVideoElement(sessionVideo);
-        showPlayerMessage("单路视频加载失败，请稍后重试");
+        showPlayerMessage("单路视频加载失败，具体媒体错误或等待超时已记录，请重试或切换压缩画质");
         return false;
       }
     }
@@ -3800,7 +3895,7 @@ async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1
     const localTime = Math.max(0, selection.localTime);
     if (!await seekVideoElement(sessionVideo, localTime, token)) return false;
     startPlaybackTelemetryLoad(activeVideo);
-    if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
+    if (autoplay) void playVideoSafely(sessionVideo, token);
     return true;
   } finally {
     if (requestID === timelinePositionRequestID) timelinePositionPending = false;
@@ -3884,7 +3979,9 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`);
   renderCameraSwitcher();
-  if (autoplay) await playCompositeTracks();
+  // 定位已完成；辅助视角的 play() 可能长期等待缓冲，不能继续锁住时间轴，
+  // 否则布局切换会取到旧 requestedPosition，把已推进的主视角倒退回去。
+  if (autoplay) void playCompositeTracks();
   return true;
 }
 
@@ -3898,9 +3995,8 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
     sessionVideo.dataset.loadingToken = String(token);
     sessionVideo.dataset.compositeKey = sourceKey;
     sessionVideo.dataset.videoId = masterVideo.id;
-    sessionVideo.src = source;
-    sessionVideo.load();
-    const loaded = await waitForMetadata(sessionVideo, 15000);
+    if (!await attachServerPlayback(source, token)) return false;
+    const loaded = await waitForMetadata(sessionVideo, 15000, token);
     if (token !== loadToken) return false;
     finishSessionVideoLoad(token);
     if (!loaded) {
@@ -3921,7 +4017,7 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
   applyDisplayState();
   applyServerCompositeFrameGeometry();
   renderCameraSwitcher();
-  if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
+  if (autoplay) void playVideoSafely(sessionVideo, token);
   return true;
 }
 
@@ -3935,9 +4031,8 @@ async function loadServerSingle(selection, autoplay, token) {
     sessionVideo.pause();
     sessionVideo.dataset.loadingToken = String(token);
     sessionVideo.dataset.compositeKey = sourceKey;
-    sessionVideo.src = source;
-    sessionVideo.load();
-    const loaded = await waitForMetadata(sessionVideo, 15000);
+    if (!await attachServerPlayback(source, token)) return false;
+    const loaded = await waitForMetadata(sessionVideo, 15000, token);
     if (token !== loadToken) return false;
     finishSessionVideoLoad(token);
     if (!loaded) {
@@ -3958,7 +4053,7 @@ async function loadServerSingle(selection, autoplay, token) {
   $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
   applyDisplayState();
-  if (autoplay) sessionVideo.play().catch(() => showPlayerMessage("浏览器阻止了自动续播，请点播放继续"));
+  if (autoplay) void playVideoSafely(sessionVideo, token);
   return true;
 }
 
@@ -4049,6 +4144,9 @@ function showCompositeTrackLoadFailure(camera) {
 }
 
 function reportCompositeLoadFailures(failedTracks) {
+  failedTracks.forEach(([camera, track]) => {
+    reportPlaybackDiagnostic("load_failed", `原画视角加载失败:${camera}`, track.element);
+  });
   const details = failedTracks.map(([camera, track]) =>
     `${cameraLabel(camera)}(错误 ${track.element.error?.code || 0}/状态 ${track.element.readyState || 0})`);
   reportPlaybackDiagnostic("load_failed", `原画多路视频元数据加载失败${details.length ? `：${details.join("、")}` : ""}`);
@@ -4056,14 +4154,17 @@ function reportCompositeLoadFailures(failedTracks) {
 
 async function prepareVideoElement(element, video, absolute, token) {
   const source = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(video.id)}/content`);
+  observePlaybackTrack(element, video, source);
   if (element.dataset.videoId !== video.id || element.getAttribute("src") !== source ||
       element.readyState < 1 || element.error) {
     element.pause();
     if (element === sessionVideo) element.dataset.loadingToken = String(token);
     element.dataset.videoId = video.id;
+    TeslaBoxHLS.release(element);
     element.src = source;
     element.load();
-    const loaded = await waitForMetadata(element, 12000);
+    globalThis.TeslaBoxPlaybackTrace?.arm(element);
+    const loaded = await waitForMetadata(element, 12000, token);
     if (token !== loadToken || element.dataset.videoId !== video.id ||
         element.getAttribute("src") !== source) return false;
     if (element === sessionVideo) finishSessionVideoLoad(token);
@@ -4113,6 +4214,7 @@ function videoCoversAbsolutePosition(video, absolute) {
 
 async function switchCamera(camera) {
   if (!activeSession || (activeDisplay === "single" && camera === activeCamera)) return;
+  globalThis.TeslaBoxPlaybackTrace?.beforeSwitch("camera_switch");
   const position = currentSessionPosition();
   const autoplay = !sessionVideo.paused;
   activeCamera = camera;
@@ -4131,6 +4233,7 @@ async function switchCamera(camera) {
 
 function togglePlayback() {
   if (!activeSession) return;
+  globalThis.TeslaBoxPlaybackTrace?.mark(sessionVideo,"user_action",sessionVideo.paused ? "user_play" : "user_pause");
   if (!sessionVideo.src) {
     loadSessionPosition(Number($("session-timeline").value), true);
     return;
@@ -4147,7 +4250,7 @@ function togglePlayback() {
   }
   if (sessionVideo.paused) {
     playbackWasPlaying = true;
-    sessionVideo.play().catch(() => showPlayerMessage("请再次点击播放"));
+    void playVideoSafely(sessionVideo);
   } else {
     playbackWasPlaying = false;
     sessionVideo.pause();
@@ -4409,6 +4512,8 @@ function currentSessionPosition() {
 
 async function setDisplayMode(display) {
   if (!(display === "single" || compositeLayouts[display]) || display === activeDisplay || !activeSession) return;
+  globalThis.TeslaBoxPlaybackTrace?.mark(sessionVideo,"user_action","layout_switch");
+  globalThis.TeslaBoxPlaybackTrace?.beforeSwitch("layout_switch");
   const position = currentSessionPosition();
   const autoplay = !sessionVideo.paused;
   pauseCompositeTracks();
@@ -5063,13 +5168,37 @@ function resetCompositeFrameGeometry() {
 }
 
 async function playCompositeTracks() {
+  const token = loadToken;
   playbackWasPlaying = true;
-  const results = await Promise.allSettled([...compositeTracks.values()].map((track) => track.element.play()));
-  if (results.some((result) => result.status === "rejected")) showPlayerMessage("浏览器阻止了自动播放，请再次点击播放");
+  await Promise.all([...compositeTracks.values()].map((track) => playVideoSafely(track.element, token)));
+}
+
+async function playVideoSafely(video, token = loadToken) {
+  const source = video.getAttribute("src");
+  const endTrace = globalThis.TeslaBoxPlaybackTrace?.span(video,"play") || (()=>{});
+  try {
+    await video.play();
+    endTrace(token === loadToken && video.getAttribute("src") === source ? "resolved" : "superseded");
+    return token === loadToken && video.getAttribute("src") === source;
+  } catch (error) {
+    endTrace(error?.name === "NotAllowedError" ? "not_allowed" : error?.name === "AbortError" ? "aborted" : "rejected");
+    // 旧播放请求可能在切换后才拒绝，不能覆盖新画面的提示或触发降级。
+    if (token !== loadToken || video.getAttribute("src") !== source) return false;
+    const name = error?.name || "Error";
+    reportPlaybackDiagnostic("media_error", `play_rejected:${name}:${String(error?.message || "").slice(0, 180)}`, video);
+    if (name === "NotAllowedError") showPlayerMessage("浏览器需要手动开始播放，请轻点播放继续");
+    else if (name === "AbortError") showPlayerMessage("播放请求被中断，请轻点播放重试");
+    else if (name === "NotSupportedError") showPlayerMessage("当前视频无法解析或格式不受支持，请重试或切换压缩画质");
+    else showPlayerMessage("视频播放失败，请重试；详细原因已记录到诊断报告");
+    return false;
+  }
 }
 
 function pauseCompositeTracks() {
-  compositeTracks.forEach((track) => track.element.pause());
+  compositeTracks.forEach((track) => {
+    globalThis.TeslaBoxPlaybackTrace?.mark(track.element,"pause_request","controller_pause");
+    track.element.pause();
+  });
 }
 
 function releaseCompositeAuxiliaryTracks() {
@@ -5168,37 +5297,56 @@ function updateFullscreenButton() {
   button.setAttribute("aria-label", fullscreen ? "退出全屏播放" : "进入全屏播放");
 }
 
-function waitForMetadata(video, timeout = 4000) {
-  if (video.readyState >= 1 && !video.error) return Promise.resolve(true);
+function waitForMetadata(video, timeout = 4000, token = loadToken) {
+  const endTrace = globalThis.TeslaBoxPlaybackTrace?.span(video,"metadata") || (()=>{});
+  const source = video.getAttribute("src");
+  const current = () => token === loadToken && video.getAttribute("src") === source;
+  if (!current()) { endTrace("superseded"); return Promise.resolve(false); }
+  if (video.readyState >= 1 && !video.error) { endTrace("already_ready"); return Promise.resolve(true); }
   return new Promise((resolve) => {
     let settled = false;
     let timer = 0;
-    const done = () => {
+    let poll = 0;
+    const started = performance.now();
+    const done = (event) => {
       if (settled) return;
       settled = true;
       window.clearTimeout(timer);
+      window.clearInterval(poll);
       video.removeEventListener("loadedmetadata", done);
       video.removeEventListener("error", done);
-      resolve(video.readyState >= 1 && !video.error);
+      const ready = current() && video.readyState >= 1 && !video.error;
+      endTrace(!current() ? "superseded" : ready ? "ready" : video.error ? "media_error" : "timeout");
+      if (current() && !ready) {
+        const cause = video.error ? `media_error:${video.error.code}:${video.error.message || ""}` : event?.type || "timeout";
+        reportPlaybackDiagnostic("load_failed", `metadata_${cause};wait_ms=${Math.round(performance.now()-started)}`, video);
+      }
+      resolve(ready);
     };
     video.addEventListener("loadedmetadata", done);
     video.addEventListener("error", done);
+    // 主元素可被下一次切换复用；及时移除旧监听，避免旧任务等待新源的事件。
+    poll = window.setInterval(() => { if (!current()) done(); }, 50);
     timer = window.setTimeout(done, timeout);
+    if (video.error) done();
   });
 }
 
 function seekVideoElement(video, requestedTime, token, timeout = 4000) {
+  const endTrace = globalThis.TeslaBoxPlaybackTrace?.span(video,"seek",requestedTime) || (()=>{});
+  if (token !== loadToken) { endTrace("superseded"); return Promise.resolve(false); }
   const target = Number.isFinite(video.duration)
     ? Math.min(Math.max(0, requestedTime), Math.max(0, video.duration-.05))
     : Math.max(0, requestedTime);
   if (!video.seeking && Math.abs(video.currentTime-target) < .05) {
+    endTrace(video.error ? "media_error" : "already_positioned");
     if (video === sessionVideo) finishPlayerLoadingFromMedia();
     return Promise.resolve(!video.error);
   }
   return new Promise((resolve) => {
     let settled = false;
     let timer = 0;
-    const done = () => {
+    const done = (event) => {
       if (settled) return;
       settled = true;
       window.clearTimeout(timer);
@@ -5207,6 +5355,7 @@ function seekVideoElement(video, requestedTime, token, timeout = 4000) {
       video.removeEventListener("emptied", done);
       const positioned = !video.seeking && Math.abs(video.currentTime-target) < .25;
       const ready = token === loadToken && !video.error && positioned;
+      endTrace(token !== loadToken ? "superseded" : video.error ? "media_error" : ready ? "positioned" : event?.type === "emptied" ? "source_emptied" : event?.type === "exception" ? "exception" : !event ? "timeout" : "not_positioned");
       if (ready && video === sessionVideo) finishPlayerLoadingFromMedia();
       resolve(ready);
     };
@@ -5217,7 +5366,7 @@ function seekVideoElement(video, requestedTime, token, timeout = 4000) {
     try {
       video.currentTime = target;
     } catch (_) {
-      done();
+      done({type:"exception"});
     }
   });
 }
@@ -5253,6 +5402,7 @@ function finishPlayerLoadingFromMedia() {
 }
 
 function closePlayerMedia() {
+  globalThis.TeslaBoxPlaybackTrace?.stop();
   loadToken++;
   hidePlayerLoading();
   telemetryAbortController?.abort();
@@ -5285,6 +5435,7 @@ function closePlayerMedia() {
 }
 
 function setPlaybackQuality(quality) {
+  globalThis.TeslaBoxPlaybackTrace?.beforeSwitch("quality_switch");
   playbackQuality = normalizePlaybackQuality(quality);
   resetPlaybackFallbackState();
   writePreference("teslabox-playback-quality", playbackQuality);
@@ -5354,10 +5505,11 @@ function canAutomaticallyFallback() {
 }
 
 function handlePlaybackError() {
-  hidePlayerLoading();
   // 设置新媒体源期间的错误由对应加载任务判定，避免旧源的迟到事件触发错误降级。
   if (!sessionVideo.getAttribute("src") || sessionVideo.dataset.loadingToken) return;
-  reportPlaybackDiagnostic("media_error", "浏览器触发视频元素错误");
+  if (!sessionVideo.error) return;
+  hidePlayerLoading();
+  reportPlaybackDiagnostic("media_error", `浏览器媒体错误:${sessionVideo.error.code}:${sessionVideo.error.message || ""}`);
   requestPlaybackFallback("视频流播放失败");
 }
 
@@ -5445,10 +5597,10 @@ function markPlaybackStall() {
   }
 }
 
-function reportPlaybackDiagnostic(event, reason) {
+function reportPlaybackDiagnostic(event, reason, video = sessionVideo) {
   if (!activeSession) return;
   const moment = activeSession.moments?.[activeMomentIndex] || null;
-  const key = `${event}|${reason}|${activeSession.id}|${moment?.id || ""}|${activeDisplay}|${effectivePlaybackQuality}`;
+  const key = `${event}|${reason}|${activeSession.id}|${moment?.id || ""}|${activeDisplay}|${effectivePlaybackQuality}|${video.dataset.videoId || ""}`;
   const now = Date.now();
   if (now-(playbackDiagnosticLastSent.get(key) || 0) < 15000) return;
   playbackDiagnosticLastSent.set(key, now);
@@ -5473,10 +5625,17 @@ function reportPlaybackDiagnostic(event, reason) {
     downlink_mbps: Number(connection?.downlink) || 0,
     rtt_ms: Number(connection?.rtt) || 0,
     media_mbps: Number(average.toFixed(2)) || 0,
-    buffer_seconds: Number(bufferedSeconds(sessionVideo).toFixed(2)) || 0,
+    probe_track: [...compositeTracks.values(), ...pendingCompositeTracks.values()].find(track => track.element === video)?.video?.camera || activeCamera || "",
+    buffer_seconds: Number(bufferedSeconds(video).toFixed(2)) || 0,
     stalls: playbackStalls,
-    media_error_code: sessionVideo.error?.code || 0,
-    ready_state: sessionVideo.readyState || 0,
+    media_error_code: video.error?.code || 0,
+    ready_state: video.readyState || 0,
+    network_state: video.networkState || 0,
+    current_time_seconds: Number(video.currentTime) || 0,
+    video_width: video.videoWidth || 0,
+    video_height: video.videoHeight || 0,
+    total_frames: video.getVideoPlaybackQuality?.().totalVideoFrames || 0,
+    dropped_frames: video.getVideoPlaybackQuality?.().droppedVideoFrames || 0,
   };
   fetch("/api/v1/diagnostics/client-event", {
     method:"POST",
@@ -5561,7 +5720,28 @@ function isLocalAccessPath() {
   return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname);
 }
 
+async function attachServerPlayback(source, token) {
+  observePlaybackTrack(sessionVideo, activeVideo, source, true);
+  const endTrace = globalThis.TeslaBoxPlaybackTrace?.span(sessionVideo,"stream_prepare") || (()=>{});
+  try {
+    const attached = await TeslaBoxHLS.attach(sessionVideo, source, () => token === loadToken);
+    if (attached && token === loadToken) globalThis.TeslaBoxPlaybackTrace?.arm(sessionVideo);
+    endTrace(attached ? "attached" : "superseded");
+    return attached;
+  } catch (error) {
+    endTrace(token !== loadToken ? "superseded" : "failed");
+    if (token !== loadToken) return false;
+    finishSessionVideoLoad(token);
+    reportPlaybackDiagnostic("load_failed", `分片播放准备失败：${error.message}`);
+    releaseVideoElement(sessionVideo);
+    showPlayerMessage(error.message || "视频准备失败，请稍后重试");
+    return false;
+  }
+}
+
 function releaseVideoElement(element) {
+  globalThis.TeslaBoxPlaybackTrace?.unwatch(element,"released");
+  TeslaBoxHLS.release(element);
   const placeholder = element.parentElement?.querySelector(".composite-tile-placeholder");
   element.pause();
   element.removeAttribute("src");

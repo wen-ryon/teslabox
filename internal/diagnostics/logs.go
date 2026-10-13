@@ -151,8 +151,20 @@ func (m *Manager) Logs(ctx context.Context, source string, limit int) (Report, e
 	return report, nil
 }
 
-// Bundle 收集当前状态与两次启动日志，各来源独立留额避免 CarPlay 证据被挤掉。
+// Bundle 收集当前状态、当前启动和上一次启动的关键日志，避免故障重启后丢失根因。
 func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
+	return m.bundle(ctx, "")
+}
+
+// BundleForPlaybackProbe 按一次播放诊断编号收集完整事件，避免矩阵测试记录被其他运行挤出报告。
+func (m *Manager) BundleForPlaybackProbe(ctx context.Context, probeID string) (Bundle, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(probeID) {
+		return Bundle{}, fmt.Errorf("播放诊断编号无效")
+	}
+	return m.bundle(ctx, probeID)
+}
+
+func (m *Manager) bundle(ctx context.Context, probeID string) (Bundle, error) {
 	if !m.bundleMu.TryLock() {
 		return Bundle{}, fmt.Errorf("已有诊断报告正在生成")
 	}
@@ -164,6 +176,7 @@ func (m *Manager) Bundle(ctx context.Context) (Bundle, error) {
 	var report strings.Builder
 	fmt.Fprintf(&report, "TeslaBox 诊断报告\n生成时间: %s\n报告说明: 常见密码和令牌字段已自动脱敏；仍可能包含设备名称、SSID、IP 和硬件标识。\n",
 		generatedAt.Format(time.RFC3339))
+	writePlaybackProbeJournalSection(ctx, m.runner, &report, probeID)
 
 	commands := []diagnosticCommand{
 		{title: "内核与系统", name: "uname", args: []string{"-a"}},
@@ -403,7 +416,13 @@ func writeLogSection(ctx context.Context, manager *Manager, report *strings.Buil
 		report.WriteString("[没有匹配日志]\n")
 		return
 	}
-	lines := logs.Lines
+	lines := make([]string, 0, len(logs.Lines))
+	for _, line := range logs.Lines {
+		if strings.Contains(line, playbackTraceMarker) {
+			continue
+		}
+		lines = append(lines, line)
+	}
 	// journal 按时间正序返回；预算不足时保留尾部，避免旧记录挤掉刚发生的故障。
 	remaining := max(0, budget-(report.Len()-start)-256)
 	first := len(lines)
@@ -418,6 +437,43 @@ func writeLogSection(ctx context.Context, manager *Manager, report *strings.Buil
 		report.WriteString(line)
 		report.WriteByte('\n')
 	}
+}
+
+func writePlaybackProbeJournalSection(ctx context.Context, runner system.Runner, report *strings.Builder, probeID string) {
+	if probeID != "" {
+		fmt.Fprintf(report, "\n===== 最近 30 分钟播放矩阵诊断 %s =====\n", probeID)
+	} else {
+		report.WriteString("\n===== 最近 30 分钟一键播放诊断 =====\n")
+	}
+	output, err := runner.Run(ctx, "journalctl", "--no-pager", "--quiet", "--boot", "--unit", "teslabox.service",
+		"--output=short-iso-precise", "--since=30 minutes ago", "--lines=20000")
+	if err != nil {
+		fmt.Fprintf(report, "[无法读取] %s\n", redactLine(sanitizeLine(err.Error())))
+		return
+	}
+	keywords := []string{"播放诊断"}
+	limit := 200
+	if probeID != "" {
+		keywords = []string{probeID}
+		limit = 1800
+	}
+	// 逐路采样单独保留，避免挤掉原有异常与播放矩阵诊断。
+	var ordinary []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.Contains(line, "\"event\":\"playback_trace\"") {
+			ordinary = append(ordinary, line)
+		}
+	}
+	writeBudgetSection(report, 96<<10, func(out *strings.Builder) {
+		if writeSanitizedLines(out, strings.Join(ordinary, "\n"), keywords, limit) == 0 {
+			out.WriteString("[没有诊断记录]\n")
+		}
+	})
+	writePlaybackTraceBudget(report, string(output), 512<<10)
+	writeBudgetSection(report, 96<<10, func(out *strings.Builder) {
+		out.WriteString("\n===== 播放 HTTP 与媒体请求（独立预算） =====\n")
+		writeSanitizedLines(out, strings.Join(ordinary, "\n"), []string{"range", "http", "hls", "媒体请求", "视频请求"}, 2000)
+	})
 }
 
 func writeIncidentJournalSection(ctx context.Context, runner system.Runner, report *strings.Builder, title, boot string) {
@@ -459,6 +515,9 @@ func writeBlockDevicesSection(ctx context.Context, runner system.Runner, report 
 func writeSanitizedLines(report *strings.Builder, output string, keywords []string, limit int) int {
 	lines := make([]string, 0, limit)
 	for _, raw := range strings.Split(strings.TrimSpace(output), "\n") {
+		if strings.Contains(raw, playbackTraceMarker) {
+			continue
+		}
 		line := sanitizeLine(raw)
 		if line == "" || len(keywords) > 0 && !containsKeyword(line, keywords) {
 			continue

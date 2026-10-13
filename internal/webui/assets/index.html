@@ -13,9 +13,13 @@
   <script src="/nas-upload.js?v=20261011-runtime-1" defer></script>
   <script src="/settings-layout.js?v=20261013-page-display-1" defer></script>
   <script src="/runtime-components.js?v=20261011-components-1" defer></script>
+  <script src="/playback-probe-plan.js?v=20260929-2" defer></script>
+  <script src="/playback-hls.js?v=20260930-1" defer></script>
+  <script src="/playback-trace.js?v=20260930-6" defer></script>
   <script src="/app.js?v=20261013-page-display-1" defer></script>
   <script src="/carplay-pairing.js?v=20261011-runtime-1" defer></script>
   <script src="/carplay-settings.js?v=20261011-runtime-1" defer></script>
+  <script src="/playback-probe-matrix.js?v=20260930-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
@@ -487,6 +491,18 @@
           <pre id="logs-output" class="logs-output" tabindex="0">正在读取…</pre>
         </article>
         <div class="settings-warning">复现问题后请尽快下载完整诊断报告；报告会同时收集当前与上一次启动的关键日志，适合直接发给维护者。内容可能包含设备名称、SSID、IP 地址和硬件标识，发送前仍请快速检查。</div>
+      </section>
+      <section class="settings-section" aria-labelledby="playback-probe-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">PLAYBACK TEST</p><h2 id="playback-probe-title">一键播放诊断</h2></div></div>
+        <article class="settings-card playback-probe-card">
+          <p>请在出现卡顿的设备上打开本页。完整诊断会逐项测试所有可用视角的单路原画、压缩画质，以及多路原画并发播放和合成画质；另有压缩流有限文件对照，iPhone 还会增加 HLS 分片播放对照。普通项目最多 12 秒，HLS 项含准备时间最多 27 秒，有限文件项捕获最多 10 秒后再播放最多 12 秒，完整测试可能需要数分钟。测试期间保持页面在前台并接通电源。</p>
+          <div class="playback-probe-options"><label>范围 <select id="playback-probe-scope"><option value="full">完整：全部视角与布局</option><option value="quick">快速：前视角与六路布局</option></select></label><fieldset><legend>压缩画质</legend><label><input type="checkbox" name="playback-probe-quality" value="smooth" checked> 流畅</label><label><input type="checkbox" name="playback-probe-quality" value="standard"> 标清</label><label><input type="checkbox" name="playback-probe-quality" value="high" checked> 高清</label></fieldset></div>
+          <div class="logs-actions playback-probe-actions"><button id="playback-probe-start" class="primary compact" type="button">开始播放诊断</button><button id="playback-probe-stop" class="secondary compact" type="button" disabled>停止</button></div>
+          <div id="playback-probe-status" class="logs-meta" role="status" aria-live="polite">尚未开始</div>
+          <div id="playback-probe-videos" class="playback-probe-videos" hidden></div>
+          <ol id="playback-probe-results" class="playback-probe-results"></ol>
+          <p>结束后在上方下载内容中选择“完整诊断报告”，点击“下载日志”发给维护者。报告只记录播放事件、请求计时和传输字节数，不保存或上传录像内容；发送前仍请检查报告中的设备与网络信息。</p>
+        </article>
       </section>
     </div>
   </main>
