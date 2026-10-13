@@ -82,6 +82,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	mux.HandleFunc("GET /app.css", serveEmbedded(assetFS, "app.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /runtime-components.js", serveEmbedded(assetFS, "runtime-components.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /app.js", serveEmbedded(assetFS, "app.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /page-display.js", serveEmbedded(assetFS, "page-display.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /settings-layout.js", serveEmbedded(assetFS, "settings-layout.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /carplay-settings.js", serveEmbedded(assetFS, "carplay-settings.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /carplay-pairing.js", serveEmbedded(assetFS, "carplay-pairing.js", "text/javascript; charset=utf-8", "no-cache"))

@@ -75,6 +75,29 @@ func TestHandlerServesEmbeddedPageWithSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestHandlerServesPageDisplayScript(t *testing.T) {
+	t.Parallel()
+	expected, err := assets.ReadFile("assets/page-display.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandler(t)
+	for _, path := range []string{"/page-display.js", "/page-display.js?v=20261013-1"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/javascript; charset=utf-8" {
+			t.Fatalf("显示模块路由返回错误类型：%s %d %s", path, recorder.Code, recorder.Header().Get("Content-Type"))
+		}
+		// 精确校验资源字节，防止通用页面回退返回 200 HTML 而被误判为模块可用。
+		if !bytes.Equal(recorder.Body.Bytes(), expected) || !bytes.Contains(recorder.Body.Bytes(), []byte("TeslaBoxPageDisplay")) {
+			t.Fatalf("显示模块路由未返回真实 JS：%s", path)
+		}
+		if recorder.Header().Get("Cache-Control") != "no-cache" || recorder.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("显示模块响应保护头不符：%s", path)
+		}
+	}
+}
+
 func TestEmbeddedUIIncludesFanSettings(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"assets/index.html", "assets/app.js", "assets/app.css"} {
