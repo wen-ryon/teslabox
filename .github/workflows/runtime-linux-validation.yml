@@ -157,6 +157,18 @@ jobs:
       - name: CarPlay fcntl activation and recovery
         if: ${{ !cancelled() }}
         run: python3 -m unittest discover -s internal/carplaybundle -p 'test_runtime_*.py' -v 2>&1 | tee validation-logs/carplay-transactions.log
+      - name: CarPlay enrollment budget without skipped tests
+        if: ${{ !cancelled() }}
+        # 确认阶段预算回归实际执行，不能因平台跳过或发现不到测试而显示成功。
+        run: |
+          python3 - <<'PY' 2>&1 | tee validation-logs/carplay-enrollment-budget.log
+          import sys
+          import unittest
+          suite = unittest.defaultTestLoader.discover('experiments/carplay-native/scripts', pattern='test_carplay_provisioning_budget.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.skipped or result.testsRun < 10:
+              sys.exit('Enrollment budget tests failed, skipped, or were not fully discovered')
+          PY
       - name: Installer shell regression
         if: ${{ !cancelled() }}
         run: |

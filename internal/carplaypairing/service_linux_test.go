@@ -177,6 +177,7 @@ func TestServiceClientWorkflowWithActualPythonProvisioning(t *testing.T) {
 			program := `import importlib.util,json,pathlib,sys,time,os
 spec=importlib.util.spec_from_file_location('flow',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 root=pathlib.Path(sys.argv[2]);flow=m.Provisioning(root);events=[];onboarding=sys.argv[3]=='onboarding'
+(root/'fixture-ready').write_text('ready')
 def switch(mode,phone,seconds):
  events.append(mode);return True
 while True:
@@ -205,6 +206,16 @@ while True:
 				t.Fatal(err)
 			}
 			defer func() { childCancel(); _ = cmd.Wait() }()
+			fixtureDeadline := time.Now().Add(time.Second)
+			for {
+				if _, err := os.Stat(filepath.Join(c.runtime, "fixture-ready")); err == nil {
+					break
+				}
+				if time.Now().After(fixtureDeadline) {
+					t.Fatal("Python 夹具未就绪")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			calls := 0
 			var profile *incomingProfile
 			if scenario.incoming {

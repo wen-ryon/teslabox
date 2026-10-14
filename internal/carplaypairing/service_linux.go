@@ -19,10 +19,11 @@ import (
 var operationID = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 type serviceRequest struct {
-	RequestID   string `json:"request_id"`
-	PhoneID     string `json:"phone_id"`
-	Action      string `json:"action"`
-	ExpiresAtMS int64  `json:"expires_at_ms"`
+	RequestID        string `json:"request_id"`
+	PhoneID          string `json:"phone_id"`
+	Action           string `json:"action"`
+	ExpiresAtMS      int64  `json:"expires_at_ms"`
+	TotalExpiresAtMS int64  `json:"total_expires_at_ms,omitempty"`
 }
 
 type serviceProvisioning struct {
@@ -131,6 +132,7 @@ func (c *serviceClient) write(request serviceRequest) error {
 	}
 	if !operationID.MatchString(request.RequestID) || !phoneAddress.MatchString(request.PhoneID) || request.PhoneID == "00:00:00:00:00:00" ||
 		request.ExpiresAtMS <= 0 || request.ExpiresAtMS > 9007199254740991 ||
+		request.TotalExpiresAtMS != 0 && (request.TotalExpiresAtMS < request.ExpiresAtMS || request.TotalExpiresAtMS > 9007199254740991) ||
 		(request.Action != "pause" && request.Action != "enroll" && request.Action != "cancel") {
 		return errors.New("登记请求标识不合法")
 	}
@@ -228,10 +230,23 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 			return errors.New("登记服务尚未运行")
 		}
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 120*time.Second {
+		limit := 120 * time.Second
+		if confirmation.incoming {
+			limit = 180 * time.Second
+		}
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > limit {
 			return errors.New("登记需要限时上下文")
 		}
 		request := serviceRequest{RequestID: confirmation.Status().RequestID, PhoneID: phone, Action: "pause", ExpiresAtMS: deadline.UnixMilli()}
+		setupCtx := ctx
+		if confirmation.incoming {
+			request.TotalExpiresAtMS = deadline.UnixMilli()
+			setupDeadline := phaseDeadline(deadline, confirmation.createdAt, 60*time.Second)
+			request.ExpiresAtMS = setupDeadline.UnixMilli()
+			var cancelSetup context.CancelFunc
+			setupCtx, cancelSetup = context.WithDeadline(ctx, setupDeadline)
+			defer cancelSetup()
+		}
 		// 写请求后即承担恢复责任，不能把等待暂停超时解释为尚未改动服务。
 		defer func() {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 50*time.Second)
@@ -255,29 +270,48 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 		if err := c.write(request); err != nil {
 			return err
 		}
-		if err := c.wait(ctx, request, "paused"); err != nil {
+		if err := c.wait(setupCtx, request, "paused"); err != nil {
 			return err
 		}
 		confirmation.setPhase("bluetooth_pairing")
-		if err := pair(ctx, phone, confirmation); err != nil {
+		if err := pair(setupCtx, phone, confirmation); err != nil {
 			return err
 		}
-		if err := ctx.Err(); err != nil {
+		if err := setupCtx.Err(); err != nil {
 			return err
 		}
 		if confirmation.handoff != nil {
 			confirmation.setPhase("network_handoff")
-			if err := confirmation.handoff.BeginCarPlayHandoff(ctx, request.RequestID, phone, confirmation.handoffPlan); err != nil {
+			if err := confirmation.handoff.BeginCarPlayHandoff(setupCtx, request.RequestID, phone, confirmation.handoffPlan); err != nil {
 				return err
 			}
 		}
 		request.Action = "enroll"
+		videoCtx := ctx
+		if confirmation.incoming {
+			// 准备耗时不挤占手机系统确认及新视频预算，总截止仍由同一父任务限制。
+			if err := setupCtx.Err(); err != nil {
+				return err
+			}
+			videoDeadline := phaseDeadline(deadline, time.Now(), 120*time.Second)
+			request.ExpiresAtMS = videoDeadline.UnixMilli()
+			var cancelVideo context.CancelFunc
+			videoCtx, cancelVideo = context.WithDeadline(ctx, videoDeadline)
+			defer cancelVideo()
+		}
 		confirmation.setPhase("waiting_video")
 		if err := c.write(request); err != nil {
 			return err
 		}
-		return c.wait(ctx, request, "video_verified")
+		return c.wait(videoCtx, request, "video_verified")
 	}
+}
+
+func phaseDeadline(total, now time.Time, budget time.Duration) time.Time {
+	if phase := now.Add(budget); phase.Before(total) {
+		return phase
+	}
+	return total
 }
 
 func (c *serviceClient) release(ctx context.Context, request serviceRequest) error {

@@ -45,6 +45,7 @@ type Confirmation struct {
 	status          ConfirmationStatus
 	served          bool
 	decision        chan string
+	createdAt       time.Time
 }
 
 func (c *Confirmation) releaseIncoming(ctx context.Context) error {
@@ -71,7 +72,11 @@ func (c *Confirmation) failedPhase() string {
 
 // NewConfirmation 要求明确的限时窗口，避免管理页离开后无限等待。
 func NewConfirmation(parent context.Context, window time.Duration) (*Confirmation, error) {
-	if parent == nil || window <= 0 || window > 120*time.Second {
+	return newConfirmation(parent, window, 120*time.Second)
+}
+
+func newConfirmation(parent context.Context, window, limit time.Duration) (*Confirmation, error) {
+	if parent == nil || window <= 0 || window > limit {
 		return nil, errors.New("配对确认窗口必须介于 0 与 120 秒之间")
 	}
 	if err := parent.Err(); err != nil {
@@ -85,7 +90,8 @@ func NewConfirmation(parent context.Context, window time.Duration) (*Confirmatio
 	deadline, _ := ctx.Deadline()
 	return &Confirmation{
 		ctx: ctx, cancel: cancel,
-		status: ConfirmationStatus{RequestID: hex.EncodeToString(nonce[:]), State: "waiting_native", ExpiresAt: deadline},
+		createdAt: time.Now(),
+		status:    ConfirmationStatus{RequestID: hex.EncodeToString(nonce[:]), State: "waiting_native", ExpiresAt: deadline},
 		// 只有一次合法提交；缓冲让 HTTP 确认不依赖接收端读取的时机。
 		decision: make(chan string, 1),
 	}, nil

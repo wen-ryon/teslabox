@@ -97,7 +97,11 @@ func (m *Manager) startWithRelease(parent context.Context, phone string, window 
 		return TaskStatus{}, ErrBusy
 	}
 	ctx, cancel := context.WithTimeout(parent, window)
-	confirmation, err := NewConfirmation(ctx, window)
+	limit := 120 * time.Second
+	if len(incoming) == 1 && incoming[0] {
+		limit = 180 * time.Second
+	}
+	confirmation, err := newConfirmation(ctx, window, limit)
 	if err != nil {
 		cancel()
 		return TaskStatus{}, err

@@ -906,7 +906,7 @@ def run(settings, runtime, stopped):
                         publish_proxy_token(runtime, folder / "browser-token")
                         receiver_arguments = (receiver_arguments_for(node, root, binary, folder, listen, peer_network,
                             paired_phone, settings.get("phone_bt", ""), authentication["protocol"],
-                            enrollment_seconds=max(1, min(120, int(provisioning.deadline - time.monotonic()) + 1)) if provisioning.active and provisioning.state["state"] == "enrolling" else None,
+                            enrollment_seconds=provisioning.enrollment_seconds() if provisioning.active and provisioning.state["state"] == "enrolling" else None,
                             identity_directory=identity_directory) if paired_phone else None)
                         receiver = replace_phone_receiver(None, children, receiver_arguments,
                             identity_directory, stopped)

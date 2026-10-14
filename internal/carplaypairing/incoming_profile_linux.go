@@ -31,6 +31,10 @@ type incomingProfile struct {
 	closing         bool
 	removing        bool
 	operation       chan struct{}
+	acceptedAt      time.Time
+	refreshAttempt  uint64
+	refreshCancel   context.CancelFunc
+	refreshWorkers  sync.WaitGroup
 }
 
 func (p *incomingProfile) beginHandoff(device dbus.ObjectPath) error {
@@ -40,6 +44,7 @@ func (p *incomingProfile) beginHandoff(device dbus.ObjectPath) error {
 		return errors.New("首次登记 Profile 已不可交接")
 	}
 	p.handoff, p.accepting = true, false
+	p.cancelRefreshLocked()
 	p.handoffDevice = device
 	return nil
 }
@@ -80,11 +85,16 @@ func (p *incomingProfile) dropConnection() {
 func (p *incomingProfile) cancelConnection() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// 与新连接接收使用同一锁顺序，旧 Cancel 不能在释放 FD 后清掉新一轮 pending。
+	p.agent.mu.Lock()
+	defer p.agent.mu.Unlock()
+	p.agent.pending = ""
 	p.leaseGeneration++
 	p.closeConnectionLocked()
 }
 
 func (p *incomingProfile) closeConnectionLocked() {
+	p.cancelRefreshLocked()
 	if p.file >= 0 {
 		_ = unix.Close(p.file)
 		p.file = -1
@@ -130,7 +140,7 @@ func (p *incomingProfile) NewConnection(sender dbus.Sender, device dbus.ObjectPa
 	}
 	p.mu.Lock()
 	accepting := p.accepting
-	late := p.handoff && !p.closing && p.handoffDevice == device
+	late := p.handoff && !p.closing && !p.released && !p.removing && p.handoffDevice == device
 	generation := p.generation
 	p.mu.Unlock()
 	if !(accepting && p.agent.manager.incomingAvailable()) && !(late && p.agent.manager.incomingHandoffActive(device)) {
@@ -152,7 +162,7 @@ func (p *incomingProfile) NewConnection(sender dbus.Sender, device dbus.ObjectPa
 	activeHandoff := p.agent.manager.incomingHandoffActive(device)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	late = p.handoff && !p.closing && p.handoffDevice == device
+	late = p.handoff && !p.closing && !p.released && !p.removing && p.handoffDevice == device
 	if !(p.accepting && available) && !(late && activeHandoff) || p.file >= 0 || p.generation != generation || p.agent.ctx.Err() != nil {
 		return rejected()
 	}
@@ -163,6 +173,7 @@ func (p *incomingProfile) NewConnection(sender dbus.Sender, device dbus.ObjectPa
 	}
 	p.device, p.file, owned = device, file, true
 	p.generation++
+	p.acceptedAt = time.Now()
 	p.agent.logCallback("ProfileNewConnection", "waiting_services")
 	return nil
 }
@@ -175,9 +186,7 @@ func (p *incomingProfile) RequestDisconnection(sender dbus.Sender, device dbus.O
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.device == device && p.file >= 0 {
-		_ = unix.Close(p.file)
-		p.file, p.device = -1, ""
-		p.generation++
+		p.closeConnectionLocked()
 	}
 	return nil
 }
@@ -190,10 +199,15 @@ func (p *incomingProfile) Release(sender dbus.Sender) *dbus.Error {
 	p.mu.Lock()
 	p.accepting, p.registered = false, false
 	p.released = true
+	p.closing, p.handoff = true, false
+	p.handoffDevice = ""
 	p.leaseGeneration++
 	p.removing = true
+	p.agent.mu.Lock()
+	p.agent.pending = ""
+	p.agent.mu.Unlock()
+	p.closeConnectionLocked()
 	p.mu.Unlock()
-	p.dropConnection()
 	return nil
 }
 
@@ -277,11 +291,15 @@ func (p *incomingProfile) unregister(ctx context.Context) error {
 	p.mu.Lock()
 	p.accepting = false
 	p.closing = true
+	p.cancelRefreshLocked()
 	p.generation++
 	p.leaseGeneration++
 	registered := p.registered
 	removing := p.removing
 	p.mu.Unlock()
+	if err := p.waitRefresh(ctx); err != nil {
+		return err
+	}
 	if !registered && !removing {
 		p.dropConnection()
 		p.mu.Lock()

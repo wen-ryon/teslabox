@@ -102,11 +102,27 @@ func (a *incomingAgent) authorize(sender dbus.Sender, path dbus.ObjectPath) *dbu
 	if string(sender) != a.owner || a.ctx.Err() != nil || !a.manager.incomingAvailable() {
 		return rejected()
 	}
+	var lease uint64
+	if a.profile != nil {
+		a.profile.mu.Lock()
+		lease = a.profile.leaseGeneration
+		a.profile.mu.Unlock()
+	}
 	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 	defer cancel()
 	props, err := phoneProperties(ctx, a.conn, a.owner, path)
 	if err != nil || incomingPhone(path, props) == "" {
 		return rejected()
+	}
+	if a.profile != nil {
+		available := a.manager.incomingAvailable()
+		a.profile.mu.Lock()
+		defer a.profile.mu.Unlock()
+		// 等待属性期间可能已取消或撤销广播；不能用迟到的授权结果复活旧 pending。
+		if !available || a.ctx.Err() != nil || a.profile.leaseGeneration != lease ||
+			!a.profile.accepting || a.profile.released || a.profile.closing || a.profile.removing {
+			return rejected()
+		}
 	}
 	return a.recordPending(path)
 }
@@ -208,10 +224,11 @@ func (a *incomingAgent) Cancel(sender dbus.Sender) *dbus.Error {
 	}
 	if a.profile != nil {
 		a.profile.cancelConnection()
+	} else {
+		a.mu.Lock()
+		a.pending = ""
+		a.mu.Unlock()
 	}
-	a.mu.Lock()
-	a.pending = ""
-	a.mu.Unlock()
 	a.logCallback("Cancel", "cleared")
 	return nil
 }
@@ -236,7 +253,7 @@ func (m *Manager) startIncomingWithRelease(ctx context.Context, phone string, re
 		m.failIncoming(ctx, phone, "network_handoff")
 		return TaskStatus{}, err
 	}
-	return m.startWithRelease(ctx, phone, 120*time.Second, plan, release, true)
+	return m.startWithRelease(ctx, phone, 180*time.Second, plan, release, true)
 }
 
 func (m *Manager) failIncoming(ctx context.Context, phone, phase string) {
@@ -455,6 +472,9 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 					logger.Info("CarPlay 蓝牙配对链路状态", "state", state, "paired", paired, "connected", connected, "services_resolved", resolved)
 					lastPendingState = state
 					lastPaired, lastConnected, lastResolved = paired, connected, resolved
+				}
+				if err == nil {
+					a.profile.refreshServices(pending, props, time.Now())
 				}
 				if err == nil && incomingLinkReady(props) {
 					phone := incomingPhone(pending, props)
