@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -14,6 +15,32 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("kernel_upgrade", Path(__file__).parents[1] / "deploy/scripts/teslabox-kernel-upgrade.py")
 k = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(k)
+
+
+class ModuleAbiTests(unittest.TestCase):
+    def test_target_context_is_used_before_target_modules_exist(self):
+        calls = []
+        def run(args):
+            calls.append(args)
+            return k.RELEASE + " SMP mod_unload modversions aarch64"
+        upgrade = k.KernelUpgrade({}, run=run, running="5.10.160-12-rk356x", boot_id="test")
+        module = Path("stage/modules/cfg80211.ko")
+        upgrade.verify_module_abi(module)
+        self.assertEqual(calls, [["modinfo", "-k", k.RELEASE, "-F", "vermagic", str(module)]])
+
+    def test_empty_or_wrong_abi_is_explicit_failure(self):
+        for output, message in (("", "信息为空"), (" \n\t", "信息为空"), ("5.10.160-12-rk356x SMP", "不匹配")):
+            with self.subTest(output=output):
+                upgrade = k.KernelUpgrade({}, run=lambda _: output, running="stock", boot_id="test")
+                with self.assertRaisesRegex(RuntimeError, message + ".*cfg80211"):
+                    upgrade.verify_module_abi("cfg80211")
+
+    def test_command_error_is_not_treated_as_valid_abi(self):
+        def run(args):
+            raise subprocess.CalledProcessError(1, args, stderr=b"module missing")
+        upgrade = k.KernelUpgrade({}, run=run, running="stock", boot_id="test")
+        with self.assertRaisesRegex(RuntimeError, "查询模块 ABI 失败.*mac80211"):
+            upgrade.verify_module_abi("mac80211")
 
 
 class ArchiveMenuTests(unittest.TestCase):
@@ -186,6 +213,26 @@ class TransactionTests(unittest.TestCase):
         u.commit(request)
         self.assertEqual(u.load()["phase"], "committed")
         self.assertFalse(u.request_path.exists())
+
+    def test_prepare_abi_failure_does_not_write_boot_or_transaction(self):
+        for output, message in (("", "信息为空"), ("other-kernel SMP", "不匹配")):
+            with self.subTest(output=output):
+                root, menu, u, request, calls = self.fixture()
+                original = menu.read_bytes()
+                run = u.run
+                def invalid(args):
+                    if args[0] == "modinfo":
+                        calls.append(args)
+                        return output
+                    return run(args)
+                u.run = invalid
+                with self.assertRaisesRegex(RuntimeError, message):
+                    u.prepare(request)
+                self.assertEqual(menu.read_bytes(), original)
+                self.assertFalse(u.journal.exists())
+                self.assertFalse(u.request_path.exists())
+                self.assertFalse(u.before.exists())
+                self.assertFalse(any(command[0] == "dpkg" for command in calls))
 
     def test_each_install_failure_restores_old_default_and_keeps_request_from_success(self):
         for command in ("dpkg", "depmod", "update-initramfs", "u-boot-update"):

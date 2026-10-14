@@ -232,9 +232,7 @@ class KernelUpgrade:
                 selected = self.root / str(selected).lstrip("/")
             if RELEASE not in selected.parts:
                 raise RuntimeError("模块解析到了其他内核: " + module)
-            abi = self.run(["modinfo", "-k", RELEASE, "-F", "vermagic", module]).split()[0]
-            if abi != RELEASE:
-                raise RuntimeError("模块 ABI 不匹配: " + module)
+            self.verify_module_abi(module)
             if module == "8852be" and digest(regular(selected.resolve(strict=True))) != APFIX:
                 raise RuntimeError("最终解析的驱动不是 apfix6，可能被 DKMS 覆盖")
             if module == "btusb" and digest(regular(selected.resolve(strict=True))) != BTUSB:
@@ -256,6 +254,18 @@ class KernelUpgrade:
         if not frozen_image(regular(image.resolve(strict=True))) or digest(regular(dtb)) != DTB:
             raise RuntimeError("实际内核镜像或设备树不是冻结产物")
         return True
+
+    def verify_module_abi(self, module):
+        """固定目标内核上下文，防止原厂同名内建模块遮蔽暂存 ELF 信息。"""
+        try:
+            output = self.run(["modinfo", "-k", RELEASE, "-F", "vermagic", str(module)])
+        except (subprocess.SubprocessError, OSError, UnicodeError) as error:
+            raise RuntimeError("查询模块 ABI 失败（目标 " + RELEASE + "）: " + str(module)) from error
+        fields = output.split()
+        if not fields:
+            raise RuntimeError("模块 ABI 信息为空（目标 " + RELEASE + "）: " + str(module))
+        if fields[0] != RELEASE:
+            raise RuntimeError("模块 ABI 不匹配（目标 " + RELEASE + "）: " + str(module))
 
     def download(self):
         mkdir(self.base)
@@ -373,9 +383,7 @@ class KernelUpgrade:
             durable(p, content)
         for name in entries:
             if name.startswith("modules/"):
-                abi = self.run(["modinfo", "-F", "vermagic", str(stage / name)]).split()[0]
-                if abi != RELEASE:
-                    raise RuntimeError("归档驱动 ABI 不匹配")
+                self.verify_module_abi(stage / name)
         durable(self.before, old_menu)
         data = {"schema": 1, "release": RELEASE, "old_release": self.running, "boot_id": self.boot_id,
                 "request": request, "menu_sha256": digest(old_menu), "files_before": [],

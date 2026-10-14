@@ -240,6 +240,11 @@ jobs:
         run: |
           python3 scripts/test-kernel-upgrade.py -v 2>&1 | tee validation-logs/kernel-upgrade.log
           python3 scripts/test-kernel-bootstrap.py -v 2>&1 | tee validation-logs/kernel-bootstrap.log
+      - name: Real Bullseye kmod 28 staged module context
+        if: ${{ !cancelled() }}
+        # 只读挂载源码；depmod 仅处理容器临时根，不加载模块，不操作宿主内核。
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" -w /src debian:bullseye-slim sh -ec 'apt-get -o Dir::Etc::sourcelist=/src/scripts/kernel-modinfo-bullseye.list -o Dir::Etc::sourceparts=- update && apt-get -o Dir::Etc::sourcelist=/src/scripts/kernel-modinfo-bullseye.list -o Dir::Etc::sourceparts=- install -y --no-install-recommends python3 kmod && python3 scripts/test-kernel-modinfo-context.py' 2>&1 | tee validation-logs/kernel-modinfo-context.log
       - name: Preserve transaction evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

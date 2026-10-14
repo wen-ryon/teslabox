@@ -1,0 +1,2 @@
+# 只用于隔离回归容器，避免默认安全仓生命周期干扰固定 kmod 28 测试。
+deb https://deb.debian.org/debian bullseye main
