@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -199,19 +201,51 @@ func TestUpdaterRealSystemdStartConsumesSinglePermission(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
+	installed, err := installedProgramIdentity(cfg.TargetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execGate := filepath.Join(cfg.BackupDir, "allow-exec")
 	err = authorizedStart(ctx, cfg, func() error {
 		out, err := exec.CommandContext(ctx, "systemd-run", "--unit="+unit, "--property=Type=simple", "--property=Restart=no",
 			"--property=ExecStartPre="+testProgram+" -test.run=^TestUpdaterSystemdGuardProcess$",
 			"--property=Environment=GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted TESLABOX_TEST_GUARD_CONFIG="+configPath,
-			cfg.TargetPath, "60").CombinedOutput()
+			"/bin/sh", "-c", `while ! test -f "$2"; do sleep 0.01; done; exec "$1" 60`, "teslabox-ci", cfg.TargetPath, execGate).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("隔离 systemd 启动失败: %w: %s", err, out)
 		}
-		_, err = verifyRunningProgram(ctx, unit, cfg.TargetPath)
+		// 用受控 exec 门闩真实复现 Type=simple 的启动过渡，避免依赖调度时机才能覆盖等待。
+		observedTransition := false
+		_, err = waitForProgramIdentity(ctx, 5*time.Second, 25*time.Millisecond, func(checkCtx context.Context) (string, error) {
+			pid, checkErr := verifyRunningProgramIdentity(checkCtx, unit, cfg.TargetPath, installed)
+			if !observedTransition {
+				logSystemdProgramIdentity(t, checkCtx, unit, cfg.TargetPath)
+				if checkErr == nil || checkErr.Error() != "运行进程不是本次安装的程序" {
+					t.Fatalf("exec 门闩打开前必须观测真实错误 inode: pid=%s err=%v", pid, checkErr)
+				}
+				observedTransition = true
+				if err := durableFile(execGate, []byte("allow\n"), 0o600); err != nil {
+					return "", err
+				}
+			}
+			return pid, checkErr
+		})
+		logSystemdProgramIdentity(t, ctx, unit, cfg.TargetPath)
 		return err
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	wrongPath := filepath.Join(cfg.BackupDir, "wrong-program")
+	if err := durableFile(wrongPath, program, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrongIdentity, err := installedProgramIdentity(wrongPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyRunningProgramIdentity(ctx, unit, cfg.TargetPath, wrongIdentity); err == nil {
+		t.Fatal("不能接受内容相同但 inode 不同的程序")
 	}
 	pid, err := verifyRunningProgram(ctx, unit, cfg.TargetPath)
 	if err != nil {
@@ -224,5 +258,31 @@ func TestUpdaterRealSystemdStartConsumesSinglePermission(t *testing.T) {
 	after, err := verifyRunningProgram(ctx, unit, cfg.TargetPath)
 	if err != nil || after != pid {
 		t.Fatalf("重复 start 改变主进程: %s -> %s: %v", pid, after, err)
+	}
+}
+
+func logSystemdProgramIdentity(t *testing.T, ctx context.Context, unit, target string) {
+	t.Helper()
+	pidBytes, err := exec.CommandContext(ctx, "systemctl", "show", unit, "--property=MainPID", "--value").Output()
+	if err != nil {
+		t.Logf("identity diagnostic MainPID error: %v", err)
+		return
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	exePath := filepath.Join("/proc", pid, "exe")
+	exeLink, linkErr := os.Readlink(exePath)
+	t.Logf("identity diagnostic MainPID=%s exe=%q readlink_error=%v", pid, exeLink, linkErr)
+	for _, path := range []string{target, exePath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Logf("identity diagnostic path=%q stat_error=%v", path, err)
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Logf("identity diagnostic path=%q stat_type=%T", path, info.Sys())
+			continue
+		}
+		t.Logf("identity diagnostic path=%q device=%d inode=%d", path, stat.Dev, stat.Ino)
 	}
 }

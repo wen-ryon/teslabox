@@ -142,6 +142,8 @@ jobs:
           required += ['TestRestoreRetriesTargetDirectorySync', 'TestCommitSyncAndStopFailureRejectsStartAfterUnlock', 'TestRecoverNonterminalCommitIsolation', 'TestRecoverRejectsInvalidCommitIsolation', 'TestCommitCleanupFailureDoesNotRollbackCommittedState']
           required += ['TestForwardBackupComesFromRealInstallAndPreservesOlderPrevious', 'TestForwardBackupSecondInstallPublishesImmediatePredecessor', 'TestForwardBackupDirectorySyncFailureNeverWritesCandidate', 'TestForwardBackupRejectsCorruptBeforeZero', 'TestForwardBackupRejectsUnsafeExistingPrevious', 'TestForwardBackupOwnerGuardRejectsForeignMetadata']
           required += ['TestForwardBackupRejectsUnsafeExistingPrevious/' + kind for kind in ('symlink', 'hardlink', 'writable', 'writable_parent', 'foreign_owner')]
+          required += ['TestWaitForProgramIdentityAcceptsOnlyCompletedExecution', 'TestWaitForProgramIdentityRejectsPersistentWrongProgram', 'TestWaitForProgramIdentityUsesParentDeadline', 'TestWaitForProgramIdentityDoesNotAcceptLateSuccess', 'TestWaitForProgramIdentityDoesNotCheckExpiredContext', 'TestProgramHealthRetainsStrictIdentity', 'TestProgramHealthDoesNotRequestAfterCancellation', 'TestInstalledProgramIdentityRejectsNonRegularTarget']
+          required += ['TestProgramHealthRetainsStrictIdentity/' + case for case in ('same_pid', 'old_health_pid', 'missing_health_pid', 'pid_changed', 'wrong_executable', 'canceled_final_check')]
           for name in required:
               assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), f'{name} did not execute and pass'
           PY
@@ -155,7 +157,17 @@ jobs:
       - name: Isolated systemd start permission and process identity
         if: ${{ !cancelled() }}
         # 只创建唯一命名的临时 sleep 测试服务，绝不启动 teslabox.service。
-        run: sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted TESLABOX_TEST_SYSTEMD=1 go test -count=1 -run '^TestUpdaterRealSystemdStartConsumesSinglePermission$' -v ./internal/updater 2>&1 | tee validation-logs/update-systemd.log
+        run: |
+          sudo env PATH="$PATH" GOTOOLCHAIN=local CGO_ENABLED=1 GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted TESLABOX_TEST_SYSTEMD=1 go test -count=5 -json -run '^TestUpdaterRealSystemdStartConsumesSinglePermission$' ./internal/updater 2>&1 | tee validation-logs/update-systemd.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('validation-logs/update-systemd.log').read_text().splitlines() if line.startswith('{')]
+          name = 'TestUpdaterRealSystemdStartConsumesSinglePermission'
+          assert sum(e.get('Test') == name and e.get('Action') == 'run' for e in events) == 5, 'Real simple startup did not execute five times'
+          assert sum(e.get('Test') == name and e.get('Action') == 'pass' for e in events) == 5, 'Real simple startup did not pass five times'
+          assert not any(e.get('Test') == name and e.get('Action') in ('fail', 'skip') for e in events), 'Real simple startup failed or skipped'
+          PY
       - name: CarPlay fcntl activation and recovery
         if: ${{ !cancelled() }}
         run: python3 -m unittest discover -s internal/carplaybundle -p 'test_runtime_*.py' -v 2>&1 | tee validation-logs/carplay-transactions.log

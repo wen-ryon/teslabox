@@ -263,26 +263,71 @@ func restartAndWaitHealthy(ctx context.Context, service, healthURL, target strin
 	if healthURL != "http://127.0.0.1/healthz" {
 		return errors.New("健康检查地址无效")
 	}
+	installed, err := installedProgramIdentity(target)
+	if err != nil {
+		return err
+	}
 	if output, err := exec.CommandContext(ctx, "systemctl", "start", service).CombinedOutput(); err != nil {
 		return fmt.Errorf("重启服务: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	pid, err := verifyRunningProgram(ctx, service, target)
+	verify := func(ctx context.Context) (string, error) {
+		return verifyRunningProgramIdentity(ctx, service, target, installed)
+	}
+	// Type=simple 在 exec 完成前即可返回；只短暂等待同一安装文件，不能把临时进程当作新版。
+	pid, err := waitForProgramIdentity(ctx, 5*time.Second, 25*time.Millisecond, verify)
 	if err != nil {
 		return err
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
+	return waitForProgramHealth(ctx, client, healthURL, pid, requireProcessHeader, verify)
+}
+
+func waitForProgramIdentity(ctx context.Context, timeout, interval time.Duration, verify func(context.Context) (string, error)) (string, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		if err := waitCtx.Err(); err != nil {
+			return "", fmt.Errorf("等待安装程序启动: %w", errors.Join(err, lastErr))
+		}
+		pid, err := verify(waitCtx)
+		// 即使检查已返回成功，取消或超时后也不能继续健康验收。
+		if cause := waitCtx.Err(); cause != nil {
+			return "", fmt.Errorf("等待安装程序启动: %w", errors.Join(cause, err))
+		}
+		if err == nil {
+			return pid, nil
+		}
+		lastErr = err
+		select {
+		case <-waitCtx.Done():
+			return "", fmt.Errorf("等待安装程序启动: %w", errors.Join(waitCtx.Err(), lastErr))
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForProgramHealth(ctx context.Context, client *http.Client, healthURL, pid string, requireProcessHeader bool, verify func(context.Context) (string, error)) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("等待新版健康检查: %w", err)
+		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 		if err == nil {
 			response, requestErr := client.Do(request)
 			if requestErr == nil {
 				response.Body.Close()
 				if response.StatusCode == http.StatusOK && (!requireProcessHeader || response.Header.Get("X-TeslaBox-Process") == pid) {
-					actual, err := verifyRunningProgram(ctx, service, target)
+					actual, err := verify(ctx)
 					if err != nil {
 						return err
+					}
+					if err := ctx.Err(); err != nil {
+						return fmt.Errorf("等待新版健康检查: %w", err)
 					}
 					if actual != pid {
 						return errors.New("健康检查期间主进程已变化")
@@ -293,13 +338,32 @@ func restartAndWaitHealthy(ctx context.Context, service, healthURL, target strin
 		}
 		select {
 		case <-ctx.Done():
-			return errors.New("等待新版健康检查超时")
+			return fmt.Errorf("等待新版健康检查: %w", ctx.Err())
 		case <-ticker.C:
 		}
 	}
 }
 
 func verifyRunningProgram(ctx context.Context, service, target string) (string, error) {
+	installed, err := installedProgramIdentity(target)
+	if err != nil {
+		return "", err
+	}
+	return verifyRunningProgramIdentity(ctx, service, target, installed)
+}
+
+func installedProgramIdentity(target string) (os.FileInfo, error) {
+	installed, err := os.Lstat(target)
+	if err != nil {
+		return nil, err
+	}
+	if !installed.Mode().IsRegular() {
+		return nil, errors.New("安装目标不是普通程序文件")
+	}
+	return installed, nil
+}
+
+func verifyRunningProgramIdentity(ctx context.Context, service, target string, installed os.FileInfo) (string, error) {
 	out, err := exec.CommandContext(ctx, "systemctl", "show", service, "--property=MainPID", "--value").Output()
 	if err != nil {
 		return "", err
@@ -317,11 +381,11 @@ func verifyRunningProgram(ctx context.Context, service, target string) (string, 
 	if err != nil {
 		return "", err
 	}
-	installed, err := os.Lstat(target)
+	current, err := os.Lstat(target)
 	if err != nil {
 		return "", err
 	}
-	if !installed.Mode().IsRegular() || !os.SameFile(executable, installed) {
+	if !current.Mode().IsRegular() || !os.SameFile(current, installed) || !os.SameFile(executable, installed) {
 		return "", errors.New("运行进程不是本次安装的程序")
 	}
 	return pid, nil
