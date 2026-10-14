@@ -1,2 +1,3 @@
 # 只用于隔离回归容器，避免默认安全仓生命周期干扰固定 kmod 28 测试。
-deb https://deb.debian.org/debian bullseye main
+# slim 初始镜像可能不带 CA 包；仍强制 APT 验证 Debian 仓库签名。
+deb http://deb.debian.org/debian bullseye main
