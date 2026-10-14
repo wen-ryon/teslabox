@@ -88,34 +88,51 @@ func TestForwardGoFailureRestoresMainStateAndActualCarPlayConfiguration(t *testi
 	cfg, request, pkg, python := carPlayForwardFixture(t)
 	before, _ := os.ReadFile(cfg.TargetPath)
 	starts := 0
+	healthFailure := errors.New("injected candidate health failure")
+	activated, migratedState, injected, restored := false, false, false, false
+	var unexpected error
 	err := transactionalInstall(t.Context(), cfg, request, pkg, installOperations{
 		stop: func(context.Context) error { return nil },
 		start: func(context.Context) error {
 			starts++
 			if starts == 1 {
 				if err := python("recover_forward"); err != nil {
+					unexpected = err
 					return err
 				}
 				if err := python("activate"); err != nil {
+					unexpected = err
 					return err
 				}
+				activated = true
 				exporter, err := media.NewExporter(unusedExportRunner{}, media.ExportConfig{FFmpegPath: "/opt/ffmpeg", OutputDir: filepath.Join(filepath.Dir(pkg), "exports"), StatePath: cfg.ExportStatePath, QueueSize: 1})
 				if err != nil {
+					unexpected = err
 					return err
 				}
 				if _, err = exporter.UpdateSettings(media.ExportSettings{RetainCount: 3}); err != nil {
+					unexpected = err
 					return err
 				}
 				migrated, _ := os.ReadFile(cfg.ExportStatePath)
 				if !bytes.Contains(migrated, []byte(`"version":2`)) {
 					t.Fatal("没有实际导出状态迁移")
 				}
-				return errors.New("injected candidate health failure")
+				migratedState, injected = true, true
+				return healthFailure
 			}
-			return python("recover_rollback")
+			if err := python("recover_rollback"); err != nil {
+				unexpected = err
+				return err
+			}
+			restored = true
+			return nil
 		},
 	})
-	if err == nil || starts != 2 {
+	if unexpected != nil {
+		t.Fatal("联动中出现非预期错误，不能算预期回滚通过", unexpected)
+	}
+	if !errors.Is(err, healthFailure) || starts != 2 || !activated || !migratedState || !injected || !restored {
 		t.Fatal("候选失败未执行真实回滚", err, starts)
 	}
 	after, _ := os.ReadFile(cfg.TargetPath)

@@ -33,6 +33,7 @@ if action == "setup":
     identity.joinpath("livi-reference-state.json").chmod(0o600)
     settings = dict(root=str(root / "opt/legacy"), hardware_config=str(root / recovery.TARGETS["hardware"]),
                     binary_sha256="a" * 64, node_sha256="b" * 64, certificate_sha256="c" * 64,
+                    ap_uuid="11111111-1111-4111-8111-111111111111",
                     phone_bt="AA:BB:CC:DD:EE:01", vehicle_channels=[6, 149],
                     ap_interface="ap0", upstream_interface="wlan0")
     hardware = dict(mfi=dict(transport="ch341", usb_bus=None, usb_address=None))
