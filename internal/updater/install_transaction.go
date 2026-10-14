@@ -168,6 +168,9 @@ func transactionalInstallWithSync(ctx context.Context, config HelperConfig, requ
 	if err != nil {
 		return recoverPreparationFailure(config, dir, targets, ops, err)
 	}
+	if err := tx.publishPreviousBackup(dir, config, syncDir); err != nil {
+		return recoverPreparationFailure(config, dir, targets, ops, err)
+	}
 	rollback := func(cause error) error {
 		recoveryCtx, done := context.WithTimeout(context.Background(), config.Timeout+30*time.Second)
 		defer done()

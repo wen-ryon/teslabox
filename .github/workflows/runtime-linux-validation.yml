@@ -140,6 +140,8 @@ jobs:
           events = [json.loads(line) for line in Path('validation-logs/transactions.jsonl').read_text().splitlines() if line.startswith('{')]
           required = ['TestMediaVersionsRollbackAndLegacyRetention', 'TestMediaFailedPreflightPreservesActive', 'TestMediaExistingVersionRejectsChangedLibraryAlias', 'TestStageArchiveRejectsOtherOwnedVersionInRootInstaller', 'TestTransactionLinuxLockAndMetadata', 'TestTransactionLinuxLockAndMetadata/other_owner', 'TestRecoverBeforeStartAfterInterruptedActivation', 'TestTransactionalInstallLegacyExporterFailure']
           required += ['TestRestoreRetriesTargetDirectorySync', 'TestCommitSyncAndStopFailureRejectsStartAfterUnlock', 'TestRecoverNonterminalCommitIsolation', 'TestRecoverRejectsInvalidCommitIsolation', 'TestCommitCleanupFailureDoesNotRollbackCommittedState']
+          required += ['TestForwardBackupComesFromRealInstallAndPreservesOlderPrevious', 'TestForwardBackupSecondInstallPublishesImmediatePredecessor', 'TestForwardBackupDirectorySyncFailureNeverWritesCandidate', 'TestForwardBackupRejectsCorruptBeforeZero', 'TestForwardBackupRejectsUnsafeExistingPrevious', 'TestForwardBackupOwnerGuardRejectsForeignMetadata']
+          required += ['TestForwardBackupRejectsUnsafeExistingPrevious/' + kind for kind in ('symlink', 'hardlink', 'writable', 'writable_parent', 'foreign_owner')]
           for name in required:
               assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), f'{name} did not execute and pass'
           PY
@@ -157,6 +159,50 @@ jobs:
       - name: CarPlay fcntl activation and recovery
         if: ${{ !cancelled() }}
         run: python3 -m unittest discover -s internal/carplaybundle -p 'test_runtime_*.py' -v 2>&1 | tee validation-logs/carplay-transactions.log
+      - name: CarPlay paired-helper baseline reproduces false rollback
+        if: ${{ !cancelled() }}
+        env:
+          TESLABOX_CARPLAY_OTA_TEST_ROOT: ${{ github.workspace }}
+        # 仅运行隔离根中的真实文件事务；失败必须来自旧恢复器误删，不能由编译错误代替。
+        run: |
+          baseline=9a413d776f1547761d16dde2ebdf3c0d120093f9
+          git cat-file -e "$baseline^{commit}"
+          git diff --exit-code "$baseline" HEAD -- internal/carplaybundle/runtime_recovery.py internal/carplaybundle/runtime_install.py
+          legacy="$(mktemp -d "$RUNNER_TEMP/teslabox-carplay-forward.XXXXXX")"
+          git worktree add --detach "$legacy" "$baseline"
+          cp internal/updater/forward_backup_integration_linux_test.go "$legacy/internal/updater/forward_backup_integration_linux_test.go"
+          set +e
+          (cd "$legacy" && go test -tags integration -count=1 -json -run '^TestForwardGoInstallRetainsCarPlayThroughOldRecoveryAndNewActivation$' ./internal/updater) 2>&1 | tee validation-logs/carplay-forward-baseline.jsonl
+          red_status=$?
+          set -e
+          test "$red_status" -ne 0
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('validation-logs/carplay-forward-baseline.jsonl').read_text().splitlines() if line.startswith('{')]
+          name = 'TestForwardGoInstallRetainsCarPlayThroughOldRecoveryAndNewActivation'
+          assert any(e.get('Test') == name and e.get('Action') == 'run' for e in events), 'Baseline reproduction did not run'
+          assert any(e.get('Test') == name and e.get('Action') == 'fail' for e in events), 'Baseline did not reproduce the missing forward backup'
+          output = ''.join(e.get('Output', '') for e in events)
+          assert '旧恢复器误删或改写本机组件：unit' in output, 'Baseline failed for a different reason'
+          assert 'build failed' not in output and 'undefined:' not in output, 'Compilation failure is not a reproduction'
+          PY
+      - name: CarPlay paired-helper forward and rollback integration
+        if: ${{ !cancelled() }}
+        env:
+          TESLABOX_CARPLAY_OTA_TEST_ROOT: ${{ github.workspace }}
+        # 必须逐项实际通过；合成字节仅作隔离事务夹具，不代表实机 OTA、蓝牙或视频验收。
+        run: |
+          go test -tags integration -count=1 -json -run '^TestForwardGo' ./internal/updater 2>&1 | tee validation-logs/carplay-forward-integration.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('validation-logs/carplay-forward-integration.jsonl').read_text().splitlines() if line.startswith('{')]
+          required = ['TestForwardGoInstallRetainsCarPlayThroughOldRecoveryAndNewActivation', 'TestForwardGoFailureRestoresMainStateAndActualCarPlayConfiguration', 'TestForwardGoPreparedPowerLossNeverRemovesOldComponent', 'TestForwardGoPublishedBeforeCandidatePowerLossKeepsOldComponent']
+          for name in required:
+              assert any(e.get('Test') == name and e.get('Action') == 'pass' for e in events), f'{name} did not execute and pass'
+          assert not any(e.get('Action') == 'skip' for e in events), 'Forward integration cannot be skipped'
+          PY
       - name: CarPlay enrollment budget without skipped tests
         if: ${{ !cancelled() }}
         # 确认阶段预算回归实际执行，不能因平台跳过或发现不到测试而显示成功。
