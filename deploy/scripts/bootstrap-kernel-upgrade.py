@@ -15,8 +15,14 @@ spec = importlib.util.spec_from_file_location("paired_bootstrap", Path(__file__)
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
 
-OLD_HELPERS = {b.OLD_HELPER_SHA256, "95910e01f198a9cb1f0a84110e7d6e4a6ce7588dcad83446b49effceb623817d"}
+OLD_HELPERS = {b.OLD_HELPER_SHA256, "95910e01f198a9cb1f0a84110e7d6e4a6ce7588dcad83446b49effceb623817d",
+               "a59c885f18edfbcad2a05f9e125698f3eaa78258627caf944a67f575b61fc660"}
 OLD_MAIN = "a73f067a7b231c45629f046f609a39494dbd1694e278b55d3e2d84de8813333d"
+# 只接替已审核的内核升级候选，不接受任意同版本或脏工作区产物。
+AUDITED_RC1_MAINS = {
+    "a446e06b338ff99f3f62719e007e8cbfb613c972d194023c7a5f5a89b3b8eec5",
+    "058c1369d46ed0b96971187a59b79ce2367511563dc073b02403ba1044944084",
+}
 INPUTS = {
     "teslabox-kernel-upgrade.py": "usr/local/libexec/teslabox-kernel-upgrade.py",
     "kernel-rc1.json": "usr/local/share/teslabox/kernel/rc1.json",
@@ -36,7 +42,7 @@ def install(root, source, expected, run):
     manifest = run([str(helper_source), "--kernel-manifest", str(source / "kernel-rc1.json")])
     policy = json.loads(manifest)
     main, _ = b.read_regular(root / "usr/local/bin/teslabox")
-    if b.digest(main) not in {OLD_MAIN, policy["main_sha256"]}:
+    if b.digest(main) not in {OLD_MAIN, policy["main_sha256"]} | AUDITED_RC1_MAINS:
         raise RuntimeError("主程序不是正式 0.1.31 或本次固定 RC1，未修改文件")
     lock = root / "var/lib/teslabox-system/update-backups/install.lock"
     b.durable_mkdir(lock.parent)

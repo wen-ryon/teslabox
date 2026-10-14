@@ -29,6 +29,13 @@ func TestVerifyKernelPolicy(t *testing.T) {
 		{name: "old RTL module", mutate: func(p *KernelPolicy) {
 			p.Files["modules/8852be.ko"] = KernelFile{SHA256: strings.Repeat("b", 64), Size: 1}
 		}, wantErr: true},
+		{name: "old kernel deb", mutate: func(p *KernelPolicy) {
+			p.Files["kernel.deb"] = KernelFile{SHA256: "18701fb698937b9627dff6f515fc543dc3556418ab59da92e06232ce9c645a88", Size: 10}
+		}, wantErr: true},
+		{name: "missing bluetooth module", mutate: func(p *KernelPolicy) { delete(p.Files, "modules/btusb.ko") }, wantErr: true},
+		{name: "old bluetooth module", mutate: func(p *KernelPolicy) {
+			p.Files["modules/btusb.ko"] = KernelFile{SHA256: "d1b340eae226d397d259b714bf6a940d242f14cba7e2ccd511135767a62a9b4f", Size: 105848}
+		}, wantErr: true},
 		{name: "http downgrade", mutate: func(p *KernelPolicy) { p.URL = "http://example.org/k.tar.gz" }, wantErr: true},
 		{name: "path traversal", mutate: func(p *KernelPolicy) { p.Files["../escape"] = KernelFile{SHA256: strings.Repeat("a", 64), Size: 1} }, wantErr: true},
 		{name: "oversized", mutate: func(p *KernelPolicy) { p.Size = 128 << 20 }, wantErr: true},
@@ -36,7 +43,7 @@ func TestVerifyKernelPolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			p := KernelPolicy{Schema: 1, Kind: "teslabox-kernel-dependency-v1", Version: KernelUpgradeVersion, Board: "radxa-rock-3a", Arch: "arm64", Release: kernelRelease,
 				MainSHA256: strings.Repeat("a", 64), URL: "https://example.org/kernel.tar.gz", SHA256: strings.Repeat("b", 64), Size: 100,
-				Files: map[string]KernelFile{"kernel.deb": {SHA256: "18701fb698937b9627dff6f515fc543dc3556418ab59da92e06232ce9c645a88", Size: 10},
+				Files: map[string]KernelFile{"kernel.deb": {SHA256: kernelDebDigest, Size: 10}, "modules/btusb.ko": {SHA256: btusbMT79xxDigest, Size: 1037880},
 					"modules/8852be.ko": {SHA256: apfix6Digest, Size: 20}, "modules/compat.ko": {SHA256: strings.Repeat("a", 64), Size: 10}, "licenses/LICENCE.mediatek": {SHA256: strings.Repeat("a", 64), Size: 10}}}
 			if test.mutate != nil {
 				test.mutate(&p)

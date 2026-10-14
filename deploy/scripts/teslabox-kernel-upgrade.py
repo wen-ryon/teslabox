@@ -18,6 +18,7 @@ import urllib.request
 RELEASE = "5.10.160-teslabox3"
 VERSION = "0.2.0-rc.1"
 APFIX = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
+BTUSB = "69c029c2b85261f5ee1b27921504a13009169615a4937880c38e3e48d2b74749"
 # Radxa 的内核 postinst 钩子可把冻结 deb 的 gzip 镜像解压为原始 Image。
 # 两种长度/摘要均从同一冻结 deb 核实，不能接受任意 gzip 或现场未知镜像。
 IMAGE_FORMS = {
@@ -27,7 +28,7 @@ IMAGE_FORMS = {
 DTB = "81d7869cffcef5b9f5a2e55294f3ffb253453228ecdf6406103de9f0c02bb31d"
 POLICY = "/usr/local/share/teslabox/kernel/rc1.json"
 HELPER = "/usr/local/libexec/teslabox-update-helper"
-MODULE_NAMES = {"8852be", "cfg80211", "mac80211", "compat", "mt7921e", "mt7921-common", "mt76", "mt76-connac-lib", "qrtr", "qrtr-mhi", "mhi"}
+MODULE_NAMES = {"8852be", "cfg80211", "mac80211", "compat", "mt7921e", "mt7921-common", "mt76", "mt76-connac-lib", "qrtr", "qrtr-mhi", "mhi", "btusb"}
 FIRMWARE_NAMES = {"BT_RAM_CODE_MT7922_1_1_hdr.bin", "WIFI_MT7922_patch_mcu_1_1_hdr.bin", "WIFI_RAM_CODE_MT7922_1.bin"}
 
 
@@ -160,7 +161,7 @@ class KernelUpgrade:
         result = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         return result.stdout.decode("utf-8", errors="strict").strip()
 
-    def load(self):
+    def load(self, allow_terminal_policy_change=False):
         if not self.journal.exists():
             return None
         data = json.loads(regular(self.journal))
@@ -168,9 +169,29 @@ class KernelUpgrade:
             "prepared", "installing", "awaiting_reboot", "boot_verified", "committed", "failed"
         }:
             raise RuntimeError("内核升级事务损坏，拒绝覆盖")
-        if data.get("policy_sha256") != digest(json.dumps(self.policy, sort_keys=True).encode()):
-            raise RuntimeError("跨重启内核依赖清单发生变化")
+        policy_sha = data.get("policy_sha256")
+        if not isinstance(policy_sha, str) or len(policy_sha) != 64 or any(c not in "0123456789abcdef" for c in policy_sha):
+            raise RuntimeError("内核升级事务政策摘要损坏，拒绝覆盖")
+        if policy_sha != digest(json.dumps(self.policy, sort_keys=True).encode()):
+            # 新候选只可接替已结束的事务；跨重启途中仍严格绑定原签名政策。
+            safe(self.request_path)
+            if not allow_terminal_policy_change or data["phase"] not in {"committed", "failed"} or self.request_path.exists():
+                raise RuntimeError("跨重启内核依赖清单发生变化")
         return data
+
+    def archive_terminal(self, data):
+        """整目录原子保留终态与旧回滚材料，不能删旧收据或拼接不完整历史。"""
+        safe(self.request_path)
+        if data["phase"] not in {"committed", "failed"} or self.request_path.exists():
+            raise RuntimeError("原内核事务或续装清理尚未结束，拒绝替换")
+        safe(self.base)
+        history = self.base.parent / ("kernel-upgrade-history-" + os.urandom(8).hex())
+        safe(history)
+        if history.exists():
+            raise RuntimeError("内核历史目录冲突，未修改旧事务")
+        os.rename(self.base, history)
+        sync_dir(history.parent)
+        return history
 
     def save(self, data, phase):
         data["phase"] = phase
@@ -183,6 +204,9 @@ class KernelUpgrade:
             allowed = {self.root / "lib/modules", self.root / "usr/lib/modules"}
             if modules not in allowed:
                 raise RuntimeError("模块根目录不是支持的 usrmerge 路径")
+            if name == "modules/btusb.ko":
+                # 与修订 DEB 的唯一路径一致；在 dpkg 改写前备份，失败可恢复原模块。
+                return modules / RELEASE / "kernel/drivers/bluetooth/btusb.ko"
             return modules / RELEASE / "updates/teslabox-wireless" / PurePosixPath(name).name
         if name.startswith("firmware/mediatek/") and PurePosixPath(name).name in FIRMWARE_NAMES and name.count("/") == 2:
             firmware = (self.root / "lib/firmware").resolve(strict=True)
@@ -213,9 +237,16 @@ class KernelUpgrade:
                 raise RuntimeError("模块 ABI 不匹配: " + module)
             if module == "8852be" and digest(regular(selected.resolve(strict=True))) != APFIX:
                 raise RuntimeError("最终解析的驱动不是 apfix6，可能被 DKMS 覆盖")
+            if module == "btusb" and digest(regular(selected.resolve(strict=True))) != BTUSB:
+                raise RuntimeError("最终解析的蓝牙驱动不是冻结 MT79xx 模块")
         loaded = self.root / "sys/module/8852be/version"
         if loaded.exists() and not loaded.read_text().strip().endswith("-tbxapfix6"):
             return False
+        bluetooth = self.root / "sys/module/btusb"
+        if bluetooth.exists():
+            version = bluetooth / "version"
+            if not version.is_file() or version.read_text().strip() != "0.8-tbxmt79xx1":
+                return False
         image = self.root / ("boot/vmlinuz-" + RELEASE)
         if not image.is_file() or not (self.root / ("boot/initrd.img-" + RELEASE)).is_file():
             raise RuntimeError("目标内核或 initramfs 缺失")
@@ -297,7 +328,7 @@ class KernelUpgrade:
     def prepare(self, request):
         if request["version"] != VERSION or request["sha256"] != self.policy["main_sha256"]:
             raise RuntimeError("内核依赖与升级主程序不匹配")
-        data = self.load()
+        data = self.load(allow_terminal_policy_change=True)
         if data and data["phase"] not in {"committed", "failed"}:
             if data["request"] != request:
                 raise RuntimeError("已有不同内核升级请求，不能覆盖")
@@ -318,6 +349,8 @@ class KernelUpgrade:
             ready = self.runtime_ok()
         except (FileNotFoundError, RuntimeError):
             ready = False
+        if data:
+            self.archive_terminal(data)
         if ready:
             # 已满足同一签名内核依赖时可复用，但仍需保存与本次程序事务绑定的请求。
             mkdir(self.base)
@@ -325,15 +358,6 @@ class KernelUpgrade:
                     "policy_sha256": digest(json.dumps(self.policy, sort_keys=True).encode()), "files_before": []}
             self.save(data, "boot_verified")
             return {"reboot_required": False}
-        if data:
-            history = self.base / ("history-" + os.urandom(8).hex())
-            history.mkdir(mode=0o700)
-            for name in ("transaction.json", "extlinux.before", "before", "before-boot"):
-                p = self.base / name
-                if p.exists():
-                    os.rename(p, history / name)
-            sync_dir(history)
-            sync_dir(self.base)
         if shutil.disk_usage(self.root / "boot").free < 256 << 20 or shutil.disk_usage(self.root / "var").free < 768 << 20:
             raise RuntimeError("内核安装和回滚备份空间不足")
         old_menu = regular(self.menu)

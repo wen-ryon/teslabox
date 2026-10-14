@@ -84,6 +84,20 @@ class MaintenanceTests(unittest.TestCase):
                     self.install(root, source, self.commands)
                 self.assertEqual(helper.read_bytes(), before)
 
+    def test_only_audited_rc1_main_can_receive_new_maintenance_inputs(self):
+        for audited in (True, False):
+            with self.subTest(audited=audited):
+                root, source, helper, main = self.fixture()
+                main.write_bytes(b"audited RC1" if audited else b"unknown RC1")
+                with patch.object(k, "AUDITED_RC1_MAINS", {k.b.digest(b"audited RC1")}):
+                    if audited:
+                        self.install(root, source, self.commands)
+                        self.assertEqual(main.read_bytes(), b"audited RC1")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "主程序不是"):
+                            self.install(root, source, self.commands)
+                        self.assertEqual(helper.read_bytes(), b"old helper")
+
 
 if __name__ == "__main__":
     unittest.main()

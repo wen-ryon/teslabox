@@ -105,7 +105,7 @@ class TransactionTests(unittest.TestCase):
             def command(args):
                 return "/" + run(args) if args[4] == "filename" else run(args)
             upgrade = k.KernelUpgrade({"files": {}}, root=root, run=command, running=k.RELEASE, boot_id="boot-2")
-            with patch.object(k, "IMAGE_FORMS", forms), patch.object(k, "APFIX", k.digest(b"8852be")), patch.object(k, "DTB", k.digest(b"frozen DTB")):
+            with patch.object(k, "IMAGE_FORMS", forms), patch.object(k, "APFIX", k.digest(b"8852be")), patch.object(k, "BTUSB", k.digest(b"btusb")), patch.object(k, "DTB", k.digest(b"frozen DTB")):
                 for data in (compressed, raw):
                     k.durable(image, data)
                     self.assertTrue(upgrade.runtime_ok())
@@ -117,6 +117,18 @@ class TransactionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "冻结产物"):
                     upgrade.runtime_ok()
                 k.durable(dtb, b"frozen DTB")
+                k.durable(modules["btusb"], b"old bluetooth")
+                with self.assertRaisesRegex(RuntimeError, "冻结 MT79xx"):
+                    upgrade.runtime_ok()
+                k.durable(modules["btusb"], b"btusb")
+                loaded = root / "sys/module/btusb/version"
+                k.durable(loaded, b"0.8")
+                self.assertFalse(upgrade.runtime_ok())
+                k.durable(loaded, b"0.8-tbxmt79xx1")
+                self.assertTrue(upgrade.runtime_ok())
+                loaded.unlink()
+                self.assertFalse(upgrade.runtime_ok())
+                loaded.parent.rmdir()
                 initrd.unlink()
                 with self.assertRaisesRegex(RuntimeError, "initramfs 缺失"):
                     upgrade.runtime_ok()
@@ -131,7 +143,7 @@ class TransactionTests(unittest.TestCase):
         (root / "lib/firmware").symlink_to("../usr/lib/firmware")
         menu = root / "boot/extlinux/extlinux.conf"
         menu.write_bytes(b"default old\nlabel old\n linux /boot/vmlinuz-old\n")
-        entries = {"kernel.deb": b"deb", "modules/8852be.ko": b"apfix6", "firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin": b"firmware", "licenses/LICENCE.mediatek": b"license"}
+        entries = {"kernel.deb": b"deb", "modules/8852be.ko": b"apfix6", "modules/btusb.ko": b"new bluetooth", "firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin": b"firmware", "licenses/LICENCE.mediatek": b"license"}
         archive = root / "input.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             for name, content in entries.items():
@@ -162,6 +174,8 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue((root / "lib").is_dir())
         self.assertTrue((root / "lib/modules").is_symlink())
         self.assertEqual(u.destination("modules/8852be.ko").read_bytes(), b"apfix6")
+        self.assertEqual(u.destination("modules/btusb.ko"), root / "usr/lib/modules" / k.RELEASE / "kernel/drivers/bluetooth/btusb.ko")
+        self.assertEqual(u.destination("modules/btusb.ko").read_bytes(), b"new bluetooth")
         count = len(calls)
         self.assertEqual(u.prepare(request), {"reboot_required": True})
         self.assertEqual(len(calls), count)
@@ -191,6 +205,21 @@ class TransactionTests(unittest.TestCase):
                 self.assertFalse(u.request_path.exists())
                 self.assertFalse(u.destination("modules/8852be.ko").exists())
 
+    def test_failed_install_restores_original_bluetooth_module(self):
+        root, menu, u, request, calls = self.fixture()
+        target = u.destination("modules/btusb.ko")
+        k.durable(target, b"original bluetooth", 0o644)
+        run = u.run
+        def fail(args):
+            if args[0] == "update-initramfs":
+                raise RuntimeError("initramfs failed")
+            return run(args)
+        u.run = fail
+        with self.assertRaisesRegex(RuntimeError, "initramfs failed"):
+            u.prepare(request)
+        self.assertEqual(target.read_bytes(), b"original bluetooth")
+        self.assertEqual(u.load()["phase"], "failed")
+
     def test_failed_boot_and_interrupted_install_do_not_upgrade_program(self):
         for phase in ("awaiting_reboot", "installing"):
             with self.subTest(phase=phase):
@@ -214,6 +243,74 @@ class TransactionTests(unittest.TestCase):
         u.policy["main_sha256"] = "b" * 64
         with self.assertRaisesRegex(RuntimeError, "清单发生变化"):
             u.load()
+        with self.assertRaisesRegex(RuntimeError, "清单发生变化"):
+            u.prepare({**request, "sha256": "b" * 64})
+        self.assertFalse(list(u.base.parent.glob("kernel-upgrade-history-*")))
+
+    def test_new_policy_archives_terminal_state_and_all_previous_material(self):
+        for phase, ready in (("committed", True), ("failed", False)):
+            with self.subTest(phase=phase):
+                root, menu, u, request, calls = self.fixture()
+                u.prepare(request)
+                data = u.load()
+                if phase == "failed":
+                    u.rollback(data)
+                else:
+                    u.boot_id = "boot-2"
+                    u.runtime_ok = lambda: True
+                    u.prepare(request)
+                    u.commit(request)
+                old_journal = u.journal.read_bytes()
+                old_menu = u.before.read_bytes()
+                k.durable(u.base / "before/private-original", b"old rollback material")
+                u.policy["main_sha256"] = "b" * 64
+                with self.assertRaisesRegex(RuntimeError, "清单发生变化"):
+                    u.load()
+                u.runtime_ok = lambda: ready
+                result = u.prepare({**request, "sha256": "b" * 64})
+                self.assertEqual(result, {"reboot_required": not ready})
+                archives = list(u.base.parent.glob("kernel-upgrade-history-*"))
+                self.assertEqual(len(archives), 1)
+                self.assertEqual((archives[0] / "transaction.json").read_bytes(), old_journal)
+                self.assertEqual((archives[0] / "extlinux.before").read_bytes(), old_menu)
+                self.assertEqual((archives[0] / "before/private-original").read_bytes(), b"old rollback material")
+                self.assertEqual(u.load()["request"]["sha256"], "b" * 64)
+
+    def test_terminal_policy_change_with_leftover_resume_request_is_rejected(self):
+        root, menu, u, request, calls = self.fixture()
+        u.prepare(request)
+        u.save(u.load(), "committed")
+        before = u.journal.read_bytes()
+        u.policy["main_sha256"] = "b" * 64
+        with self.assertRaisesRegex(RuntimeError, "清单发生变化"):
+            u.prepare({**request, "sha256": "b" * 64})
+        self.assertEqual(u.journal.read_bytes(), before)
+        self.assertTrue(u.request_path.exists())
+        self.assertFalse(list(u.base.parent.glob("kernel-upgrade-history-*")))
+
+    def test_invalid_terminal_policy_digest_cannot_be_archived_as_valid_history(self):
+        root, menu, u, request, calls = self.fixture()
+        u.prepare(request)
+        data = u.load()
+        u.rollback(data)
+        data["policy_sha256"] = "invalid"
+        u.save(data, "failed")
+        before = u.journal.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "政策摘要损坏"):
+            u.prepare(request)
+        self.assertEqual(u.journal.read_bytes(), before)
+        self.assertFalse(list(u.base.parent.glob("kernel-upgrade-history-*")))
+
+    def test_history_collision_preserves_terminal_transaction(self):
+        root, menu, u, request, calls = self.fixture()
+        u.prepare(request)
+        u.rollback(u.load())
+        before = u.journal.read_bytes()
+        history = u.base.parent / ("kernel-upgrade-history-" + "00" * 8)
+        history.mkdir(mode=0o700)
+        with patch.object(k.os, "urandom", return_value=b"\0" * 8), self.assertRaisesRegex(RuntimeError, "历史目录冲突"):
+            u.prepare(request)
+        self.assertEqual(u.journal.read_bytes(), before)
 
 
 if __name__ == "__main__":
