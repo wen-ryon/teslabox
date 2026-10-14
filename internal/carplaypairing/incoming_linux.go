@@ -68,6 +68,7 @@ type incomingAgent struct {
 	pending  dbus.ObjectPath
 	deadline time.Time
 	logger   *slog.Logger
+	profile  *incomingProfile
 }
 
 func (a *incomingAgent) logCallback(method, result string) {
@@ -88,6 +89,15 @@ func (m *Manager) incomingAvailable() bool {
 	return !busy && m.incomingReady != nil && m.incomingReady()
 }
 
+func (m *Manager) incomingHandoffActive(device dbus.ObjectPath) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.current == nil || !m.current.incoming || !m.current.status.Running || m.current.confirmation.ctx.Err() != nil {
+		return false
+	}
+	return device == dbus.ObjectPath("/org/bluez/hci0/dev_"+strings.ReplaceAll(m.current.status.PhoneID, ":", "_"))
+}
+
 func (a *incomingAgent) authorize(sender dbus.Sender, path dbus.ObjectPath) *dbus.Error {
 	if string(sender) != a.owner || a.ctx.Err() != nil || !a.manager.incomingAvailable() {
 		return rejected()
@@ -98,13 +108,35 @@ func (a *incomingAgent) authorize(sender dbus.Sender, path dbus.ObjectPath) *dbu
 	if err != nil || incomingPhone(path, props) == "" {
 		return rejected()
 	}
+	return a.recordPending(path)
+}
+
+func (a *incomingAgent) recordPending(path dbus.ObjectPath) *dbus.Error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.ctx.Err() != nil {
+		return rejected()
+	}
 	if a.pending != "" && a.pending != path && time.Now().Before(a.deadline) {
 		return rejected()
 	}
 	a.pending, a.deadline = path, time.Now().Add(120*time.Second)
 	return nil
+}
+
+func (a *incomingAgent) disconnected(device dbus.ObjectPath) {
+	if a.profile == nil {
+		return
+	}
+	generation := a.profile.connectionGeneration()
+	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
+	defer cancel()
+	props, err := phoneProperties(ctx, a.conn, a.owner, device)
+	if err != nil || props["Connected"].Value() == true {
+		return
+	}
+	a.profile.disconnected(device, generation)
+	a.logCallback("Disconnected", "cleared_current_generation")
 }
 
 // RequestAuthorization 仅接收开启功能且尚未登记时由手机主动发起的系统配对。
@@ -174,6 +206,9 @@ func (a *incomingAgent) Cancel(sender dbus.Sender) *dbus.Error {
 	if string(sender) != a.owner {
 		return rejected()
 	}
+	if a.profile != nil {
+		a.profile.cancelConnection()
+	}
 	a.mu.Lock()
 	a.pending = ""
 	a.mu.Unlock()
@@ -185,6 +220,10 @@ func (a *incomingAgent) Cancel(sender dbus.Sender) *dbus.Error {
 func (a *incomingAgent) Release(sender dbus.Sender) *dbus.Error { return a.Cancel(sender) }
 
 func (m *Manager) startIncoming(ctx context.Context, phone string) (TaskStatus, error) {
+	return m.startIncomingWithRelease(ctx, phone, nil)
+}
+
+func (m *Manager) startIncomingWithRelease(ctx context.Context, phone string, release func(context.Context) error) (TaskStatus, error) {
 	if !m.incomingAvailable() {
 		return TaskStatus{}, ErrBusy
 	}
@@ -197,7 +236,7 @@ func (m *Manager) startIncoming(ctx context.Context, phone string) (TaskStatus, 
 		m.failIncoming(ctx, phone, "network_handoff")
 		return TaskStatus{}, err
 	}
-	return m.start(ctx, phone, 120*time.Second, plan, true)
+	return m.startWithRelease(ctx, phone, 120*time.Second, plan, release, true)
 }
 
 func (m *Manager) failIncoming(ctx context.Context, phone, phase string) {
@@ -289,6 +328,10 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 		original[key] = value
 	}
 	a := &incomingAgent{ctx: ctx, conn: conn, owner: owner, manager: m, logger: logger}
+	a.profile = newIncomingProfile(a)
+	if err := conn.Export(a.profile, incomingProfilePath, "org.bluez.Profile1"); err != nil {
+		return err
+	}
 	if err := conn.Export(a, incomingAgentPath, "org.bluez.Agent1"); err != nil {
 		return err
 	}
@@ -298,6 +341,10 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
+		if err := a.profile.unregister(cleanup); err != nil {
+			logger.Warn("CarPlay 首登服务注销未确认，断开自有总线清理", "error", err)
+		}
+		a.profile.dropConnection()
 		if registered {
 			_ = agents.CallWithContext(cleanup, "org.bluez.AgentManager1.UnregisterAgent", 0, incomingAgentPath).Err
 		}
@@ -352,6 +399,21 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 			}
 			registered = false
 		}
+		if open {
+			registerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := a.profile.register(registerCtx)
+			cancel()
+			if err != nil {
+				return err
+			}
+		} else if !a.profile.handoffProtected() {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err := a.profile.unregister(releaseCtx)
+			cancel()
+			if err != nil {
+				return err
+			}
+		}
 		for _, property := range []string{"DiscoverableTimeout", "PairableTimeout"} {
 			if err := apply(property, uint32(0)); err != nil {
 				return err
@@ -373,6 +435,7 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 				a.mu.Lock()
 				a.pending = ""
 				a.mu.Unlock()
+				a.profile.dropConnection()
 			} else {
 				readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 				props, err := phoneProperties(readCtx, conn, owner, pending)
@@ -405,9 +468,20 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 					if err := conn.Object(owner, pending).CallWithContext(ctx, "org.freedesktop.DBus.Properties.Set", 0, "org.bluez.Device1", "Trusted", dbus.MakeVariant(true)).Err; err != nil {
 						return err
 					}
-					_, err = m.startIncoming(ctx, phone)
+					if err = a.profile.beginHandoff(pending); err != nil {
+						return err
+					}
+					_, err = m.startIncomingWithRelease(ctx, phone, func(op context.Context) error {
+						releaseCtx, cancel := context.WithTimeout(op, 5*time.Second)
+						defer cancel()
+						return a.profile.unregister(releaseCtx)
+					})
 					if err != nil {
+						releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+						_ = a.profile.unregister(releaseCtx)
+						cancel()
 						logger.Warn("CarPlay 主动配对后登记未启动", "error", err)
+						return err
 					} else {
 						logger.Info("CarPlay 手机主动配对完成，等待视频登记")
 					}
@@ -438,12 +512,7 @@ func (m *Manager) serveIncomingBus(ctx context.Context, logger *slog.Logger) err
 				}
 			}
 			if ok && changed["Connected"].Value() == false {
-				a.mu.Lock()
-				if a.pending == signal.Path {
-					a.pending = ""
-					a.logCallback("Disconnected", "cleared")
-				}
-				a.mu.Unlock()
+				a.disconnected(signal.Path)
 			}
 		}
 	}

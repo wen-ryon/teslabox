@@ -33,13 +33,14 @@ type TaskStatus struct {
 }
 
 type pairingTask struct {
-	incoming       bool
-	handoff        HandoffPlan
-	confirmation   *Confirmation
-	status         TaskStatus
-	cancel         context.CancelFunc
-	done           chan struct{}
-	cleanupPending bool
+	incoming        bool
+	incomingRelease func(context.Context) error
+	handoff         HandoffPlan
+	confirmation    *Confirmation
+	status          TaskStatus
+	cancel          context.CancelFunc
+	done            chan struct{}
+	cleanupPending  bool
 }
 
 // Manager 保留最后一轮状态并互斥持有当前任务，不操作录像、热点或系统默认 Agent。
@@ -80,6 +81,10 @@ func (m *Manager) Start(parent context.Context, phone string, window time.Durati
 }
 
 func (m *Manager) start(parent context.Context, phone string, window time.Duration, plan HandoffPlan, incoming ...bool) (TaskStatus, error) {
+	return m.startWithRelease(parent, phone, window, plan, nil, incoming...)
+}
+
+func (m *Manager) startWithRelease(parent context.Context, phone string, window time.Duration, plan HandoffPlan, release func(context.Context) error, incoming ...bool) (TaskStatus, error) {
 	if parent == nil || parent.Err() != nil || !phoneAddress.MatchString(phone) || phone == "00:00:00:00:00:00" {
 		return TaskStatus{}, errors.New("配对需要有效应用上下文和明确手机蓝牙地址")
 	}
@@ -99,9 +104,10 @@ func (m *Manager) start(parent context.Context, phone string, window time.Durati
 	}
 	prompt := confirmation.Status()
 	task := &pairingTask{confirmation: confirmation, cancel: cancel, done: make(chan struct{}),
-		incoming: len(incoming) == 1 && incoming[0],
-		handoff:  plan,
-		status:   TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
+		incoming:        len(incoming) == 1 && incoming[0],
+		incomingRelease: release,
+		handoff:         plan,
+		status:          TaskStatus{RequestID: prompt.RequestID, PhoneID: phone, State: "pairing", Running: true, ExpiresAt: prompt.ExpiresAt}}
 	m.current = task
 	go m.execute(ctx, task)
 	return m.snapshotLocked(task), nil
@@ -179,9 +185,16 @@ func (m *Manager) Close(ctx context.Context) error {
 
 func (m *Manager) execute(ctx context.Context, task *pairingTask) {
 	task.confirmation.incoming = task.incoming
+	task.confirmation.incomingRelease = task.incomingRelease
 	task.confirmation.handoff = m.handoff
 	task.confirmation.handoffPlan = task.handoff
 	err := m.run(ctx, task.status.PhoneID, task.confirmation)
+	// 暂停或配对提前失败时也必须释放首登 Profile，不依赖正常接收端交接路径。
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	if releaseErr := task.confirmation.releaseIncoming(cleanup); releaseErr != nil {
+		err = ErrCleanupPending
+	}
+	cancel()
 	// 执行器退出前仍占有互斥槽；取消和到期不代表进程已停止。
 	m.mu.Lock()
 	defer m.mu.Unlock()

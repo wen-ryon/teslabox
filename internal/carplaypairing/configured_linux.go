@@ -74,7 +74,7 @@ func NewConfiguredProvisioningManager(settingsPath, directory, runtime string) (
 	client := &serviceClient{runtime: runtime}
 	pair := func(ctx context.Context, phone string, confirmation *Confirmation) error {
 		if confirmation.incoming {
-			return verifyIncomingPhone(ctx, phone)
+			return verifyAndReleaseIncoming(ctx, phone, confirmation)
 		}
 		binary, digest, err := configuredBinary(settingsPath)
 		if err != nil {

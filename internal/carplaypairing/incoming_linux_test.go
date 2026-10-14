@@ -15,12 +15,21 @@ import (
 )
 
 type incomingFixture struct {
-	mu         sync.Mutex
-	adapter    map[string]dbus.Variant
-	phone      map[string]dbus.Variant
-	registered dbus.Sender
-	capability string
-	trusted    bool
+	mu                  sync.Mutex
+	adapter             map[string]dbus.Variant
+	phone               map[string]dbus.Variant
+	registered          dbus.Sender
+	capability          string
+	trusted             bool
+	profile             dbus.Sender
+	failProfile         bool
+	failUnregister      bool
+	bluez               *dbus.Conn
+	disconnectOnRelease bool
+	onRegister          func(dbus.Sender)
+	beforePhoneRead     func()
+	beforeUnregister    func()
+	unregisterCalls     int
 }
 
 // Get 用于核对退出恢复，隔离测试不接触系统适配器。
@@ -47,10 +56,14 @@ func (f *incomingFixture) Set(iface, key string, value dbus.Variant) *dbus.Error
 // GetAll 返回真实 D-Bus 编解码的手机属性。
 func (f *incomingFixture) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	copy := make(map[string]dbus.Variant)
 	for k, v := range f.phone {
 		copy[k] = v
+	}
+	hook := f.beforePhoneRead
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 	return copy, nil
 }
@@ -163,11 +176,18 @@ func TestIncomingPairingUsesPhoneConfirmationAndRestoresAdapter(t *testing.T) {
 	}
 }
 
-func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
+func TestIncomingProfileDisabledOrBlueZOwnerChangeCleansAdmission(t *testing.T) {
+	for _, mode := range []string{"disabled", "owner_changed"} {
+		t.Run(mode, func(t *testing.T) { incomingPairingScenario(t, false, mode) })
+	}
+}
+
+func incomingPairingScenario(t *testing.T, alreadyPaired bool, stop ...string) {
 	ctx, address, old := privateDiscoveryBus(t)
 	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", address)
 	f := &incomingFixture{adapter: map[string]dbus.Variant{
 		"Alias": dbus.MakeVariant("rock-3a"), "Pairable": dbus.MakeVariant(false), "Discoverable": dbus.MakeVariant(false), "PairableTimeout": dbus.MakeVariant(uint32(0)), "DiscoverableTimeout": dbus.MakeVariant(uint32(180)),
+		"UUIDs": dbus.MakeVariant([]string{}),
 	}, phone: map[string]dbus.Variant{
 		"Address": dbus.MakeVariant(testPhone), "Adapter": dbus.MakeVariant(dbus.ObjectPath("/org/bluez/hci0")), "AddressType": dbus.MakeVariant("public"), "Icon": dbus.MakeVariant("phone"), "Paired": dbus.MakeVariant(false),
 		"Connected": dbus.MakeVariant(true), "ServicesResolved": dbus.MakeVariant(false),
@@ -176,7 +196,7 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	for _, entry := range []struct {
 		path  dbus.ObjectPath
 		iface string
-	}{{"/org/bluez/hci0", "org.freedesktop.DBus.Properties"}, {phonePath, "org.freedesktop.DBus.Properties"}, {"/org/bluez", "org.bluez.AgentManager1"}} {
+	}{{"/org/bluez/hci0", "org.freedesktop.DBus.Properties"}, {phonePath, "org.freedesktop.DBus.Properties"}, {"/org/bluez", "org.bluez.AgentManager1"}, {"/org/bluez", "org.bluez.ProfileManager1"}} {
 		if err := old.conn.Export(f, entry.path, entry.iface); err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +205,13 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	ready.Store(true)
 	started := make(chan bool, 1)
 	m, _ := NewManager(func(ctx context.Context, phone string, c *Confirmation) error {
-		started <- c.incoming && phone == testPhone
+		if err := c.releaseIncoming(ctx); err != nil {
+			return err
+		}
+		f.mu.Lock()
+		released := f.profile == ""
+		f.mu.Unlock()
+		started <- c.incoming && phone == testPhone && released
 		return nil
 	})
 	m.incomingReady = ready.Load
@@ -203,7 +229,7 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	wait(func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.registered != "" && f.adapter["Discoverable"].Value() == true
+		return f.registered != "" && f.profile != "" && f.adapter["Discoverable"].Value() == true
 	})
 	f.mu.Lock()
 	target := string(f.registered)
@@ -212,6 +238,27 @@ func incomingPairingScenario(t *testing.T, alreadyPaired bool) {
 	f.mu.Unlock()
 	if capability != "DisplayYesNo" || trusted {
 		t.Fatal("首次配对能力或信任边界错误")
+	}
+	if len(stop) != 0 {
+		if stop[0] == "disabled" {
+			ready.Store(false)
+		} else {
+			if _, err := old.conn.ReleaseName("org.bluez"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wait(func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.profile == "" && !m.IncomingListening() })
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := m.Close(closeCtx); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.registered != "" || f.profile != "" {
+			t.Fatal("关闭或BlueZ身份变化后仍持有登记资源")
+		}
+		return
 	}
 	attacker, err := dbus.Connect(address, dbus.WithContext(ctx))
 	if err != nil {

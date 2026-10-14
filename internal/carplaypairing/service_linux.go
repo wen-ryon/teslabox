@@ -240,6 +240,9 @@ func (c *serviceClient) runner(pair PairRunner) PairRunner {
 				confirmation.recordFailurePhase()
 				confirmation.setPhase("restoring")
 			}
+			if err := confirmation.releaseIncoming(cleanup); err != nil {
+				result = ErrCleanupPending
+			}
 			if err := c.release(cleanup, request); err != nil {
 				result = ErrCleanupPending
 			}

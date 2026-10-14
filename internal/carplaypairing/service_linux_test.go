@@ -3,6 +3,7 @@
 package carplaypairing
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 func serviceFixture(t *testing.T) *serviceClient {
@@ -153,9 +156,12 @@ func TestServiceClientWorkflowWithActualPythonProvisioning(t *testing.T) {
 	for _, scenario := range []struct {
 		name                  string
 		pairFails, onboarding bool
+		incoming              bool
 	}{
-		{"verified_video", false, false}, {"pair_failed_cleanup", true, false},
-		{"onboarding_verified_video", false, true}, {"onboarding_pair_failed", true, true},
+		{"verified_video", false, false, false}, {"pair_failed_cleanup", true, false, false},
+		{"onboarding_verified_video", false, true, false}, {"onboarding_pair_failed", true, true, false},
+		{"incoming_profile_last_verify_before_disconnect", false, true, true},
+		{"incoming_stale_connection_rejected", true, true, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			pairFails := scenario.pairFails
@@ -184,7 +190,8 @@ while True:
   request,_=m.read_request(root/'provisioning-request.json')
   if request['action']=='cancel' and not flow.state['running']:
    (root/'events.json').write_text(json.dumps(events));break
- except FileNotFoundError:pass
+ # 原子替换可能使刚打开的旧请求暂时失效，保持与实际 poll 的下一轮重读行为一致。
+ except (OSError,ValueError,TypeError):pass
  time.sleep(.01)
 `
 			mode := "active"
@@ -192,11 +199,32 @@ while True:
 				mode = "onboarding"
 			}
 			cmd := exec.CommandContext(childCtx, "python3", "-c", program, module, c.runtime, mode)
+			var childErrors bytes.Buffer
+			cmd.Stderr = &childErrors
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
 			defer func() { childCancel(); _ = cmd.Wait() }()
 			calls := 0
+			var profile *incomingProfile
+			if scenario.incoming {
+				var f *incomingFixture
+				var busCtx context.Context
+				profile, f, busCtx = profileFixture(t)
+				f.mu.Lock()
+				f.phone["ServicesResolved"] = dbus.MakeVariant(true)
+				if pairFails {
+					f.phone["Connected"] = dbus.MakeVariant(false)
+				}
+				f.disconnectOnRelease = true
+				f.mu.Unlock()
+				if err := profile.register(busCtx); err != nil {
+					t.Fatal(err)
+				}
+				if err := profile.beginHandoff("/org/bluez/hci0/dev_02_11_22_33_44_55"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			pair := func(context.Context, string, *Confirmation) error {
 				calls++
 				if pairFails {
@@ -207,11 +235,24 @@ while True:
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			prompt, _ := NewConfirmation(ctx, 2*time.Second)
+			if profile != nil {
+				prompt.incoming = true
+				prompt.incomingRelease = profile.unregister
+				pair = func(op context.Context, phone string, confirmation *Confirmation) error {
+					calls++
+					if !profile.handoffProtected() {
+						t.Fatal("暂停期间首登Profile提前释放")
+					}
+					return verifyAndReleaseIncoming(op, phone, confirmation)
+				}
+			}
 			handoff := &workflowHandoff{paired: &calls}
 			prompt.handoff = handoff
 			err := c.runner(pair)(ctx, testPhone, prompt)
 			if (err != nil) != pairFails || errors.Is(err, ErrCleanupPending) || calls != 1 {
-				t.Fatal(err, calls)
+				childCancel()
+				waitErr := cmd.Wait()
+				t.Fatal(err, calls, "Python 退出：", waitErr, "Python 错误：", childErrors.String())
 			}
 			if handoff.begun == pairFails || handoff.success == pairFails || !handoff.finished {
 				t.Fatal("配对与交接顺序错误", handoff)
