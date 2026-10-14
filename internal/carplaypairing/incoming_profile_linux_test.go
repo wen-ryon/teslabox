@@ -287,11 +287,13 @@ func TestIncomingProfileRealBusTransfersAndClosesOwnFD(t *testing.T) {
 
 func TestIncomingProfileReleaseDuringRegistrationNeverRevivesLease(t *testing.T) {
 	p, f, ctx := profileFixture(t)
+	f.mu.Lock()
 	f.onRegister = func(sender dbus.Sender) {
 		if err := p.Release(dbus.Sender(p.agent.owner)); err != nil {
 			t.Fatal(err)
 		}
 	}
+	f.mu.Unlock()
 	if p.register(ctx) == nil {
 		t.Fatal("注册返回前已撤销却被报告就绪")
 	}
@@ -309,7 +311,9 @@ func TestIncomingProfileCancelDuringFDValidationCannotRestorePending(t *testing.
 		t.Fatal(err)
 	}
 	reading, resume := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
 	f.beforePhoneRead = func() { close(reading); <-resume }
+	f.mu.Unlock()
 	fd := socketFD(t)
 	done := make(chan *dbus.Error, 1)
 	go func() {
@@ -356,7 +360,9 @@ func TestIncomingProfileConcurrentCleanupConsumesOneLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	started, resume := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
 	f.beforeUnregister = func() { close(started); <-resume }
+	f.mu.Unlock()
 	first, second := make(chan error, 1), make(chan error, 1)
 	go func() { first <- p.unregister(ctx) }()
 	select {
@@ -414,7 +420,9 @@ func TestIncomingProfileLateFDOnlyAcceptsLiveHandoffPhone(t *testing.T) {
 			}
 			taskCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
+			p.agent.manager.mu.Lock()
 			p.agent.manager.current = &pairingTask{incoming: true, status: TaskStatus{PhoneID: testPhone, Running: true}, confirmation: &Confirmation{ctx: taskCtx}}
+			p.agent.manager.mu.Unlock()
 			if mode == "other_phone" {
 				phone = "/org/bluez/hci0/dev_02_11_22_33_44_66"
 			}
@@ -500,10 +508,12 @@ func TestIncomingProfileSuccessfulFDBeforeRegisterReturnsPreservesLease(t *testi
 	fd := socketFD(t)
 	defer unix.Close(fd)
 	result := make(chan error, 1)
+	f.mu.Lock()
 	f.onRegister = func(sender dbus.Sender) {
 		result <- f.bluez.Object(string(sender), incomingProfilePath).CallWithContext(ctx,
 			"org.bluez.Profile1.NewConnection", 0, dbus.ObjectPath("/org/bluez/hci0/dev_02_11_22_33_44_55"), dbus.UnixFD(fd), map[string]dbus.Variant{}).Err
 	}
+	f.mu.Unlock()
 	if err := p.register(ctx); err != nil {
 		t.Fatal("正常早到FD被误当作注册撤销", err)
 	}
@@ -527,7 +537,9 @@ func TestIncomingProfileSuccessfulFDBeforeRegisterReturnsPreservesLease(t *testi
 
 func TestIncomingProfileCancelDuringRegisterInvalidatesLease(t *testing.T) {
 	p, f, ctx := profileFixture(t)
+	f.mu.Lock()
 	f.onRegister = func(sender dbus.Sender) { _ = p.agent.Cancel(dbus.Sender(p.agent.owner)) }
+	f.mu.Unlock()
 	if p.register(ctx) == nil {
 		t.Fatal("注册期间取消没有撤销本轮租约")
 	}
