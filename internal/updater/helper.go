@@ -51,6 +51,9 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 	if err := verifyLocalPackage(packagePath, request); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", err)
 	}
+	if err := checkInstallRecoveryProtection(ctx, config.Service); err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", err)
+	}
 	if err := plainPath(config.BackupDir); err != nil {
 		return finishInstall(config.ResultPath, request.Version, "failed", err)
 	}
@@ -63,6 +66,10 @@ func RunHelper(ctx context.Context, config HelperConfig) error {
 	}
 	release := sync.OnceFunc(unlock)
 	defer release()
+	// 与维护脚本共用锁；等待期间守卫可能变化，必须在持锁后再次核对。
+	if err := checkInstallRecoveryProtection(ctx, config.Service); err != nil {
+		return finishInstall(config.ResultPath, request.Version, "failed", err)
+	}
 	ops := serviceOperations(config)
 	ops.resumeUnchanged = func(ctx context.Context) error {
 		release()

@@ -18,10 +18,10 @@ import (
 )
 
 // KernelUpgradeVersion 固定本次跨版本升级必须安装的内核依赖，不能由页面请求关闭。
-const KernelUpgradeVersion = "0.2.0-rc.1"
+const KernelUpgradeVersion = "0.2.0-rc.2"
 
-const kernelPolicyPath = "/usr/local/share/teslabox/kernel/rc1.json"
-const kernelControllerPath = "/usr/local/libexec/teslabox-kernel-upgrade.py"
+const kernelPolicyPath = "/usr/local/share/teslabox/kernel/rc2.json"
+const kernelControllerPath = "/usr/local/libexec/teslabox-kernel-upgrade-rc2.py"
 const kernelResumeRequestPath = "/var/lib/teslabox-system/kernel-upgrade/request.json"
 const kernelRelease = "5.10.160-teslabox3"
 
@@ -32,20 +32,24 @@ const rtl8852beDigest = "21a4cb2d7f55c8e9397e5d3b992083a8e9fd13ab7145a9c4de05508
 const kernelDebDigest = "3d4bac396b7c863bb8dbd4e0cb154de4a4bb67ff577850b691420853e005e93a"
 const btusbMT79xxDigest = "69c029c2b85261f5ee1b27921504a13009169615a4937880c38e3e48d2b74749"
 const kernelReleasePublicKey = "7THPh+C3xTzkCPWRHYSClGnZasEHkprykDK2kh0rkcU="
+const publicRC1Main = "5ee5385c2aa82bd7106ea4f861eee947db4379f749fda4d945959bae5ad6a48a"
+const publicRC1Policy = "17aea782bc3c24e63f750008038cac9791000f623f35976d139b3bfa99a7152c"
+const publicRC1RTL = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
 
 // KernelPolicy 是独立签名的强制依赖；保持旧客户端的主程序清单格式不变。
 type KernelPolicy struct {
-	Schema     int                   `json:"schema"`
-	Kind       string                `json:"kind"`
-	Version    string                `json:"version"`
-	Board      string                `json:"board"`
-	Arch       string                `json:"arch"`
-	Release    string                `json:"kernel_release"`
-	MainSHA256 string                `json:"main_sha256"`
-	URL        string                `json:"url"`
-	SHA256     string                `json:"sha256"`
-	Size       int64                 `json:"size"`
-	Files      map[string]KernelFile `json:"files"`
+	Schema            int                   `json:"schema"`
+	Kind              string                `json:"kind"`
+	Version           string                `json:"version"`
+	Board             string                `json:"board"`
+	Arch              string                `json:"arch"`
+	Release           string                `json:"kernel_release"`
+	MainSHA256        string                `json:"main_sha256"`
+	StartupMainSHA256 []string              `json:"startup_main_sha256,omitempty"`
+	URL               string                `json:"url"`
+	SHA256            string                `json:"sha256"`
+	Size              int64                 `json:"size"`
+	Files             map[string]KernelFile `json:"files"`
 }
 
 // KernelFile 绑定归档内普通文件，避免额外模块、路径或安装脚本混入依赖包。
@@ -54,7 +58,7 @@ type KernelFile struct {
 	Size   int64  `json:"size"`
 }
 
-// VerifyKernelPolicy 只接受既有发布公钥签署的 RC1 内核依赖，不执行任何安装。
+// VerifyKernelPolicy 只接受既有发布公钥签署的 RC2 内核依赖，不执行任何安装。
 func VerifyKernelPolicy(payload, signature []byte, key ed25519.PublicKey) (KernelPolicy, error) {
 	var p KernelPolicy
 	if len(payload) == 0 || len(payload) > 128<<10 {
@@ -72,12 +76,25 @@ func VerifyKernelPolicy(payload, signature []byte, key ed25519.PublicKey) (Kerne
 	if err := d.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return p, errors.New("内核清单包含多余内容")
 	}
+	// 旧政策只允许原封不动的公开签名产物，不能用新的字段拼装旧版安装权限。
+	legacy := kernelFileDigest(payload) == publicRC1Policy
+	expectedVersion, expectedRTL := KernelUpgradeVersion, rtl8852beDigest
+	if legacy {
+		expectedVersion, expectedRTL = "0.2.0-rc.1", publicRC1RTL
+	}
 	u, err := url.Parse(p.URL)
-	if p.Schema != 1 || p.Kind != "teslabox-kernel-dependency-v1" || p.Version != KernelUpgradeVersion ||
+	if p.Schema != 1 || p.Kind != "teslabox-kernel-dependency-v1" || p.Version != expectedVersion ||
 		p.Board != "radxa-rock-3a" || p.Arch != "arm64" || p.Release != kernelRelease ||
 		err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" ||
 		p.Size <= 0 || p.Size > 96<<20 || !kernelDigest(p.SHA256) || !kernelDigest(p.MainSHA256) {
-		return p, errors.New("内核依赖与本次 RC1 升级不匹配")
+		return p, errors.New("内核依赖与本次 RC2 升级不匹配")
+	}
+	seen := make(map[string]bool)
+	for _, digest := range p.StartupMainSHA256 {
+		if !auditedStartupMain(digest) || seen[digest] || digest == p.MainSHA256 {
+			return p, errors.New("旧主程序启动过渡名单未经审核或重复")
+		}
+		seen[digest] = true
 	}
 	if len(p.Files) < 4 || len(p.Files) > 128 {
 		return p, errors.New("内核依赖文件清单数量无效")
@@ -90,7 +107,7 @@ func VerifyKernelPolicy(payload, signature []byte, key ed25519.PublicKey) (Kerne
 		}
 		total += file.Size
 	}
-	if total > 160<<20 || p.Files["modules/8852be.ko"].SHA256 != rtl8852beDigest ||
+	if total > 160<<20 || p.Files["modules/8852be.ko"].SHA256 != expectedRTL ||
 		p.Files["kernel.deb"].SHA256 != kernelDebDigest || p.Files["modules/btusb.ko"].SHA256 != btusbMT79xxDigest {
 		return p, errors.New("内核、apfix7 或蓝牙模块不是本次冻结产物")
 	}
@@ -166,12 +183,16 @@ func (g rootKernelActions) action(ctx context.Context, action string) ([]byte, e
 	if _, _, err := snapshotFile(kernelControllerPath, 128<<10); err != nil {
 		return nil, err
 	}
-	p, err := ReadKernelPolicy(kernelPolicyPath)
+	policyPath := kernelPolicyPath
+	if action == "verify-legacy" {
+		policyPath = "/usr/local/share/teslabox/kernel/rc1.json"
+	}
+	p, err := ReadKernelPolicy(policyPath)
 	if err != nil {
 		return nil, err
 	}
-	if p.MainSHA256 != g.request.SHA256 {
-		return nil, errors.New("主程序不属于已签名的内核依赖发布")
+	if err := validateKernelActionPolicy(p, g.request, action); err != nil {
+		return nil, err
 	}
 	input, err := json.Marshal(g.request)
 	if err != nil {
@@ -184,6 +205,20 @@ func (g rootKernelActions) action(ctx context.Context, action string) ([]byte, e
 		return nil, fmt.Errorf("内核升级 %s 失败: %w: %.4096s", action, err, output)
 	}
 	return output, nil
+}
+
+func validateKernelActionPolicy(p KernelPolicy, request InstallRequest, action string) error {
+	if p.MainSHA256 != request.SHA256 {
+		return errors.New("主程序不属于已签名的内核依赖发布")
+	}
+	if action == "verify-legacy" {
+		if p.MainSHA256 != publicRC1Main || p.Version != "0.2.0-rc.1" || request.Version != p.Version {
+			return errors.New("旧版启动过渡身份不匹配")
+		}
+	} else if p.Version != KernelUpgradeVersion || request.Version != KernelUpgradeVersion {
+		return errors.New("安装和提交仅允许本次 RC2 政策")
+	}
+	return nil
 }
 
 func (g rootKernelActions) prepare(ctx context.Context) (bool, error) {
@@ -238,12 +273,35 @@ func VerifyRunningKernel(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if kernelFileDigest(data) != p.MainSHA256 {
+	actual := kernelFileDigest(data)
+	if p.Version != KernelUpgradeVersion || !kernelStartupMainAllowed(p, actual) {
 		return errors.New("当前主程序不属于内核依赖发布")
+	}
+	if actual == publicRC1Main {
+		g := rootKernelActions{request: InstallRequest{Version: "0.2.0-rc.1", SHA256: actual}}
+		_, err = g.action(ctx, "verify-legacy")
+		return err
 	}
 	g := rootKernelActions{request: InstallRequest{Version: KernelUpgradeVersion, SHA256: p.MainSHA256}}
 	_, err = g.action(ctx, "verify")
 	return err
+}
+
+func auditedStartupMain(digest string) bool {
+	// 公开 RC1 必须另走固定旧政策核验，绝不能替代最终 RC2 的 apfix7 校验。
+	return digest == publicRC1Main || digest == "768b24c9b91bd2c2648c94d5d254cb75858dac70a418988e7fa2bc2f565e06d1"
+}
+
+func kernelStartupMainAllowed(p KernelPolicy, digest string) bool {
+	if digest == p.MainSHA256 {
+		return true
+	}
+	for _, allowed := range p.StartupMainSHA256 {
+		if digest == allowed && auditedStartupMain(digest) {
+			return true
+		}
+	}
+	return false
 }
 
 func kernelFileDigest(data []byte) string {

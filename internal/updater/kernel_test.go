@@ -23,7 +23,15 @@ func TestVerifyKernelPolicy(t *testing.T) {
 		tamper  bool
 		wantErr bool
 	}{
-		{name: "signed RC1"},
+		{name: "signed RC2"},
+		{name: "RC1 is not RC2 policy", mutate: func(p *KernelPolicy) { p.Version = "0.2.0-rc.1" }, wantErr: true},
+		{name: "signed audited startup", mutate: func(p *KernelPolicy) {
+			p.StartupMainSHA256 = []string{"768b24c9b91bd2c2648c94d5d254cb75858dac70a418988e7fa2bc2f565e06d1"}
+		}},
+		{name: "unknown startup", mutate: func(p *KernelPolicy) { p.StartupMainSHA256 = []string{strings.Repeat("c", 64)} }, wantErr: true},
+		{name: "public RC1 explicit startup permission", mutate: func(p *KernelPolicy) {
+			p.StartupMainSHA256 = []string{"5ee5385c2aa82bd7106ea4f861eee947db4379f749fda4d945959bae5ad6a48a"}
+		}},
 		{name: "frozen apfix6 requires paired rollback", mutate: func(p *KernelPolicy) {
 			p.Files["modules/8852be.ko"] = KernelFile{SHA256: "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce", Size: 6011152}
 		}, wantErr: true},
@@ -64,6 +72,35 @@ func TestVerifyKernelPolicy(t *testing.T) {
 				t.Fatalf("verify error=%v, wantErr=%v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestKernelStartupRequiresSignedAndAuditedIdentity(t *testing.T) {
+	const old = "768b24c9b91bd2c2648c94d5d254cb75858dac70a418988e7fa2bc2f565e06d1"
+	p := KernelPolicy{MainSHA256: strings.Repeat("a", 64)}
+	if kernelStartupMainAllowed(p, old) || !kernelStartupMainAllowed(p, p.MainSHA256) {
+		t.Fatal("未签署的旧主不能启动，目标主必须匹配")
+	}
+	p.StartupMainSHA256 = []string{old, strings.Repeat("b", 64)}
+	if !kernelStartupMainAllowed(p, old) || kernelStartupMainAllowed(p, strings.Repeat("b", 64)) {
+		t.Fatal("启动身份必须同时满足签署名单和固定审核名单")
+	}
+}
+
+func TestLegacyStartupCannotAuthorizeRC1InstallOrRC2Commit(t *testing.T) {
+	legacy := KernelPolicy{Version: "0.2.0-rc.1", MainSHA256: publicRC1Main}
+	request := InstallRequest{Version: legacy.Version, SHA256: legacy.MainSHA256}
+	for _, action := range []string{"prepare", "commit", "rollback", "verify"} {
+		if validateKernelActionPolicy(legacy, request, action) == nil {
+			t.Fatalf("旧政策不应允许 %s", action)
+		}
+	}
+	if err := validateKernelActionPolicy(legacy, request, "verify-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	rc2 := KernelPolicy{Version: KernelUpgradeVersion, MainSHA256: strings.Repeat("a", 64), StartupMainSHA256: []string{publicRC1Main}}
+	if validateKernelActionPolicy(rc2, request, "commit") == nil {
+		t.Fatal("启动过渡名单不能授权旧主提交 RC2")
 	}
 }
 

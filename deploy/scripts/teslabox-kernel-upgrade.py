@@ -16,8 +16,8 @@ import urllib.request
 
 
 RELEASE = "5.10.160-teslabox3"
-VERSION = "0.2.0-rc.1"
-APFIX = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
+VERSION = "0.2.0-rc.2"
+APFIX = "21a4cb2d7f55c8e9397e5d3b992083a8e9fd13ab7145a9c4de055081b19a41f0"
 BTUSB = "69c029c2b85261f5ee1b27921504a13009169615a4937880c38e3e48d2b74749"
 # Radxa 的内核 postinst 钩子可把冻结 deb 的 gzip 镜像解压为原始 Image。
 # 两种长度/摘要均从同一冻结 deb 核实，不能接受任意 gzip 或现场未知镜像。
@@ -26,7 +26,7 @@ IMAGE_FORMS = {
     (29_547_008, "fcf5b2c420ccc7573baf70ee2a3ea4db9ebce82b4e47fadba2f70d8f8e12bb27"),
 }
 DTB = "81d7869cffcef5b9f5a2e55294f3ffb253453228ecdf6406103de9f0c02bb31d"
-POLICY = "/usr/local/share/teslabox/kernel/rc1.json"
+POLICY = "/usr/local/share/teslabox/kernel/rc2.json"
 HELPER = "/usr/local/libexec/teslabox-update-helper"
 MODULE_NAMES = {"8852be", "cfg80211", "mac80211", "compat", "mt7921e", "mt7921-common", "mt76", "mt76-connac-lib", "qrtr", "qrtr-mhi", "mhi", "btusb"}
 FIRMWARE_NAMES = {"BT_RAM_CODE_MT7922_1_1_hdr.bin", "WIFI_MT7922_patch_mcu_1_1_hdr.bin", "WIFI_RAM_CODE_MT7922_1.bin"}
@@ -235,12 +235,14 @@ class KernelUpgrade:
             abi = self.run(["modinfo", "-k", RELEASE, "-F", "vermagic", module]).split()[0]
             if abi != RELEASE:
                 raise RuntimeError("模块 ABI 不匹配: " + module)
-            if module == "8852be" and digest(regular(selected.resolve(strict=True))) != APFIX:
-                raise RuntimeError("最终解析的驱动不是 apfix6，可能被 DKMS 覆盖")
+            expected_rtl = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce" if self.policy.get("version") == "0.2.0-rc.1" else APFIX
+            if module == "8852be" and digest(regular(selected.resolve(strict=True))) != expected_rtl:
+                raise RuntimeError("最终解析的驱动不是 apfix7，可能被 DKMS 覆盖")
             if module == "btusb" and digest(regular(selected.resolve(strict=True))) != BTUSB:
                 raise RuntimeError("最终解析的蓝牙驱动不是冻结 MT79xx 模块")
         loaded = self.root / "sys/module/8852be/version"
-        if loaded.exists() and not loaded.read_text().strip().endswith("-tbxapfix6"):
+        suffix = "-tbxapfix6" if self.policy.get("version") == "0.2.0-rc.1" else "-tbxapfix7"
+        if loaded.exists() and not loaded.read_text().strip().endswith(suffix):
             return False
         bluetooth = self.root / "sys/module/btusb"
         if bluetooth.exists():
@@ -339,7 +341,7 @@ class KernelUpgrade:
                 return {"reboot_required": True}
             try:
                 if not self.runtime_ok():
-                    raise RuntimeError("重启后未使用 teslabox3 和 apfix6，未升级主程序")
+                    raise RuntimeError("重启后未使用 teslabox3 和 apfix7，未升级主程序")
             except Exception:
                 self.rollback(data)
                 raise
@@ -443,18 +445,25 @@ def main():
         raise RuntimeError("内核升级仅支持 root 和 ARM64")
     if Path("/proc/device-tree/model").read_bytes().rstrip(b"\0") != b"Radxa ROCK3 Model A":
         raise RuntimeError("设备不是本次内核支持的 ROCK 3A")
-    if len(sys.argv) != 2 or sys.argv[1] not in {"prepare", "commit", "rollback", "verify"}:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"prepare", "commit", "rollback", "verify", "verify-legacy"}:
         raise RuntimeError("未知内核事务操作")
-    safe(Path(POLICY))
+    legacy = sys.argv[1] == "verify-legacy"
+    policy_path = "/usr/local/share/teslabox/kernel/rc1.json" if legacy else POLICY
+    safe(Path(policy_path))
     safe(Path(HELPER))
-    policy = json.loads(KernelUpgrade.command([HELPER, "--kernel-manifest", POLICY]))
+    policy = json.loads(KernelUpgrade.command([HELPER, "--kernel-manifest", policy_path]))
+    if legacy:
+        if digest(regular(Path(policy_path))) != "17aea782bc3c24e63f750008038cac9791000f623f35976d139b3bfa99a7152c":
+            raise RuntimeError("旧政策不是审核过的公开 RC1")
+    elif policy.get("version") != VERSION:
+        raise RuntimeError("安装政策不是本次 RC2")
     raw = sys.stdin.buffer.read(16385)
     if len(raw) > 16384:
         raise RuntimeError("内核升级请求过长")
     request = json.loads(raw)
     upgrade = KernelUpgrade(policy)
-    if sys.argv[1] == "verify":
-        if request.get("sha256") != policy["main_sha256"] or not upgrade.runtime_ok():
+    if sys.argv[1] in {"verify", "verify-legacy"}:
+        if request.get("version") != policy["version"] or request.get("sha256") != policy["main_sha256"] or not upgrade.runtime_ok():
             raise RuntimeError("强制内核依赖尚未满足")
         result = {"ready": True}
     elif sys.argv[1] == "prepare":

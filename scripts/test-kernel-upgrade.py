@@ -17,6 +17,11 @@ spec.loader.exec_module(k)
 
 
 class ArchiveMenuTests(unittest.TestCase):
+    def test_rc2_dependency_identity_matches_go_helper(self):
+        self.assertEqual(k.VERSION, "0.2.0-rc.2")
+        self.assertEqual(k.POLICY, "/usr/local/share/teslabox/kernel/rc2.json")
+        self.assertEqual(k.APFIX, "21a4cb2d7f55c8e9397e5d3b992083a8e9fd13ab7145a9c4de055081b19a41f0")
+
     def test_exact_frozen_image_pins_include_deb_and_postinst_output(self):
         self.assertEqual(k.IMAGE_FORMS, {
             (9_968_257, "8fce4f9877dabfd8ad0eef2ee91f5901eb1d51341085834daeb53e8790e32516"),
@@ -109,6 +114,21 @@ class TransactionTests(unittest.TestCase):
                 for data in (compressed, raw):
                     k.durable(image, data)
                     self.assertTrue(upgrade.runtime_ok())
+                rtl_version = root / "sys/module/8852be/version"
+                k.durable(rtl_version, b"vendor-tbxapfix6")
+                self.assertFalse(upgrade.runtime_ok())
+                upgrade.policy["version"] = "0.2.0-rc.1"
+                original_digest = k.digest
+                def legacy_digest(content):
+                    if content == b"8852be":
+                        return "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
+                    return original_digest(content)
+                with patch.object(k, "digest", side_effect=legacy_digest):
+                    self.assertTrue(upgrade.runtime_ok())
+                    k.durable(rtl_version, b"vendor-tbxapfix7")
+                    self.assertFalse(upgrade.runtime_ok())
+                del upgrade.policy["version"]
+                self.assertTrue(upgrade.runtime_ok())
                 k.durable(image, raw + b"tampered")
                 with self.assertRaisesRegex(RuntimeError, "冻结产物"):
                     upgrade.runtime_ok()

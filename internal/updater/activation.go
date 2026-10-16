@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,9 @@ const DefaultBackupDir = "/var/lib/teslabox-system/update-backups"
 
 // DefaultExportState 与主程序默认导出状态路径保持一致。
 const DefaultExportState = "/var/lib/teslabox-system/export-state.json"
+
+const recoveryGuardPath = "/etc/systemd/system/teslabox.service.d/90-update-state-rollback.conf"
+const recoveryGuardContent = "[Service]\nExecStartPre=/usr/local/libexec/teslabox-update-helper --recover\n"
 
 // TransactionProtocol 标识具有成对回滚和断电恢复能力的安装助手。
 const TransactionProtocol = "teslabox-paired-state-v1"
@@ -119,7 +123,7 @@ func checkKernelStartup(run func(string, ...string) ([]byte, error)) error {
 	}
 	out, err = run("/usr/local/libexec/teslabox-update-helper", "--kernel-verify")
 	if err != nil || strings.TrimSpace(string(out)) != "teslabox-kernel-ready-v1" {
-		return errors.New("teslabox3 或 apfix6 尚未确认，拒绝启动 RC1；未执行状态迁移")
+		return errors.New("teslabox3 或 apfix7 尚未确认，拒绝启动 RC2；未执行状态迁移")
 	}
 	return nil
 }
@@ -133,6 +137,53 @@ func checkStartupProtection(run func(string, ...string) ([]byte, error)) error {
 	out, err = run("systemctl", "show", "teslabox.service", "--property=ExecStartPre", "--value")
 	if err != nil || !strings.Contains(string(out), "/usr/local/libexec/teslabox-update-helper --recover") {
 		return errors.New("必须先安装启动恢复守卫；未执行状态迁移")
+	}
+	return nil
+}
+
+func checkInstallRecoveryProtection(ctx context.Context, service string) error {
+	if service != "teslabox.service" {
+		return errors.New("安装恢复守卫只支持固定 teslabox.service")
+	}
+	_, content, err := snapshotFile(recoveryGuardPath, 4096)
+	if err != nil {
+		return fmt.Errorf("读取安装恢复守卫: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	run := func(property string) ([]byte, error) {
+		return exec.CommandContext(ctx, "systemctl", "show", service, "--property="+property, "--value").Output()
+	}
+	pre, err := run("ExecStartPre")
+	if err != nil {
+		return fmt.Errorf("读取已加载恢复守卫: %w", err)
+	}
+	reload, err := run("NeedDaemonReload")
+	if err != nil {
+		return fmt.Errorf("读取恢复守卫加载状态: %w", err)
+	}
+	resume, err := exec.CommandContext(ctx, "systemctl", "show", "teslabox-kernel-resume.service", "--property=UnitFileState", "--value").Output()
+	if err != nil {
+		return fmt.Errorf("读取内核续装使能状态: %w", err)
+	}
+	if err := validateInstallResumeProtection(string(resume)); err != nil {
+		return err
+	}
+	return validateInstallRecoveryProtection(content, string(pre), string(reload))
+}
+
+func validateInstallResumeProtection(state string) error {
+	if strings.TrimSpace(state) != "enabled" {
+		return errors.New("内核续装入口尚未使能，拒绝开始安装；请完成维护")
+	}
+	return nil
+}
+
+func validateInstallRecoveryProtection(content []byte, pre, reload string) error {
+	// 助手可能先于守卫完成切换；此时允许旧程序启动，但绝不能执行新的安装事务。
+	if string(content) != recoveryGuardContent || strings.TrimSpace(reload) != "no" ||
+		!strings.Contains(pre, "/usr/local/libexec/teslabox-update-helper --recover") || strings.Contains(pre, "ignore_errors=yes") {
+		return errors.New("安装恢复守卫未完整落盘并加载，拒绝修改内核或程序；请完成维护")
 	}
 	return nil
 }

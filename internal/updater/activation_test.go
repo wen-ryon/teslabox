@@ -36,6 +36,37 @@ func TestStartupRefusesOldHelperBeforeMigration(t *testing.T) {
 	}
 }
 
+func TestInstallRecoveryGuardMustBeDurableAndLoaded(t *testing.T) {
+	pre := "{ path=/usr/local/libexec/teslabox-update-helper ; argv[]=/usr/local/libexec/teslabox-update-helper --recover ; ignore_errors=no ; }"
+	for _, test := range []struct {
+		name, content, pre, reload string
+		want                       bool
+	}{
+		{"ready", recoveryGuardContent, pre, "no\n", true},
+		{"helper switched guard absent", "", pre, "no", false},
+		{"guard durable not loaded", recoveryGuardContent, "", "yes", false},
+		{"stale systemd", recoveryGuardContent, pre, "yes", false},
+		{"unknown reload status", recoveryGuardContent, pre, "", false},
+		{"modified guard", recoveryGuardContent + "ExecStartPre=\n", pre, "no", false},
+		{"ignored recovery failure", recoveryGuardContent, pre + "ignore_errors=yes", "no", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateInstallRecoveryProtection([]byte(test.content), test.pre, test.reload)
+			if (err == nil) != test.want {
+				t.Fatalf("安装守卫结果: %v", err)
+			}
+		})
+	}
+}
+
+func TestInstallRecoveryGuardRequiresResumeEnabled(t *testing.T) {
+	for _, state := range []string{"enabled\n", "disabled", "static", "", "masked", "enabled-runtime"} {
+		if (validateInstallResumeProtection(state) == nil) != (state == "enabled\n") {
+			t.Fatalf("续装使能状态应失败封闭: %q", state)
+		}
+	}
+}
+
 func TestActivationGateFailClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transaction.json")
 	if activationPending(path) {
