@@ -8,6 +8,8 @@ trap 'find "${test_dir}" -depth -delete' EXIT HUP INT TERM
 # 仅加载首装脚本的函数定义，避免测试触碰系统 APT 配置。
 sed '/^trap cleanup EXIT HUP INT TERM/,$d' "${script_dir}/../deploy/install.sh" >"${test_dir}/functions.sh"
 . "${test_dir}/functions.sh"
+WORK_DIR="${test_dir}"
+APT_DEPENDENCY_LISTS_DIR="${test_dir}/apt-dependency-lists"
 DEBIAN_MAIN_MIRROR="https://deb.debian.org/debian"
 DEBIAN_SECURITY_MIRROR="${DEBIAN_SECURITY_SNAPSHOT}"
 
@@ -67,8 +69,9 @@ apt_events="${test_dir}/apt-events"
 mkdir "${test_dir}/bin"
 printf '%s\n' \
     '#!/bin/sh' \
+    'printf "%s\n" "$*" >>"${APT_ARGUMENTS}"' \
     'case " $* " in' \
-    '    *" update "*) printf "%s\n" update >>"${APT_EVENTS}" ;;' \
+    '    *" update "*) printf "%s\n" update >>"${APT_EVENTS}"; [ "${APT_FAIL_UPDATE:-0}" -eq 0 ] ;;' \
     '    *" install -y -d "*)' \
     '        printf "%s\n" download >>"${APT_EVENTS}"' \
     '        [ "${APT_FAIL_DOWNLOAD:-0}" -eq 0 ] ;;' \
@@ -77,11 +80,33 @@ printf '%s\n' \
     'esac' >"${test_dir}/bin/apt-get"
 chmod 0755 "${test_dir}/bin/apt-get"
 APT_EVENTS="${apt_events}"
+APT_ARGUMENTS="${test_dir}/apt-arguments"
 PATH="${test_dir}/bin:${PATH}"
-export APT_EVENTS PATH
+export APT_EVENTS APT_ARGUMENTS PATH
 
 install_debian_dependencies avahi-daemon
 printf '%s\n' update download install >"${test_dir}/expected-events"
+cmp -s "${apt_events}" "${test_dir}/expected-events"
+assert_line "${APT_DEPENDENCY_SOURCE_LIST}" "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] ${DEBIAN_MAIN_MIRROR} bullseye main contrib non-free"
+assert_line "${APT_DEPENDENCY_SOURCE_LIST}" "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] ${DEBIAN_SECURITY_SNAPSHOT} bullseye-security main contrib non-free"
+assert_line "${APT_DEPENDENCY_SOURCE_LIST}" 'deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bullseye rockchip-bullseye main'
+awk -v list="${APT_DEPENDENCY_SOURCE_LIST}" -v state="${APT_DEPENDENCY_LISTS_DIR}" '
+    index($0, "Dir::Etc::sourcelist=" list) == 0 ||
+    index($0, "Dir::Etc::sourceparts=-") == 0 ||
+    index($0, "Dir::State::lists=" state) == 0 { failed = 1 }
+    END { exit (failed || NR != 3) }
+' "${APT_ARGUMENTS}"
+if awk '/tailscale|vscodium|trusted=yes|allow-insecure/ { found = 1 } END { exit !found }' "${APT_DEPENDENCY_SOURCE_LIST}"; then
+    printf '%s\n' '第三方源或签名绕过选项不应进入首装依赖源。' >&2
+    exit 1
+fi
+
+: >"${apt_events}"
+if (APT_FAIL_UPDATE=1; export APT_FAIL_UPDATE; install_debian_dependencies avahi-daemon) >/dev/null 2>&1; then
+    printf '%s\n' '必需源刷新失败时不得继续下载或安装。' >&2
+    exit 1
+fi
+printf '%s\n' update >"${test_dir}/expected-events"
 cmp -s "${apt_events}" "${test_dir}/expected-events"
 
 : >"${apt_events}"
