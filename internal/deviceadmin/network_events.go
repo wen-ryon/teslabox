@@ -3,6 +3,7 @@ package deviceadmin
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -18,6 +19,7 @@ const (
 	dbusRemoveMatchMethod             = "org.freedesktop.DBus.RemoveMatch"
 	networkManagerGetDeviceByIPMethod = "org.freedesktop.NetworkManager.GetDeviceByIpIface"
 	networkEventBufferSize            = 16
+	networkPeerQueryTimeout           = 2 * time.Second
 )
 
 type networkEventKind uint8
@@ -85,6 +87,23 @@ func watchNetworkManagerEvents(ctx context.Context, interfaceName string, notify
 				}
 				return fmt.Errorf("NetworkManager D-Bus 信号通道已关闭")
 			}
+			if signal != nil && signal.Name == networkManagerDeviceInterface+".StateChanged" && signal.Path != devicePath {
+				// 预留 AP 被自动激活为 STA 时，主 STA 可能没有事件；必须核对同 PHY 的其他无线设备。
+				properties := map[string]dbus.Variant{}
+				queryCtx, cancel := context.WithTimeout(ctx, networkPeerQueryTimeout)
+				call := conn.Object(networkManagerBusName, signal.Path).CallWithContext(
+					queryCtx, dbusPropertiesInterface+".GetAll", 0, networkManagerDeviceInterface,
+				)
+				err := call.Store(&properties)
+				cancel()
+				if err == nil && relatedWirelessDevice(properties, interfaceName, wirelessInterfacesSharePHY) {
+					event, _, changed := parseNetworkManagerEvent(signal, signal.Path, "/")
+					if changed {
+						notify(event)
+					}
+				}
+				continue
+			}
 			event, nextAccessPoint, changed := parseNetworkManagerEvent(signal, devicePath, activeAccessPoint)
 			if !changed {
 				continue
@@ -98,6 +117,18 @@ func watchNetworkManagerEvents(ctx context.Context, interfaceName string, notify
 			}
 		}
 	}
+}
+
+func relatedWirelessDevice(
+	properties map[string]dbus.Variant, interfaceName string, sharePHY func(string, string) (bool, bool),
+) bool {
+	deviceType, validType := properties["DeviceType"].Value().(uint32)
+	peer, validInterface := properties["Interface"].Value().(string)
+	if !validType || deviceType != 2 || !validInterface || peer == "" || sharePHY == nil {
+		return false
+	}
+	shared, known := sharePHY(interfaceName, peer)
+	return shared && known
 }
 
 func networkManagerDevicePath(conn *dbus.Conn, interfaceName string) (dbus.ObjectPath, error) {
@@ -128,8 +159,8 @@ func networkManagerActiveAccessPoint(conn *dbus.Conn, devicePath dbus.ObjectPath
 
 func networkManagerMatchRules(devicePath dbus.ObjectPath) []string {
 	deviceRule := fmt.Sprintf(
-		"type='signal',sender='%s',path='%s',interface='%s'",
-		networkManagerBusName, devicePath, networkManagerDeviceInterface,
+		"type='signal',sender='%s',interface='%s'",
+		networkManagerBusName, networkManagerDeviceInterface,
 	)
 	propertiesRule := fmt.Sprintf(
 		"type='signal',sender='%s',path='%s',interface='%s',member='PropertiesChanged'",

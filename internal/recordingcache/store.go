@@ -238,7 +238,7 @@ func (s *Store) ensureLocalLocked(ctx context.Context, files []File, outputBytes
 			if err == nil {
 				err = fmt.Errorf("录像源不是普通文件")
 			}
-			return nil, fmt.Errorf("检查录像源: %w", err)
+			return nil, sourceStage(file, "source_stat", err)
 		}
 		size := uint64(info.Size())
 		if size > ^uint64(0)-total {
@@ -253,10 +253,10 @@ func (s *Store) ensureLocalLocked(ctx context.Context, files []File, outputBytes
 		if key == "" {
 			key, err = hashFile(ctx, file.Path)
 			if err != nil {
-				return nil, err
+				return nil, sourceStage(file, "hash_read", err)
 			}
 			if err := unchanged(file.Path, info); err != nil {
-				return nil, err
+				return nil, sourceStage(file, "after_hash", err)
 			}
 		}
 		if !seenKeys[key] {
@@ -328,7 +328,7 @@ func (s *Store) ensureLocalLocked(ctx context.Context, files []File, outputBytes
 					progress(base+n, total)
 				}
 			}); err != nil {
-				return nil, err
+				return nil, sourceStage(plan.file, "copy", err)
 			}
 			s.state.Objects[plan.key] = &object{Size: uint64(plan.info.Size()), LastUsed: s.now(), Pins: 1}
 			lease.keys = append(lease.keys, plan.key)
@@ -658,10 +658,10 @@ func (s *Store) copyFile(ctx context.Context, plan plannedFile, progress func(ui
 		return fmt.Errorf("复制录像到系统盘: %w", err)
 	}
 	if n != uint64(plan.info.Size()) || hex.EncodeToString(hash.Sum(nil)) != plan.key {
-		return fmt.Errorf("录像复制期间源内容变化")
+		return sourceStage(plan.file, "copy_content", &SourceChangeError{Path: plan.file.Path, ContentChanged: true, SizeChanged: n != uint64(plan.info.Size()), BeforeSize: plan.info.Size(), AfterSize: int64(n), ExpectedDigest: plan.key, ActualDigest: hex.EncodeToString(hash.Sum(nil))})
 	}
 	if err := unchanged(plan.file.Path, plan.info); err != nil {
-		return err
+		return sourceStage(plan.file, "after_copy", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		return err
@@ -684,7 +684,7 @@ func unchanged(path string, before fs.FileInfo) error {
 		return err
 	}
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		return fmt.Errorf("录像源在准备期间发生变化，请重新选择")
+		return sourceChange(path, before, after)
 	}
 	return nil
 }

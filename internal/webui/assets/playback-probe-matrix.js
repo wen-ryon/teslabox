@@ -17,8 +17,8 @@ function playbackMatrixClearVideos() {
 
 function playbackMatrixLabel(test) {
   const view = test.layout === "single" ? cameraLabel(test.camera) : (compositeLayouts[test.layout]?.label || test.layout);
-  const quality = ({original:"原画", smooth:"流畅", standard:"标清", high:"高清"})[test.quality] || test.quality;
-  return `${view} · ${quality}${test.delivery === "finite" ? "（有限文件对照）" : test.delivery === "hls" ? "（iPhone 分片播放）" : ""}${test.stage === "original" && test.layout !== "single" ? `（${test.cameras.length} 路并发）` : ""}`;
+  const quality = t(({original:"原画", smooth:"流畅", standard:"标清", high:"高清"})[test.quality] || test.quality);
+  return `${view} · ${quality}${test.delivery === "finite" ? t("（有限文件对照）") : test.delivery === "hls" ? t("（iPhone 分片播放）") : ""}${test.stage === "original" && test.layout !== "single" ? t`（${test.cameras.length} 路并发）` : ""}`;
 }
 
 function playbackMatrixCompleteFragments(bytes, length) {
@@ -162,7 +162,7 @@ function stopPlaybackProbeMatrix(reason) {
   playbackProbeCaptureAbort?.abort();
   playbackProbeFinish?.(reason);
   playbackMatrixClearVideos();
-  $("playback-probe-status").textContent = `诊断已停止：${reason}。可下载已有诊断日志，或保持页面在前台后重试。`;
+  $("playback-probe-status").textContent = t`诊断已停止：${reason}。可下载已有诊断日志，或保持页面在前台后重试。`;
 }
 
 function playbackMatrixTracksDone(tracks) {
@@ -299,7 +299,7 @@ async function startPlaybackProbeMatrix() {
   playbackProbeLastID = "";
   $("playback-probe-start").disabled = true;
   $("playback-probe-stop").disabled = false;
-  $("playback-probe-status").textContent = "正在寻找可播放的录像…";
+  $("playback-probe-status").textContent = t("正在寻找可播放的录像…");
   const qualities = Array.from(document.querySelectorAll('input[name="playback-probe-quality"]:checked'), item => item.value);
   let source = null;
   let id = "";
@@ -318,7 +318,7 @@ async function startPlaybackProbeMatrix() {
     playbackMatrixEvent(pending, source, overview, id, "probe_start", `矩阵诊断 ${plan.cases.length} 项，跳过 ${plan.skipped.length} 项`, started);
     for (const skipped of plan.skipped) {
       const row = document.createElement("li");
-      row.textContent = `${skipped.id}：跳过（${skipped.reason}）`;
+      row.textContent = t`${skipped.id}：跳过（${skipped.reason}）`;
       results.append(row);
       playbackMatrixEvent(pending, source, {...overview, id:skipped.id}, id, "probe_end", `跳过：${skipped.reason}`, started);
     }
@@ -329,14 +329,14 @@ async function startPlaybackProbeMatrix() {
         playbackMatrixEvent(pending, source, test, id, "probe_event", "snapshot_changed_before_case", started);
       }
       if (run !== playbackProbeRun) break;
-      $("playback-probe-status").textContent = `第 ${index+1}/${plan.cases.length} 项：${playbackMatrixLabel(test)}。诊断编号 ${id}`;
+      $("playback-probe-status").textContent = t`第 ${index+1}/${plan.cases.length} 项：${playbackMatrixLabel(test)}。诊断编号 ${id}`;
       const outcome = await playbackMatrixRunCaseWithSnapshotRetry(source, test, id, pending, run, () => {
-        $("playback-probe-status").textContent = `快照已轮换，正在重试第 ${index+1}/${plan.cases.length} 项：${playbackMatrixLabel(test)}`;
+        $("playback-probe-status").textContent = t`快照已轮换，正在重试第 ${index+1}/${plan.cases.length} 项：${playbackMatrixLabel(test)}`;
       });
       if (run !== playbackProbeRun) break;
       if (outcome === "通过") totals.pass++; else totals.abnormal++;
       const row = document.createElement("li");
-      row.textContent = `${playbackMatrixLabel(test)}：${outcome}`;
+      row.textContent = t`${playbackMatrixLabel(test)}：${t(outcome)}`;
       results.append(row);
     }
     if (run === playbackProbeRun) {
@@ -344,13 +344,13 @@ async function startPlaybackProbeMatrix() {
     }
     const sent = await Promise.all(pending);
     if (run === playbackProbeRun) {
-      $("playback-probe-status").textContent = `测试完成：${totals.pass} 项通过，${totals.abnormal} 项异常，${plan.skipped.length} 项跳过，${sent.filter(value => !value).length} 条事件上报失败。诊断编号 ${id}。请下载完整诊断报告。`;
+      $("playback-probe-status").textContent = t`测试完成：${totals.pass} 项通过，${totals.abnormal} 项异常，${plan.skipped.length} 项跳过，${sent.filter(value => !value).length} 条事件上报失败。诊断编号 ${id}。请下载完整诊断报告。`;
     }
   } catch (error) {
     if (run === playbackProbeRun) {
       if (source && id) playbackMatrixEvent(pending, source, overview, id, "probe_end", `诊断未完成：${error.message}`, started);
       await Promise.all(pending);
-      $("playback-probe-status").textContent = `诊断未完成：${error.message}。请下载已有诊断报告。`;
+      $("playback-probe-status").textContent = t`诊断未完成：${error.message}。请下载已有诊断报告。`;
     }
   } finally {
     playbackProbeFinish = null;

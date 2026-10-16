@@ -27,13 +27,14 @@ type Usage struct {
 
 // Status 是设备运行状态的轻量快照。
 type Status struct {
-	InternetAvailable bool      `json:"internet_available"`
-	InternetCheckedAt time.Time `json:"internet_checked_at"`
-	TemperatureC      *float64  `json:"temperature_c,omitempty"`
-	CPUUsedPercent    *float64  `json:"cpu_used_percent,omitempty"`
-	Memory            *Usage    `json:"memory,omitempty"`
-	SystemDisk        *Usage    `json:"system_disk,omitempty"`
-	UptimeSeconds     *float64  `json:"uptime_seconds,omitempty"`
+	InternetAvailable bool            `json:"internet_available"`
+	InternetCheckedAt time.Time       `json:"internet_checked_at"`
+	InternetEgress    *InternetEgress `json:"internet_egress,omitempty"`
+	TemperatureC      *float64        `json:"temperature_c,omitempty"`
+	CPUUsedPercent    *float64        `json:"cpu_used_percent,omitempty"`
+	Memory            *Usage          `json:"memory,omitempty"`
+	SystemDisk        *Usage          `json:"system_disk,omitempty"`
+	UptimeSeconds     *float64        `json:"uptime_seconds,omitempty"`
 }
 
 type cpuSample struct {
@@ -47,14 +48,16 @@ type Collector struct {
 	previousCPU       *cpuSample
 	internetAvailable bool
 	internetCheckedAt time.Time
+	internetEgress    *InternetEgress
 	now               func() time.Time
 	dialContext       func(context.Context, string, string) (net.Conn, error)
+	describeEgress    func(net.Addr) InternetEgress
 }
 
 // NewCollector 创建只读状态采集器，构造时不发起互联网连接。
 func NewCollector() *Collector {
 	dialer := &net.Dialer{}
-	collector := &Collector{now: time.Now, dialContext: dialer.DialContext}
+	collector := &Collector{now: time.Now, dialContext: dialer.DialContext, describeEgress: describeInternetEgress}
 	if sample, err := readCPUSample(); err == nil {
 		collector.previousCPU = &sample
 	}
@@ -68,7 +71,7 @@ func (c *Collector) Collect(ctx context.Context) Status {
 
 	now := c.now()
 	if c.internetCheckedAt.IsZero() || now.Sub(c.internetCheckedAt) >= internetCacheDuration {
-		c.internetAvailable = c.checkInternet(ctx)
+		c.internetAvailable, c.internetEgress = c.checkInternet(ctx)
 		c.internetCheckedAt = now
 	}
 	status := Status{
@@ -79,6 +82,11 @@ func (c *Collector) Collect(ctx context.Context) Status {
 		SystemDisk:        readDiskUsage("/"),
 		UptimeSeconds:     readUptime(),
 	}
+	if c.internetEgress != nil {
+		// 返回副本，外部消费者不能修改下一次缓存响应中的探测证据。
+		egress := *c.internetEgress
+		status.InternetEgress = &egress
+	}
 	if current, err := readCPUSample(); err == nil {
 		status.CPUUsedPercent = calculateCPUUsage(c.previousCPU, current)
 		c.previousCPU = &current
@@ -86,20 +94,21 @@ func (c *Collector) Collect(ctx context.Context) Status {
 	return status
 }
 
-func (c *Collector) checkInternet(parent context.Context) bool {
+func (c *Collector) checkInternet(parent context.Context) (bool, *InternetEgress) {
 	ctx, cancel := context.WithTimeout(parent, 1200*time.Millisecond)
 	defer cancel()
 	for _, address := range []string{"223.5.5.5:53", "119.29.29.29:53"} {
 		connection, err := c.dialContext(ctx, "tcp", address)
 		if err == nil {
+			egress := c.describeEgress(connection.LocalAddr())
 			connection.Close()
-			return true
+			return true, &egress
 		}
 		if ctx.Err() != nil {
-			return false
+			return false, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func readCPUSample() (cpuSample, error) {

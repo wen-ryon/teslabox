@@ -1,0 +1,7 @@
+[Match]
+Driver=8852be rtl8852be
+OriginalName=ap* sta*
+
+[Link]
+NamePolicy=
+MACAddressPolicy=none

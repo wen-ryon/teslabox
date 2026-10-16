@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,6 +16,7 @@ import (
 )
 
 type handlerSettings struct {
+	language          LanguageSettings
 	carplay           http.Handler
 	carplayHomeDomain string
 }
@@ -32,11 +35,26 @@ func WithCarPlayHome(domain string) HandlerOption {
 }
 
 // NewCarPlayProxy 只代理固定本机接收端，浏览器不能指定目标或取得接收端令牌。
-func NewCarPlayProxy(tokenPath string) http.Handler {
-	return newCarPlayProxy(tokenPath, "127.0.0.1:8767")
+func NewCarPlayProxy(tokenPath string, loggers ...*slog.Logger) http.Handler {
+	return newCarPlayProxy(tokenPath, "127.0.0.1:8767", loggers...)
 }
 
-func newCarPlayProxy(tokenPath, backend string) http.Handler {
+type carPlayProxyStart struct{}
+
+func newCarPlayProxy(tokenPath, backend string, loggers ...*slog.Logger) http.Handler {
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
+	logPhase := func(r *http.Request, phase, reason string, status int) {
+		started, _ := r.Context().Value(carPlayProxyStart{}).(time.Time)
+		elapsed := int64(0)
+		if !started.IsZero() {
+			elapsed = time.Since(started).Milliseconds()
+		}
+		logger.Info("CarPlay 浏览器代理诊断", "phase", phase, "reason", reason,
+			"path", r.URL.Path, "http_status", status, "elapsed_ms", elapsed)
+	}
 	allowed := map[string]bool{"/api/status": true, "/video": true}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
@@ -50,12 +68,22 @@ func newCarPlayProxy(tokenPath, backend string) http.Handler {
 		},
 		Transport: &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, ResponseHeaderTimeout: 5 * time.Second},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			reason := "backend_io"
+			var timeout net.Error
+			if errors.Is(err, context.Canceled) {
+				reason = "client_cancelled"
+			} else if errors.As(err, &timeout) && timeout.Timeout() {
+				reason = "backend_timeout"
+			}
+			logPhase(r, "proxy_error", reason, http.StatusServiceUnavailable)
 			http.Error(w, "CarPlay 接收端暂时不可用", http.StatusServiceUnavailable)
 		},
 		ModifyResponse: func(response *http.Response) error {
+			logPhase(response.Request, "backend_response", "none", response.StatusCode)
 			response.Header.Del("Set-Cookie")
 			response.Header.Set("Cache-Control", "no-store")
 			if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+				logPhase(response.Request, "token_window", "backend_auth", http.StatusServiceUnavailable)
 				// 管理会话已经验证；接收端重启造成的令牌窗口应重试，不要求用户反复登录。
 				response.Body.Close()
 				response.StatusCode = http.StatusServiceUnavailable
@@ -91,13 +119,18 @@ func newCarPlayProxy(tokenPath, backend string) http.Handler {
 		}
 		token, err := readCarPlayToken(tokenPath)
 		if err != nil {
+			logPhase(r, "token_unavailable", "not_ready", http.StatusServiceUnavailable)
 			http.Error(w, "CarPlay 尚未就绪", http.StatusServiceUnavailable)
 			return
 		}
 		// 克隆请求，接收端只看到本机令牌，不转发管理会话及用户提交的 Cookie。
 		request := r.Clone(r.Context())
+		request = request.WithContext(context.WithValue(request.Context(), carPlayProxyStart{}, time.Now()))
 		request.Header.Set("Cookie", "tbcp="+token)
 		proxy.ServeHTTP(w, request)
+		if path == "/video" {
+			logPhase(request, "video_proxy_finished", "none", 0)
+		}
 	})
 }
 

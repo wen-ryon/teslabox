@@ -9,7 +9,7 @@ test('自动播放默认关闭并作为布尔保存，关闭功能和画面优�
   fields.set('carplay-settings-form',{offsetParent:{},addEventListener:(_,fn)=>{submit=fn;},querySelector:()=>button});
   fields.set('carplay-settings-notice',notice);fields.set('carplay-network-status',{textContent:''});
   const original={revision:1,enabled:true,recovery_priority:'internet',network:'wifi',quality:720,fps:30};
-  const context={document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
+  const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
     fetch:async(path,options={})=>{
       if(path==='/carplay/api/network')return {ok:true,json:async()=>({internet:false})};
       if(options.method==='PUT'){saved={...JSON.parse(options.body),revision:2};}
@@ -34,7 +34,7 @@ test('登录后重试读取，刷新不覆盖草稿，保存使用当前版本�
   const form={offsetParent:{},addEventListener:(_,callback)=>{submit=callback;},querySelector:()=>button};
   fields.set('carplay-settings-form',form);fields.set('carplay-settings-notice',notice);fields.set('carplay-network-status',status);
   const requests=[];
-  const context={document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
+  const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
     fetch:async(path,options={})=>{
       requests.push({path,...options});
       if(path==='/carplay/api/network')return {ok:true,json:async()=>({internet:false})};
@@ -60,7 +60,7 @@ test('保存后读回旧帧率时不得显示已保存',async()=>{
   let submit,revision=1;
   fields.set('carplay-settings-form',{offsetParent:{},addEventListener:(_,callback)=>{submit=callback;},querySelector:()=>button});
   fields.set('carplay-settings-notice',notice);fields.set('carplay-network-status',{textContent:''});
-  const context={document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
+  const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,document:{getElementById:id=>fields.get(id),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
     fetch:async(path,options={})=>{
       if(path==='/carplay/api/network')return {ok:true,json:async()=>({internet:true})};
       if(options.method==='PUT'){revision=2;return {ok:true,json:async()=>({...JSON.parse(options.body),revision})};}
@@ -83,7 +83,7 @@ test('隐藏多手机入口后不获取列表，保存画质仍保留既有手�
   const original={revision:1,phone_id:'02:00:00:00:00:01',enabled:true,recovery_priority:'internet',network:'auto',quality:720,fps:30};
   fields.set('carplay-settings-form',{offsetParent:{},addEventListener:(_,callback)=>{submit=callback;},querySelector:()=>({disabled:false})});
   fields.set('carplay-settings-notice',{textContent:''});fields.set('carplay-network-status',{textContent:''});
-  const context={document:{getElementById:id=>fields.get(id),createElement:()=>({value:'',textContent:''}),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
+  const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,document:{getElementById:id=>fields.get(id),createElement:()=>({value:'',textContent:''}),hidden:false},AbortController,setTimeout,clearTimeout,setInterval:()=>0,
     fetch:async(path,options={})=>{
       if(path==='/carplay/api/network')return {ok:true,json:async()=>({internet:true})};
       if(path==='/carplay/api/phones')assert.fail('隐藏入口不应获取手机列表');

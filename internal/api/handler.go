@@ -172,6 +172,7 @@ type handlerOptions struct {
 	carPlayPairing        *carplaypairing.Manager
 	carPlayPairingContext context.Context
 	deviceAdmin           DeviceAdmin
+	ethernetAdmin         EthernetAdmin
 	storageAdmin          StorageAdmin
 	gadgetAdmin           GadgetAdmin
 	mediaInspector        MediaInspector
@@ -313,7 +314,11 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 		}
 		for _, session := range sessionCatalog.getList(state.MediaSnapshot.ID, state.Videos, isRecentWindow(r.PathValue("id"))) {
 			if session.ID == r.PathValue("id") {
-				writeSessionDetail(w, cloneSessionForDuration(session), state.MediaSnapshot.MountPath, state.MediaSnapshot.ID)
+				detail := cloneSessionForDuration(session)
+				detail.SnapshotID = state.MediaSnapshot.ID
+				refineVideoSessionDurations(state.MediaSnapshot.MountPath, &detail)
+				detail.SourceRevision, _ = sessionSourceRevision(controller, state, detail)
+				writeJSON(w, http.StatusOK, detail)
 				return
 			}
 		}
@@ -366,6 +371,10 @@ func NewHandler(controller Controller, logger *slog.Logger, options ...Option) h
 	})
 	if settings.deviceAdmin != nil {
 		registerDeviceAdminRoutes(mux, settings.deviceAdmin, logger)
+		if shared, ok := settings.deviceAdmin.(SharedNetworkAdmin); ok { registerSharedNetworkRoutes(mux, shared, logger) }
+	}
+	if settings.ethernetAdmin != nil {
+		registerEthernetRoutes(mux, settings.ethernetAdmin, logger)
 	}
 	if settings.storageAdmin != nil {
 		registerStorageAdminRoutes(mux, settings.storageAdmin, logger)
@@ -884,9 +893,13 @@ func registerExportRoutes(mux *http.ServeMux, controller Controller, admin Expor
 			return
 		}
 		if !recentSnapshotMatches(request.SessionID, request.SnapshotID, state.MediaSnapshot.ID) || request.SnapshotID != "" && request.SnapshotID != state.MediaSnapshot.ID {
-			release()
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "最近录像快照已更新，请重新打开该时间段后选择导出范围"})
-			return
+			if !unchangedSessionSelection(controller, state, request.SessionID, request.SourceRevision) {
+				release()
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "录像内容或时间轴已变化，请重新打开该时间段后选择导出范围"})
+				return
+			}
+			logger.Info("导出选择已衔接新快照", "session_id", request.SessionID, "previous_snapshot_id", request.SnapshotID, "snapshot_id", state.MediaSnapshot.ID)
+			request.SnapshotID = state.MediaSnapshot.ID
 		}
 		session, found := findVideoSession(state.Videos, request.SessionID)
 		if !found {
@@ -2035,13 +2048,19 @@ func registerStorageAdminRoutes(mux *http.ServeMux, admin StorageAdmin, logger *
 }
 
 func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *slog.Logger) {
+	if disconnector, ok := admin.(WiFiDisconnectAdmin); ok {
+		registerWiFiDisconnectRoute(mux, disconnector, logger)
+	}
+	if regionAdmin, ok := admin.(WirelessRegionAdmin); ok {
+		registerRegulatoryRoutes(mux, regionAdmin, logger)
+	}
 	mux.HandleFunc("GET /api/v1/network/wifi", func(w http.ResponseWriter, r *http.Request) {
 		status, err := admin.WiFiStatus(r.Context())
 		if err != nil {
 			writeDeviceAdminError(w, logger, "读取 WiFi 状态失败", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, status)
+		writeJSON(w, http.StatusOK, wifiStatusWithDetails(r.Context(), admin, status))
 	})
 	mux.HandleFunc("POST /api/v1/network/wifi/scan", func(w http.ResponseWriter, r *http.Request) {
 		items, err := admin.Scan(r.Context())
@@ -2060,7 +2079,18 @@ func registerDeviceAdminRoutes(mux *http.ServeMux, admin DeviceAdmin, logger *sl
 			writeDeviceAdminError(w, logger, "连接 WiFi 失败", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+		status, err := admin.WiFiStatus(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusAccepted, map[string]any{"connected": false, "connection_state": "unknown"})
+			return
+		}
+		connected := status.ConnectionState == "connected" && status.CurrentConnection != ""
+		if input.UUID != "" {
+			connected = connected && status.ConnectionUUID == input.UUID
+		} else {
+			connected = connected && status.CurrentConnection == input.SSID
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"connected": connected, "connection_state": status.ConnectionState})
 	})
 	mux.HandleFunc("POST /api/v1/network/wifi/autoconnect", func(w http.ResponseWriter, r *http.Request) {
 		var input deviceadmin.AutoConnectUpdate
@@ -2414,6 +2444,7 @@ type videoSession struct {
 	Cached               bool                    `json:"cached,omitempty"`
 	Coverage             []recentCoverage        `json:"coverage,omitempty"`
 	SnapshotID           string                  `json:"snapshot_id,omitempty"`
+	SourceRevision       string                  `json:"source_revision,omitempty"`
 	RecentWindow         bool                    `json:"recent_window,omitempty"`
 	DurationState        string                  `json:"duration_state"`
 	DurationPending      bool                    `json:"duration_pending"`

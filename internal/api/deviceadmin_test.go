@@ -14,15 +14,18 @@ import (
 
 type fakeDeviceAdmin struct {
 	status            deviceadmin.WiFiStatus
+	statusErr         error
 	scanErr           error
 	autoConnectUpdate deviceadmin.AutoConnectUpdate
 	ipv4Update        deviceadmin.IPv4Update
+	apUpdate          deviceadmin.APUpdate
 	repairRequested   bool
 	powerAction       string
+	disconnectedUUID  string
 }
 
 func (a *fakeDeviceAdmin) WiFiStatus(context.Context) (deviceadmin.WiFiStatus, error) {
-	return a.status, nil
+	return a.status, a.statusErr
 }
 func (a *fakeDeviceAdmin) Scan(context.Context) ([]deviceadmin.AccessPoint, error) {
 	return []deviceadmin.AccessPoint{}, a.scanErr
@@ -37,6 +40,11 @@ func (a *fakeDeviceAdmin) UpdateIPv4(_ context.Context, update deviceadmin.IPv4U
 	return nil
 }
 func (a *fakeDeviceAdmin) Forget(context.Context, string) error { return nil }
+
+func (a *fakeDeviceAdmin) DisconnectWiFiProfile(_ context.Context, uuid string) error {
+	a.disconnectedUUID = uuid
+	return nil
+}
 func (a *fakeDeviceAdmin) APSettings(context.Context) (deviceadmin.APSettings, error) {
 	return deviceadmin.APSettings{
 		Available: true, Interface: "ap0", InterfaceRole: "AP 虚拟接口", MACAddress: "AA:BB:CC:DD:EE:20",
@@ -45,7 +53,10 @@ func (a *fakeDeviceAdmin) APSettings(context.Context) (deviceadmin.APSettings, e
 		AllowedChannels: []int{1, 6, 11, 149, 161},
 	}, nil
 }
-func (a *fakeDeviceAdmin) UpdateAP(context.Context, deviceadmin.APUpdate) error { return nil }
+func (a *fakeDeviceAdmin) UpdateAP(_ context.Context, update deviceadmin.APUpdate) error {
+	a.apUpdate = update
+	return nil
+}
 func (a *fakeDeviceAdmin) RepairAPInterface(context.Context) error {
 	a.repairRequested = true
 	return nil
@@ -113,6 +124,30 @@ func TestDeviceAdminRoutes(t *testing.T) {
 	}
 }
 
+func TestDeviceAdminAcceptsAPSecuritySelection(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"", "wpa2", "wpa3"} {
+		name := mode
+		if name == "" {
+			name = "old client"
+		}
+		t.Run(name, func(t *testing.T) {
+			admin := &fakeDeviceAdmin{}
+			handler := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithDeviceAdmin(admin))
+			body := `{"ssid":"TeslaBox","band":"a","channel":44`
+			if mode != "" {
+				body += `,"security_mode":"` + mode + `"`
+			}
+			body += `}`
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/network/ap", strings.NewReader(body)))
+			if response.Code != http.StatusOK || admin.apUpdate.SecurityMode != mode {
+				t.Fatalf("status = %d, update = %+v, body = %s", response.Code, admin.apUpdate, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestWriteDeviceAdminErrorReturnsStructuredAPReason(t *testing.T) {
 	t.Parallel()
 	recorder := httptest.NewRecorder()
@@ -159,5 +194,15 @@ func TestDeviceAdminKeepsCoreStatusUsableWithoutWiFi(t *testing.T) {
 	handler.ServeHTTP(scan, httptest.NewRequest(http.MethodPost, "/api/v1/network/wifi/scan", nil))
 	if scan.Code != http.StatusServiceUnavailable || !strings.Contains(scan.Body.String(), "有线管理不受影响") {
 		t.Fatalf("wifi scan = %d, body = %s", scan.Code, scan.Body.String())
+	}
+}
+
+func TestDeviceAdminAcceptsExplicitAPCarPlayConfirmation(t *testing.T) {
+	admin := &fakeDeviceAdmin{}
+	h := NewHandler(fakeController{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithDeviceAdmin(admin))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/network/ap", strings.NewReader(`{"ssid":"TeslaBox","band":"a","channel":161,"enabled":true,"confirm_carplay_reconnect":true}`)))
+	if w.Code != http.StatusOK || !admin.apUpdate.ConfirmCarPlayReconnect || admin.apUpdate.SSID != "TeslaBox" {
+		t.Fatalf("确认授权没有传入 AP 操作：%d %s %+v", w.Code, w.Body.String(), admin.apUpdate)
 	}
 }

@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'assets/app.js'), 'utf8');
 function fixture() {
   const nodes = {};
-  const context = vm.createContext({activeSession:{duration_seconds:100000,start_at:'2026-09-07T00:00:00Z'}, $:id=>nodes[id] ||= {value:'',style:{setProperty(){}}},formatDuration:String,exportTimeBounds:()=>({duration:100000})});
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,activeSession:{duration_seconds:100000,start_at:'2026-09-07T00:00:00Z'}, $:id=>nodes[id] ||= {value:'',style:{setProperty(){}}},formatDuration:String,exportTimeBounds:()=>({duration:100000})});
   vm.runInContext(source.slice(source.indexOf('function setExportRange('),source.indexOf('function localDateTimeInput(')),context);
   return {context,nodes};
 }

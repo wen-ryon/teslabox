@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wen-ryon/teslabox/internal/regulatory"
 	"github.com/wen-ryon/teslabox/internal/system"
 )
 
@@ -91,6 +92,9 @@ type WiFiStatus struct {
 	MACAddress            string `json:"mac_address,omitempty"`
 	IPAddress             string `json:"ip_address,omitempty"`
 	CurrentConnection     string `json:"current_connection,omitempty"`
+	ConnectionState       string `json:"connection_state"`
+	ConnectionUUID        string `json:"connection_uuid,omitempty"`
+	PendingConnection     string `json:"pending_connection,omitempty"`
 	currentConnectionUUID string
 	APActive              bool           `json:"ap_active"`
 	ConcurrentMode        bool           `json:"concurrent_mode"`
@@ -136,6 +140,9 @@ type APSettings struct {
 	CapabilityNotice      string                `json:"capability_notice,omitempty"`
 	AllowedChannels       []int                 `json:"allowed_channels,omitempty"`
 	Security              string                `json:"security,omitempty"`
+	SecurityMode          string                `json:"security_mode,omitempty"`
+	ActiveSecurity        string                `json:"active_security,omitempty"`
+	SecurityOptions       []APSecurityOption    `json:"security_options"`
 	Address               string                `json:"address,omitempty"`
 	AutoConnect           bool                  `json:"auto_connect"`
 	Sharing               bool                  `json:"sharing"`
@@ -192,16 +199,20 @@ type IPv4Update struct {
 
 // APUpdate 描述允许从管理页面修改的热点字段。
 type APUpdate struct {
-	Enabled     bool   `json:"enabled"`
-	SSID        string `json:"ssid"`
-	Password    string `json:"password,omitempty"`
-	Band        string `json:"band"`
-	Channel     int    `json:"channel"`
-	AutoConnect bool   `json:"auto_connect"`
+	Enabled                 bool   `json:"enabled"`
+	SSID                    string `json:"ssid"`
+	Password                string `json:"password,omitempty"`
+	SecurityMode            string `json:"security_mode,omitempty"`
+	Band                    string `json:"band"`
+	Channel                 int    `json:"channel"`
+	AutoConnect             bool   `json:"auto_connect"`
+	ConfirmCarPlayReconnect bool   `json:"confirm_carplay_reconnect,omitempty"`
 }
 
 // Manager 串行执行会改变网络状态的命令，避免多个页面操作互相覆盖。
 type Manager struct {
+	openNetworkBus           func() (ethernetBus, error)
+	regulatory               *regulatory.Manager
 	carPlayEnrollmentHandoff *carPlayEnrollmentHandoff
 	carPlayEnrollmentLive    string
 	runner                   system.Runner
@@ -237,6 +248,7 @@ type Manager struct {
 
 // NetworkConfig 允许管理员固定无线接口；客户端接口留空时会根据 NetworkManager 自动发现。
 type NetworkConfig struct {
+	Regulatory           *regulatory.Manager
 	CarPlaySettingsPath  string
 	WiFiInterface        string
 	APInterface          string
@@ -257,7 +269,8 @@ func New(runner system.Runner, logger *slog.Logger, configs ...NetworkConfig) *M
 		}
 	}
 	manager := &Manager{
-		runner: runner, logger: logger,
+		regulatory: networkConfig.Regulatory,
+		runner:     runner, logger: logger,
 		configuredWiFiInterface: strings.TrimSpace(networkConfig.WiFiInterface),
 		configuredAPInterface:   strings.TrimSpace(networkConfig.APInterface),
 		carPlayDomain:           strings.TrimSpace(networkConfig.CarPlayDomain),
@@ -487,8 +500,12 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 	}
 	wifiInterface, apInterface, wifiAvailable, _ := m.networkInterfaces(ctx, profiles)
 	status := WiFiStatus{Available: wifiAvailable, Interface: wifiInterface, SavedNetworks: []SavedNetwork{}}
+	status.ConnectionState = "unavailable"
+	runtime := wifiConnectionSnapshot{}
 	if wifiAvailable {
 		status.MACAddress, status.IPAddress = m.interfaceDetails(ctx, wifiInterface)
+		runtime = m.wifiConnectionSnapshot(ctx, wifiInterface)
+		status.ConnectionState = runtime.state
 	}
 	status.Recovery = m.recoveryStatus()
 	apSSIDs := make(map[string]bool)
@@ -505,7 +522,14 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 			}
 			continue
 		}
-		if profile.Active {
+		selected := profile.Device == wifiInterface && profile.UUID == runtime.uuid
+		if selected {
+			status.ConnectionUUID = profile.UUID
+		}
+		if selected && runtime.state == "connecting" {
+			status.PendingConnection = profile.SSID
+		}
+		if selected && runtime.state == "connected" {
 			// NetworkManager 的连接配置名称可以由程序或用户任意命名，不能当作实际 SSID 展示。
 			// 例如 TeslaBox 管理的配置名可能是 TeslaBox-Upstream，但真实接入点仍是家庭 WiFi。
 			status.CurrentConnection = profile.SSID
@@ -513,9 +537,13 @@ func (m *Manager) WiFiStatus(ctx context.Context) (WiFiStatus, error) {
 		}
 		status.SavedNetworks = append(status.SavedNetworks, SavedNetwork{
 			Name: profile.Name, UUID: profile.UUID, SSID: profile.SSID,
-			Security: profile.Security, Active: profile.Active, AutoConnect: profile.AutoConnect,
+			Security: profile.Security, Active: selected && runtime.state == "connected", AutoConnect: profile.AutoConnect,
 			RequiresPassword: profile.RequiresPassword, IPv4: profileIPv4Settings(profile),
 		})
+	}
+	if runtime.state == "connected" && status.currentConnectionUUID == "" {
+		// 设备已经换到另一配置，但配置清单尚未同步；不能将旧清单的任意一项当作已连接。
+		status.ConnectionState = "unknown"
 	}
 	if status.APActive {
 		if status.ConcurrentMode {
@@ -557,6 +585,13 @@ func (m *Manager) reconcileAutoConnectIfNeeded(ctx context.Context) (bool, strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.carPlayNetworkReservedLocked() {
+		return false, "", nil
+	}
+	// 健康的STA不代表预留AP仍受保护，D-Bus离线时也要阻止另一接口自动激活。
+	if err := m.guardReservedAPAutoConnect(ctx); err != nil {
+		return false, "", err
+	}
 	if m.monitoredWiFiInterface != "" {
 		connected, err := m.wifiInterfaceConnected(ctx, m.monitoredWiFiInterface)
 		if err == nil && connected {
@@ -569,6 +604,9 @@ func (m *Manager) reconcileAutoConnectIfNeeded(ctx context.Context) (bool, strin
 func (m *Manager) reconcileAutoConnectLocked(ctx context.Context) (bool, string, error) {
 	if m.carPlayNetworkReservedLocked() {
 		return false, "", nil
+	}
+	if err := m.guardReservedAPAutoConnect(ctx); err != nil {
+		return false, "", err
 	}
 	status, err := m.WiFiStatus(ctx)
 	if err != nil {
@@ -841,7 +879,7 @@ func (m *Manager) Scan(ctx context.Context) ([]AccessPoint, error) {
 }
 
 // Connect 连接已保存网络或创建 WPA/WPA2、开放网络配置。
-// AP+STA 并发模式下连接在自动识别的客户端接口上执行，热点虚拟接口不受影响。
+// 同射频切换先释放旧连接，避免热点和旧上游把目标连接锁在原信道。
 func (m *Manager) Connect(ctx context.Context, request ConnectRequest) (err error) {
 	if request.ConfirmCarPlayReconnect {
 		return m.connectWithCarPlayRestart(ctx, request)
@@ -885,6 +923,34 @@ func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, recon
 	if !status.Available || status.Interface == "" {
 		return ErrWiFiUnavailable
 	}
+	// 第二个排队的连接请求不能把第一个请求刚建立的同一上游再次断开。
+	activeUUID := status.ConnectionUUID
+	if activeUUID == "" && request.UUID != "" {
+		// 状态快照暂时未知时仍核对实际激活身份；相同请求不能重置正在获取地址的连接。
+		if output, queryErr := m.run(ctx, "nmcli", "-g", "GENERAL.CON-UUID", "device", "show", status.Interface); queryErr == nil {
+			activeUUID = strings.TrimSpace(string(output))
+		}
+	}
+	unchangedSavedNetwork := request.UUID != "" && request.UUID == activeUUID
+	if unchangedSavedNetwork && request.Password == "" && request.BSSID == "" && request.Channel == 0 {
+		state, stateErr := m.wifiInterfaceState(ctx, status.Interface)
+		if stateErr != nil {
+			return stateErr
+		}
+		if networkManagerActivationInProgress(state) {
+			waitCtx, waitCancel := context.WithTimeout(ctx, recoveryTimeout)
+			defer waitCancel()
+			if err := m.waitWiFiUUIDActivation(waitCtx, status.Interface, request.UUID); err != nil {
+				return err
+			}
+		} else if state != 100 {
+			return errors.New("当前无线配置已激活，但设备尚未连接")
+		}
+		if request.AutoConnect != nil {
+			return m.setAutoConnect(ctx, request.UUID, *request.AutoConnect)
+		}
+		return nil
+	}
 	if status.APActive && !status.ConcurrentMode && !request.ConfirmAPDisconnect {
 		return ErrAPActive
 	}
@@ -919,15 +985,38 @@ func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, recon
 			}
 		}
 	}
-	target, err := m.resolveAccessPoint(ctx, status.Interface, ssid, request.BSSID, request.Channel)
+	target, err := m.resolveWiFiSwitchAccessPoint(ctx, status.Interface, request, ssid)
 	if err != nil {
 		return err
 	}
-	if status.APActive && status.ConcurrentMode && status.ChannelCoupled {
-		if err := m.alignAPChannel(ctx, status, target.Channel); err != nil {
+	// 输入错误不能中断已有网络；所有会改动无线状态的操作都在校验之后。
+	if request.UUID == "" {
+		if err := validateSSID(request.SSID); err != nil {
 			return err
 		}
+		security := normalizeSecurity(request.Security)
+		if security != "open" {
+			if security != "wpa" {
+				return ErrUnsupportedSecurity
+			}
+			if err := validatePassword(request.Password); err != nil {
+				return err
+			}
+		}
 	}
+	// 关闭热点可能让发起请求的浏览器离线，切换和回滚不能随 HTTP 取消而中止。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+	defer cancel()
+	switchState, err := m.prepareWiFiSwitch(ctx, status, target.Channel)
+	defer func() {
+		if err != nil && switchState != nil {
+			err = errors.Join(err, switchState.rollback(m, status.Interface))
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	switchState.connecting = true
 	if request.UUID != "" {
 		if err := m.clearProfileBSSIDLock(ctx, request.UUID); err != nil {
 			return fmt.Errorf("清除上游 WiFi BSSID 锁定: %w", err)
@@ -941,7 +1030,7 @@ func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, recon
 		if err != nil {
 			return fmt.Errorf("连接已保存网络: %w", err)
 		}
-		if err := m.ensureAPAfterUpstream(ctx, status, target.Channel); err != nil {
+		if err := switchState.restoreAPAfterConnect(ctx, m, status); err != nil {
 			return fmt.Errorf("连接上游后恢复热点: %w", err)
 		}
 		if request.AutoConnect != nil {
@@ -968,10 +1057,10 @@ func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, recon
 		}
 		args = append(args, "password", request.Password)
 	}
-	if _, err := m.run(ctx, "nmcli", args...); err != nil {
+	if err := m.activateNewWiFi(ctx, status.Interface, request.SSID, args); err != nil {
 		return fmt.Errorf("连接无线网络: %w", err)
 	}
-	if err := m.ensureAPAfterUpstream(ctx, status, target.Channel); err != nil {
+	if err := switchState.restoreAPAfterConnect(ctx, m, status); err != nil {
 		return fmt.Errorf("连接上游后恢复热点: %w", err)
 	}
 	autoConnect := true
@@ -1000,6 +1089,18 @@ func (m *Manager) connectWiFi(ctx context.Context, request ConnectRequest, recon
 
 // DisconnectWiFi 只断开当前客户端连接，并保留已保存配置和自动连接策略。
 func (m *Manager) DisconnectWiFi(ctx context.Context) error {
+	return m.disconnectWiFi(ctx, "")
+}
+
+// DisconnectWiFiProfile 防止旧页面的断开按钮误断开用户刚切换的新网络。
+func (m *Manager) DisconnectWiFiProfile(ctx context.Context, uuid string) error {
+	if !validUUID(uuid) {
+		return invalidInput("连接 UUID 无效")
+	}
+	return m.disconnectWiFi(ctx, uuid)
+}
+
+func (m *Manager) disconnectWiFi(ctx context.Context, expectedUUID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.carPlayBlocksWiFiLocked() {
@@ -1012,7 +1113,10 @@ func (m *Manager) DisconnectWiFi(ctx context.Context) error {
 	if !status.Available || status.Interface == "" {
 		return ErrWiFiUnavailable
 	}
-	if status.CurrentConnection == "" {
+	if expectedUUID != "" && expectedUUID != status.ConnectionUUID {
+		return invalidInput("当前 WiFi 已发生变化，请刷新后再断开")
+	}
+	if status.CurrentConnection == "" && status.ConnectionState != "connecting" {
 		return nil
 	}
 	if _, err := m.run(ctx, "nmcli", "device", "disconnect", status.Interface); err != nil {
@@ -1178,11 +1282,15 @@ func (m *Manager) Forget(ctx context.Context, uuid string) error {
 	if selected.UUID == "" || selected.Mode == "ap" {
 		return invalidInput("未找到可删除的已保存 WiFi")
 	}
-	if selected.Active {
-		return invalidInput("不能忘记当前正在使用的 WiFi")
-	}
 	if _, err := m.run(ctx, "nmcli", "connection", "delete", "uuid", uuid); err != nil {
 		return fmt.Errorf("忘记无线网络: %w", err)
+	}
+	if selected.Active {
+		wifiInterface, _, _, _ := m.networkInterfaces(ctx, profiles)
+		if selected.Device == wifiInterface {
+			// 删除活动连接由 NetworkManager 一并停用；成功后才抑制程序自身的自动恢复。
+			m.manualWiFiDisconnect = true
+		}
 	}
 	return nil
 }
@@ -1279,6 +1387,7 @@ func (m *Manager) apSettingsFromProfiles(ctx context.Context, profiles []profile
 			capabilityInterface = wifiInterface
 		}
 		settings.AllowedChannels = m.allowedAPChannels(ctx, capabilityInterface)
+		m.readAPSecurity(ctx, &settings)
 		settings.ConflictingProfiles = apInterfaceConflicts(profiles, wifiInterface, apInterface)
 		if len(settings.ConflictingProfiles) > 0 {
 			settings.State = "blocked"
@@ -1306,6 +1415,7 @@ func (m *Manager) apSettingsFromProfiles(ctx context.Context, profiles []profile
 			settings.Enabled = true
 			settings.State = "running"
 			settings.StatusMessage = "热点正在正常广播"
+			settings.ActiveSecurity = m.activeAPSecurity(ctx, apInterface)
 		} else if settings.State != "blocked" {
 			settings.State = "degraded"
 			settings.ReasonCode = "ap_not_broadcasting"
@@ -1414,6 +1524,9 @@ func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (st
 			}
 		}
 	}
+	if station := wirelessRoleName("TESLABOX_WIFI_INTERFACE"); station != "" && deviceExists(station) && apAvailable {
+		return station, apInterface, true, true
+	}
 	if m.configuredWiFiInterface != "" {
 		available := deviceExists(m.configuredWiFiInterface) || activeClientInterface == m.configuredWiFiInterface
 		return m.configuredWiFiInterface, apInterface, available, apAvailable
@@ -1448,6 +1561,9 @@ func (m *Manager) networkInterfaces(ctx context.Context, profiles []profile) (st
 }
 
 func (m *Manager) apInterface(profiles []profile) string {
+	if reserved := wirelessRoleName("TESLABOX_AP_INTERFACE"); reserved != "" {
+		return reserved
+	}
 	for _, item := range profiles {
 		if item.Mode == "ap" && item.Active && item.Device != "" {
 			return item.Device
@@ -1761,6 +1877,16 @@ func (m *Manager) allowedAPChannels(ctx context.Context, interfaceName string) [
 }
 
 func (m *Manager) apChannelPreflight(ctx context.Context, interfaceName string, channel int) error {
+	if m.regulatory != nil {
+		if err := m.regulatory.Apply(ctx); err != nil {
+			return &APOperationError{Code: "regulatory_apply_failed", Message: "无线地区配置未能应用，未强行启动热点", Suggestion: "请核对网络设置中的已保存地区与实际监管域，并查看诊断报告。"}
+		}
+	}
+	return m.checkAPChannel(ctx, interfaceName, channel)
+}
+
+// 页面查询只读取信道限制，不能因为刷新设置就改变全局监管域。
+func (m *Manager) checkAPChannel(ctx context.Context, interfaceName string, channel int) error {
 	if channel <= 0 {
 		return nil
 	}
@@ -1796,7 +1922,7 @@ func (m *Manager) applyAPChannelRestriction(ctx context.Context, settings *APSet
 	if channel <= 0 || interfaceName == "" {
 		return
 	}
-	err := m.apChannelPreflight(ctx, interfaceName, channel)
+	err := m.checkAPChannel(ctx, interfaceName, channel)
 	var operationError *APOperationError
 	if !errors.As(err, &operationError) || operationError == nil {
 		return
@@ -1922,10 +2048,17 @@ func parseCombinationLimit(combination, marker string) (int, bool) {
 
 // UpdateAP 校验并更新现有热点；空密码表示保留原密码。
 func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
+	if update.ConfirmCarPlayReconnect {
+		return m.updateAPWithCarPlayRestart(ctx, update)
+	}
+	return m.updateAP(ctx, update, "")
+}
+
+func (m *Manager) updateAP(ctx context.Context, update APUpdate, restartTemplate string) error {
 	m.mu.Lock()
-	if m.carPlayNetworkReservedLocked() {
+	if m.carPlayRecoveryUncertain || m.carPlayNetworkHold != nil || m.carPlayWiFiReconnect && restartTemplate == "" {
 		m.mu.Unlock()
-		return carPlayNetworkBusy()
+		return carPlayAPBusy()
 	}
 	locked := true
 	defer func() {
@@ -1933,16 +2066,12 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 			m.mu.Unlock()
 		}
 	}()
-	if err := validateSSID(update.SSID); err != nil {
+	if err := validateAPUpdate(update); err != nil {
 		return err
 	}
-	if update.Password != "" {
-		if err := validatePassword(update.Password); err != nil {
-			return err
-		}
-	}
-	if !validBandChannel(update.Band, update.Channel) {
-		return invalidInput("热点频段或信道无效")
+	securityArgs, err := apSecurityArguments(update.SecurityMode)
+	if err != nil {
+		return err
 	}
 	settings, err := m.APSettings(ctx)
 	if err != nil {
@@ -1950,6 +2079,26 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 	}
 	if !settings.Available || !validUUID(settings.UUID) {
 		return invalidInput("未找到可管理的 AP 配置")
+	}
+	if restartTemplate != "" && settings.UUID != restartTemplate {
+		return invalidInput("热点模板身份已改变，未修改其他热点配置")
+	}
+	if update.SecurityMode == "wpa3" {
+		available := false
+		for _, option := range settings.SecurityOptions {
+			if option.Mode == "wpa3" {
+				available = option.Available
+			}
+		}
+		if !available {
+			return &APOperationError{
+				Code: "ap_security_unavailable", Message: "无法确认当前 AP 接口支持 WPA3-Personal",
+				Suggestion: "请检查 wpa_supplicant 控制接口、SAE、管理帧保护和 AP 能力；或明确选择 WPA2，不会自动降级。",
+			}
+		}
+	}
+	if update.Password != "" && update.SecurityMode == "" && !profileUsesPSK(settings.Security) {
+		return invalidInput("请先选择热点安全认证方式，再设置密码")
 	}
 	if update.Enabled && len(settings.ConflictingProfiles) > 0 {
 		return &APOperationError{
@@ -2018,14 +2167,34 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 		"connection.autoconnect-retries", "1",
 		"ipv4.method", "shared",
 	}
+	args = append(args, securityArgs...)
 	if update.Password != "" {
-		args = append(args, "802-11-wireless-security.key-mgmt", "wpa-psk", "802-11-wireless-security.psk", update.Password)
+		args = append(args, "802-11-wireless-security.psk", update.Password)
 	}
 	if _, err := m.run(ctx, "nmcli", args...); err != nil {
+		if update.SecurityMode != "" {
+			message := err.Error()
+			if update.Password != "" {
+				message = strings.ReplaceAll(message, update.Password, "[已隐藏密码]")
+			}
+			m.logger.Warn("保存热点安全认证失败", "security_mode", update.SecurityMode, "error", message)
+			return &APOperationError{
+				Code: "ap_security_config_rejected", Message: "系统拒绝保存热点认证配置，未自动降级",
+				Suggestion: "请检查 NetworkManager 版本、认证参数及已有密码是否兼容；可通过有线网络查看详细日志。",
+			}
+		}
 		return fmt.Errorf("保存热点配置: %w", err)
 	}
 	m.apUpdateGeneration++
 	generation := m.apUpdateGeneration
+	if restartTemplate != "" {
+		// CarPlay 会从此模板重建专用热点。普通热点不能占住接口，否则新租约会被拒绝。
+		// 显式关闭也阻止本次模板修改触发自动连接；不留下延迟任务误关下一轮专用热点。
+		if _, err := m.run(ctx, "nmcli", "--wait", "15", "connection", "down", "uuid", settings.UUID); err != nil && !isNMDeviceInactive(err) {
+			return fmt.Errorf("已保存热点模板，但释放普通热点接口失败: %w", err)
+		}
+		return nil
+	}
 	if !update.Enabled && !settings.DesiredEnabled && !settings.Enabled {
 		return nil
 	}
@@ -2052,6 +2221,19 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 		operationArgs = append(operationArgs, "ifname", settings.Interface)
 	}
 	if _, err := m.run(ctx, "nmcli", operationArgs...); err != nil {
+		// 接口重建可能改变信道权限；重新测量，不能把监管错误泛化为认证不兼容。
+		if m.regulatory != nil {
+			if channelErr := m.apChannelPreflight(ctx, settings.Interface, effectiveChannel); channelErr != nil {
+				return channelErr
+			}
+		}
+		if update.SecurityMode != "" {
+			m.logger.Warn("应用热点安全认证失败", "security_mode", update.SecurityMode, "interface", settings.Interface, "error", err)
+			return &APOperationError{
+				Code: "ap_security_activation_failed", Message: "热点认证配置已保存，但启动失败，未自动降级",
+				Suggestion: "请通过有线网络检查日志中的认证、驱动及信道错误，必要时明确改回 WPA2。",
+			}
+		}
 		return fmt.Errorf("应用热点配置: %w", err)
 	}
 	runtime := m.activeAPRuntime(ctx, settings.Interface)
@@ -2060,6 +2242,15 @@ func (m *Manager) UpdateAP(ctx context.Context, update APUpdate) error {
 			Code:       "ap_not_broadcasting",
 			Message:    "NetworkManager 已接受热点配置，但无线接口没有正常广播 SSID",
 			Suggestion: "请检查页面显示的能力限制；系统不会把该状态误报为运行中。",
+		}
+	}
+	if update.SecurityMode != "" {
+		activeSecurity := m.activeAPSecurity(ctx, settings.Interface)
+		if activeSecurity != "" && activeSecurity != update.SecurityMode {
+			return &APOperationError{
+				Code: "ap_security_mismatch", Message: "接口报告的热点认证与所选认证不一致",
+				Suggestion: "请通过有线网络检查驱动和认证服务日志；不会把不同的运行认证误报为所选认证已生效。",
+			}
 		}
 	}
 	return nil

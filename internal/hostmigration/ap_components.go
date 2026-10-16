@@ -21,6 +21,9 @@ var (
 	managedAPAssets embed.FS
 
 	legacyAPScriptHashes = map[string]struct{}{
+		"6df5b75c9a011210ddac4e806181caabd42bbe534cba84f9975ebed0b0a07b49": {},
+		// 上一版尚未在开机及热插拔创建 AP 前应用持久监管域。
+		"f130629035996005d7616603f6dad25fdc41de4edc5a261e15d94b39ca7d579c": {},
 		// v0.1.7 会无条件创建虚拟 AP 接口，并假定所有无线网卡都支持 AP+STA 并发。
 		"e49dbbe68f4402c581238c3d55dc2906bdfc18a5c9f81d3d59ceb2b5a80244b3": {},
 		// v0.1.8 至 v0.1.10 已探测硬件能力，但尚未尊重热点开机自动连接开关。

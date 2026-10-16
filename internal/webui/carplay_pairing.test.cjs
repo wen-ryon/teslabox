@@ -10,7 +10,7 @@ function fixture(fetcher,confirm=()=>true){
   const nodes=new Map();let poll;
   for(const id of ['panel','device','status','prompt','digits','scan','start','confirm','cancel','reconcile'])nodes.set('carplay-pairing-'+id,{value:'',textContent:'',disabled:false,hidden:false,offsetParent:{},children:[],handlers:{},addEventListener(name,handler){this.handlers[name]=handler;},replaceChildren(){this.children=[];},appendChild(node){this.children.push(node);}});
   const calls=[];
-  const context={confirm,document:{hidden:false,getElementById:id=>nodes.get(id),createElement:()=>({})},AbortController,setTimeout,clearTimeout,setInterval:callback=>{poll=callback;},fetch:async(path,options)=>{calls.push({path,...options});return fetcher(path,options);}};
+  const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,confirm,document:{hidden:false,getElementById:id=>nodes.get(id),createElement:()=>({})},AbortController,setTimeout,clearTimeout,setInterval:callback=>{poll=callback;},fetch:async(path,options)=>{calls.push({path,...options});return fetcher(path,options);}};
   vm.runInNewContext(fs.readFileSync('internal/webui/assets/carplay-pairing.js','utf8'),context);
   return {nodes,calls,load:()=>context.TeslaBoxCarPlayPairing.load(),get:id=>nodes.get('carplay-pairing-'+id),click:async id=>{nodes.get('carplay-pairing-'+id).handlers.click();await flush();},change:()=>nodes.get('carplay-pairing-device').handlers.change(),poll:async()=>{poll();await flush();}};
 }

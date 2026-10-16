@@ -9,7 +9,7 @@ function fixture(request) {
   const session = {id:'recent',snapshot_id:'one',duration_state:'estimated'};
   const nodes = {};
   const card = {dataset:{sessionId:'recent'},querySelector:key => nodes[key] ||= {}};
-  const context = vm.createContext({appView:{hidden:false},document:{hidden:false,querySelectorAll:()=>[card]},state:{page:'dashboard'},recentSessions:[session],archivedSessions:[],URLSearchParams,request,console:{warn:()=>{}},sessionDurationLabel:s=>s.duration_state,formatSessionRange:()=> 'range'});
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,appView:{hidden:false},document:{hidden:false,querySelectorAll:()=>[card]},state:{page:'dashboard'},recentSessions:[session],archivedSessions:[],URLSearchParams,request,console:{warn:()=>{}},sessionDurationLabel:s=>s.duration_state,formatSessionRange:()=> 'range'});
   vm.runInContext(code, context);
   return {context,session,nodes};
 }

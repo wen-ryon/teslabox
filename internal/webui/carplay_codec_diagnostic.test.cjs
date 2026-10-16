@@ -23,7 +23,7 @@ function fixture(t) {
 function actualCallback(options, writer, stages) {
   const match = runSource.match(/onCodecConfig: (bytes => \{[\s\S]*?\n    \}),\n    onObservation:/);
   assert.ok(match, '须执行运行入口的真实 codec 回调');
-  return vm.runInNewContext(`(${match[1]})`, { Buffer, codecSaved: false,
+  return vm.runInNewContext(`(${match[1]})`, {TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t, Buffer, codecSaved: false,
     temporary: options.directory, values: { binary: path.join(options.runtimeDirectory, 'teslabox-carplay') }, path,
     writeCodecDiagnostic: (bytes, args) => writer(bytes, { ...args, allowInsecureTestPlatform: options.allowInsecureTestPlatform }),
     stage: name => stages.push(name) });
@@ -40,7 +40,7 @@ test('真实首个 codec 回调不修改版本目录，重复回调只写一次�
   if (process.platform === 'linux') assert.equal(fs.statSync(path.join(options.directory, CODEC_DIAGNOSTIC_FILE)).mode & 0o777, 0o600);
   const cleanup = runSource.match(/  if \(temporary\) \{[\s\S]*?\n  \}\n  stage\('owned_resources_stopped'\)/);
   assert.ok(cleanup, '须执行真实 finally 的诊断清理');
-  vm.runInNewContext(cleanup[0], { temporary: options.directory, fs, path, CODEC_DIAGNOSTIC_FILE, process: {}, stage: () => {} });
+  vm.runInNewContext(cleanup[0], {TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t, temporary: options.directory, fs, path, CODEC_DIAGNOSTIC_FILE, process: {}, stage: () => {} });
   assert.equal(fs.existsSync(options.directory), false);
   assert.deepEqual(fs.readdirSync(options.runtimeDirectory), before);
 });

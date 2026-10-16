@@ -36,13 +36,22 @@ func (m *Manager) connectWithCarPlayRestart(ctx context.Context, request Connect
 	}
 	m.carPlayWiFiReconnect = true
 	m.mu.Unlock()
+	return m.runCarPlayNetworkChange(ctx, "手动 Wi-Fi 连接已确认中断 CarPlay", func(operationCtx context.Context) error {
+		request.ConfirmCarPlayReconnect = false
+		request.ConfirmAPDisconnect = true
+		return m.connectWiFi(operationCtx, request, true)
+	})
+}
+
+// 调用前必须在网络锁内完成校验并设置事务标记，WiFi 与 AP 共用停止、释放及恢复边界。
+func (m *Manager) runCarPlayNetworkChange(ctx context.Context, message string, apply func(context.Context) error) (operationErr error) {
 	active, err := m.run(ctx, "systemctl", "show", carPlayServiceUnit, "-p", "ActiveState", "--value")
 	if err != nil || strings.TrimSpace(string(active)) != "active" {
 		m.mu.Lock()
 		m.carPlayWiFiReconnect = false
 		m.mu.Unlock()
 		return &APOperationError{Code: "carplay_restart_unavailable", Message: "CarPlay 服务状态异常，无法安全释放无线网络",
-			Suggestion: "请下载 CarPlay 日志诊断；本次没有更改 Wi-Fi。"}
+			Suggestion: "请下载 CarPlay 日志诊断；本次没有更改无线网络。"}
 	}
 	// 已确认的操作在 AP 短暂断开、HTTP 客户端离线后仍须完成恢复。
 	operationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
@@ -55,10 +64,12 @@ func (m *Manager) connectWithCarPlayRestart(ctx context.Context, request Connect
 		defer restoreCancel()
 		// 异步启动避免等待新会话调用主程序租约接口造成循环等待。
 		if _, err := m.run(restoreCtx, "systemctl", "--no-block", "start", carPlayServiceUnit); err != nil {
-			operationErr = errors.Join(operationErr, fmt.Errorf("恢复 CarPlay 服务失败: %w", err))
+			m.logger.Error("恢复 CarPlay 服务失败", "error", err)
+			operationErr = errors.Join(&APOperationError{Code: "carplay_restart_failed", Message: "无线网络操作已结束，但恢复 CarPlay 服务失败",
+				Suggestion: "设置可能已保存，请通过有线网络检查状态，并在 CarPlay 设置中重新启动；不要反复提交。"}, operationErr)
 		}
 	}()
-	m.logger.Info("手动 Wi-Fi 连接已确认中断 CarPlay")
+	m.logger.Info(message)
 	// 停止过程会调用租约释放接口，此时不能持有 Manager.mu。
 	if _, err := m.run(operationCtx, "systemctl", "stop", carPlayServiceUnit); err != nil {
 		return fmt.Errorf("暂时停止 CarPlay 失败: %w", err)
@@ -70,9 +81,7 @@ func (m *Manager) connectWithCarPlayRestart(ctx context.Context, request Connect
 		return &APOperationError{Code: "carplay_release_incomplete", Message: "CarPlay 无线网络尚未安全释放",
 			Suggestion: "已尝试恢复 CarPlay，本次未强行覆盖网络租约。"}
 	}
-	request.ConfirmCarPlayReconnect = false
-	request.ConfirmAPDisconnect = true
-	return m.connectWiFi(operationCtx, request, true)
+	return apply(operationCtx)
 }
 
 func validateCarPlayWiFiConnect(status WiFiStatus, request ConnectRequest) error {

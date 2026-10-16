@@ -1,0 +1,3 @@
+# 原生 AP 热插拔时先保持未接管；热点流程先关闭自动连接，再明确交给 NM。
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="ap[0-9]*", DRIVERS=="rtl8852be", ENV{NM_UNMANAGED}="1"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="ap[0-9]*", DRIVERS=="8852be", ENV{NM_UNMANAGED}="1"

@@ -2,12 +2,13 @@
 (function(root){
   'use strict';
   function create(notice, surface, openSettings) {
-    const waiting='手机请求显示 CarPlay，正在等待认证画面';
+    const t=message=>root.TeslaBoxI18n?.t(message)||message;
+    const waiting=t('手机请求显示 CarPlay，正在等待认证画面');
     return {
       apply(requested) {
-        if (typeof requested !== 'boolean') throw new Error('宿主显示请求格式不合法');
+        if (typeof requested !== 'boolean') throw new Error(t('宿主显示请求格式不合法'));
         if (!requested) {
-          if (notice.textContent===waiting) notice.textContent='手机显示请求已结束，仍等待认证画面';
+          if (notice.textContent===waiting) notice.textContent=t('手机显示请求已结束，仍等待认证画面');
           return;
         }
         if(typeof openSettings==='function'){openSettings();return;}

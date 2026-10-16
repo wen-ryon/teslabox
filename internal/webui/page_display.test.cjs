@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname,"assets/page-display.js"),"utf8");
 function load(storage) {
   const style = {};
-  const context = vm.createContext({localStorage:storage,window:{innerWidth:773,innerHeight:601},
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,localStorage:storage,window:{innerWidth:773,innerHeight:601},
     document:{documentElement:{style:{setProperty:(key,value)=>{style[key]=value;}}}}});
   vm.runInContext(source,context);
   return {display:context.TeslaBoxPageDisplay,style};

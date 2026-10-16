@@ -6,7 +6,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'assets/app.js'
 const code=source.slice(source.indexOf('  const scan = storage.scan_progress;'),source.indexOf('\nfunction renderSystemStatus')).replace(/}\s*$/, '');
 function render(storage){
  const nodes={};
- const context=vm.createContext({storage,storageScanActive:false,$:id=>nodes[id]||=( {style:{},classList:{toggle(){},add(){}}}),formatNumber:String,formatBytes:n=>`${n} B`,formatDate:String});
+ const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,storage,storageScanActive:false,$:id=>nodes[id]||=( {style:{},classList:{toggle(){},add(){}}}),formatNumber:String,formatBytes:n=>`${n} B`,formatDate:String});
  vm.runInContext(code,context);return nodes;
 }
 test('未知容量和索引不显示零或满进度条',()=>{

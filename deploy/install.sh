@@ -28,6 +28,8 @@ AP_INITIAL_PASSWORD=""
 MT7922_MODE="ask"
 APT_SOURCE_BACKUP_DIR="/var/backups/teslabox/apt-sources"
 APT_SOURCE_BACKUP_TIMESTAMP=""
+APT_DEPENDENCY_SOURCE_LIST=""
+APT_DEPENDENCY_LISTS_DIR=""
 DEBIAN_MAIN_MIRROR=""
 DEBIAN_SECURITY_MIRROR=""
 DEBIAN_SECURITY_SNAPSHOT="https://snapshot.debian.org/archive/debian-security/20260831T211304Z"
@@ -47,6 +49,13 @@ die() {
 }
 
 cleanup() {
+    case "${APT_DEPENDENCY_LISTS_DIR}" in
+        /var/lib/apt/lists/teslabox-installer.*)
+            if [ -d "${APT_DEPENDENCY_LISTS_DIR}" ] && [ ! -L "${APT_DEPENDENCY_LISTS_DIR}" ]; then
+                find "${APT_DEPENDENCY_LISTS_DIR}" -depth -delete 2>/dev/null || true
+            fi
+            ;;
+    esac
     if [ -n "${WORK_DIR}" ] && [ -d "${WORK_DIR}" ]; then
         find "${WORK_DIR}" -depth -delete 2>/dev/null || true
     fi
@@ -366,18 +375,54 @@ configure_debian_apt_sources() {
     done <"${apt_source_list}"
 }
 
+prepare_dependency_apt_scope() {
+    if [ -n "${APT_DEPENDENCY_SOURCE_LIST}" ]; then
+        return
+    fi
+    [ -n "${WORK_DIR}" ] && [ -d "${WORK_DIR}" ] || die "依赖安装缺少安全临时目录。"
+    [ -n "${DEBIAN_MAIN_MIRROR}" ] && [ -n "${DEBIAN_SECURITY_MIRROR}" ] || die "依赖安装尚未核验 Debian 源。"
+    APT_DEPENDENCY_SOURCE_LIST="${WORK_DIR}/teslabox-dependencies.list"
+    if [ -z "${APT_DEPENDENCY_LISTS_DIR}" ]; then
+        # 索引不含私密配置，放在可供 _apt 遍历的独立目录，保留下载沙箱。
+        APT_DEPENDENCY_LISTS_DIR="$(mktemp -d /var/lib/apt/lists/teslabox-installer.XXXXXX)"
+        chmod 0755 "${APT_DEPENDENCY_LISTS_DIR}"
+    fi
+    install -d -m 0755 "${APT_DEPENDENCY_LISTS_DIR}/partial"
+    # 独立索引防止用户第三方仓缺钥阻断首装，也防止复用其旧缓存参与依赖解析。
+    # 每个源仍绑定各自已核验密钥；仅固定安全快照豁免日期，不豁免签名。
+    printf '%s\n' \
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] ${DEBIAN_MAIN_MIRROR} bullseye main contrib non-free" \
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] ${DEBIAN_MAIN_MIRROR} bullseye-updates main contrib non-free" \
+        "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] ${DEBIAN_SECURITY_MIRROR} bullseye-security main contrib non-free" \
+        'deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bullseye rockchip-bullseye main' \
+        'deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] https://radxa-repo.github.io/bullseye bullseye main' \
+        >"${APT_DEPENDENCY_SOURCE_LIST}"
+    log "本次依赖安装仅使用已核验 Debian / Radxa 源；第三方源配置保留，不参与本次安装。"
+}
+
+dependency_apt_get() {
+    prepare_dependency_apt_scope
+    apt-get \
+        -o "Dir::Etc::sourcelist=${APT_DEPENDENCY_SOURCE_LIST}" \
+        -o 'Dir::Etc::sourceparts=-' \
+        -o "Dir::State::lists=${APT_DEPENDENCY_LISTS_DIR}" \
+        -o Acquire::Languages=none \
+        -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o Acquire::Retries=3 "$@"
+}
+
 download_debian_dependencies() {
     # 先把所有依赖下载到 APT 缓存；镜像元数据有效但 .deb 已下线时，此处会提前失败。
-    apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::http::No-Cache=true \
+    dependency_apt_get -o APT::Update::Error-Mode=any -o Acquire::http::No-Cache=true \
         -o Acquire::https::No-Cache=true update &&
-        apt-get -o Acquire::Retries=3 install -y -d --no-install-recommends "$@"
+        dependency_apt_get install -y -d --no-install-recommends "$@"
 }
 
 install_debian_dependencies() {
     if ! download_debian_dependencies "$@"; then
-        die "Debian 依赖下载失败；已保留 APT 源备份，未开始安装 TeslaBox 程序。请检查官方快照访问后重试。"
+        die "本次 Debian / Radxa 依赖源刷新或软件下载失败；请查看上方具体仓库、签名或文件错误。已保留 APT 源备份，未开始安装 TeslaBox 程序；没有关闭签名校验。"
     fi
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"
+    dependency_apt_get install -y --no-install-recommends "$@"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -502,9 +547,11 @@ for REQUIRED_PAYLOAD_FILE in \
     systemd/teslabox-update.service \
     systemd/teslabox-ap.service \
     systemd/teslabox-fan-early.service \
+    systemd/teslabox-wireless-region.service \
     udev/99-teslabox.rules \
     scripts/teslabox-ap-setup.sh \
     scripts/teslabox-fan-early.sh \
+    scripts/teslabox-wireless-region.sh \
     scripts/install-media-toolchain.sh \
     keyring/radxa-archive-keyring_0.2.2_all.deb; do
     validate_payload_file "${REQUIRED_PAYLOAD_FILE}"
@@ -629,6 +676,14 @@ install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-fan-early.service" /etc/systemd
 install -m 0644 "${PAYLOAD_DIR}/udev/99-teslabox.rules" /etc/udev/rules.d/99-teslabox.rules
 install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-ap-setup.sh" /usr/local/libexec/teslabox-ap-setup.sh
 install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-fan-early.sh" /usr/local/libexec/teslabox-fan-early.sh
+
+install -m 0755 "${PAYLOAD_DIR}/scripts/teslabox-wireless-region.sh" /usr/local/libexec/teslabox-wireless-region.sh
+install -m 0644 "${PAYLOAD_DIR}/systemd/teslabox-wireless-region.service" /etc/systemd/system/teslabox-wireless-region.service
+systemctl enable teslabox-wireless-region.service >/dev/null
+# 已有地区优先，未配置的国内版设备初始化为 CN；不加载存储和 Gadget 服务。
+if ! /usr/local/bin/teslabox wireless-region-init; then
+    warn "无线地区未生效；已保留既有配置，请通过网线在设置中心核对。"
+fi
 
 log "停用 Radxa 原厂 USB Gadget 服务"
 for GADGET_SERVICE in radxa-adbd.service radxa-usbnet.service; do
@@ -831,7 +886,7 @@ EOF
         "WIFI_MT7922_patch_mcu_1_1_hdr.bin" "${MT7922_WIFI_PATCH_SHA256}"
     prepare_mt7922_wifi_firmware "${BT_DIR}/firmware/mediatek" \
         "WIFI_RAM_CODE_MT7922_1.bin" "${MT7922_WIFI_RAM_SHA256}"
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bluez
+    dependency_apt_get install -y --no-install-recommends bluez
     dpkg -i "${BT_DIR}/linux-image-5.10.160teslabox2_5.10.160teslabox2-1_arm64.deb"
     BT_KERNEL="5.10.160teslabox2"
     install -d -m 0755 "/lib/modules/${BT_KERNEL}/updates" "/lib/modules/${BT_KERNEL}/updates/teslabox-bluetooth"

@@ -24,6 +24,9 @@ func TestVerifyKernelPolicy(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "signed RC1"},
+		{name: "frozen apfix6 requires paired rollback", mutate: func(p *KernelPolicy) {
+			p.Files["modules/8852be.ko"] = KernelFile{SHA256: "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce", Size: 6011152}
+		}, wantErr: true},
 		{name: "tampered bytes", tamper: true, wantErr: true},
 		{name: "wrong ABI", mutate: func(p *KernelPolicy) { p.Release = "5.10.160teslabox2" }, wantErr: true},
 		{name: "old RTL module", mutate: func(p *KernelPolicy) {
@@ -44,7 +47,7 @@ func TestVerifyKernelPolicy(t *testing.T) {
 			p := KernelPolicy{Schema: 1, Kind: "teslabox-kernel-dependency-v1", Version: KernelUpgradeVersion, Board: "radxa-rock-3a", Arch: "arm64", Release: kernelRelease,
 				MainSHA256: strings.Repeat("a", 64), URL: "https://example.org/kernel.tar.gz", SHA256: strings.Repeat("b", 64), Size: 100,
 				Files: map[string]KernelFile{"kernel.deb": {SHA256: kernelDebDigest, Size: 10}, "modules/btusb.ko": {SHA256: btusbMT79xxDigest, Size: 1037880},
-					"modules/8852be.ko": {SHA256: apfix6Digest, Size: 20}, "modules/compat.ko": {SHA256: strings.Repeat("a", 64), Size: 10}, "licenses/LICENCE.mediatek": {SHA256: strings.Repeat("a", 64), Size: 10}}}
+					"modules/8852be.ko": {SHA256: rtl8852beDigest, Size: 20}, "modules/compat.ko": {SHA256: strings.Repeat("a", 64), Size: 10}, "licenses/LICENCE.mediatek": {SHA256: strings.Repeat("a", 64), Size: 10}}}
 			if test.mutate != nil {
 				test.mutate(&p)
 			}

@@ -1,11 +1,12 @@
 "use strict";
+const t = globalThis.TeslaBoxI18n.t;
 
 const cameraOrder = ["left_pillar", "front", "right_pillar", "left_repeater", "back", "right_repeater"];
 const compositeLayouts = {
-  composite6: {label:"六路合成", cameras:cameraOrder},
-  composite4a: {label:"四路合成 A", cameras:["front", "back", "left_repeater", "right_repeater"]},
-  composite4b: {label:"四路合成 B", cameras:["front", "right_repeater", "back", "left_repeater"]},
-  composite3: {label:"三路合成", cameras:["front", "right_repeater", "left_repeater"]},
+  composite6: {label:t("六路合成"), cameras:cameraOrder},
+  composite4a: {label:t("四路合成 A"), cameras:["front", "back", "left_repeater", "right_repeater"]},
+  composite4b: {label:t("四路合成 B"), cameras:["front", "right_repeater", "back", "left_repeater"]},
+  composite3: {label:t("三路合成"), cameras:["front", "right_repeater", "left_repeater"]},
 };
 const musicPageSize = 24;
 const savedView = readPreference("teslabox-view", "multi");
@@ -226,10 +227,10 @@ let onboardingState = null;
 let onboardingChecking = false;
 let pageGuideIndex = -1;
 const pageGuideSteps = [
-  {target:"nav-toggle", title:"页面从这里切换", detail:"点击左上角 TeslaBox 标志可以打开主导航，切换概览、录像备份、导出管理、媒体中心、日志中心和设置中心。"},
-  {target:"live-indicator", title:"设备连接状态", detail:"这里表示管理页面能否正常连接 TeslaBox 服务。显示“设备在线”时，页面可以继续读取设备状态。"},
-  {target:"internet-indicator", title:"互联网状态", detail:"这里表示 TeslaBox 当前是否能够访问互联网。无互联网不影响车机写入录像和局域网查看。"},
-  {target:"appearance-settings-title", page:"settings", section:"appearance-settings-section", title:"页面设置", detail:"在设置中心 → 系统 → 页面设置中切换主题、显示大小、全局字体和车机浏览器兼容模式，也可以退出管理页面。修改立即生效，仅保存在当前浏览器。"},
+  {target:"nav-toggle", title:t("页面从这里切换"), detail:t("点击左上角 TeslaBox 标志可以打开主导航，切换概览、录像备份、导出管理、媒体中心、日志中心和设置中心。")},
+  {target:"live-indicator", title:t("设备连接状态"), detail:t("这里表示管理页面能否正常连接 TeslaBox 服务。显示“设备在线”时，页面可以继续读取设备状态。")},
+  {target:"internet-indicator", title:t("互联网状态"), detail:t("这里表示 TeslaBox 当前是否能够访问互联网。无互联网不影响车机写入录像和局域网查看。")},
+  {target:"appearance-settings-title", page:"settings", section:"appearance-settings-section", title:t("页面设置"), detail:t("在设置中心 → 系统 → 页面设置中切换主题、显示大小、全局字体和车机浏览器兼容模式，也可以退出管理页面。修改立即生效，仅保存在当前浏览器。")},
 ];
 
 applyTheme(normalizeTheme(readPreference("teslabox-theme", "blue")));
@@ -300,7 +301,7 @@ function renderNetworkLoading() {
     root.hidden = true;
     return;
   }
-  $("network-loading-message").textContent = latestLoadingMessage(networkLoadingTasks, "正在与 TeslaBox 通信…");
+  $("network-loading-message").textContent = latestLoadingMessage(networkLoadingTasks, t("正在与 TeslaBox 通信…"));
   if (networkLoadingTimer || !root.hidden) return;
   networkLoadingTimer = window.setTimeout(() => {
     networkLoadingTimer = 0;
@@ -311,7 +312,7 @@ function renderNetworkLoading() {
 function startNetworkLoading(message) {
   const token = ++loadingSequence;
   const releaseControl = setRequestControlLoading(takeRequestControl());
-  networkLoadingTasks.set(token, message || "正在与 TeslaBox 通信…");
+  networkLoadingTasks.set(token, message || t("正在与 TeslaBox 通信…"));
   renderNetworkLoading();
   return () => {
     networkLoadingTasks.delete(token);
@@ -327,7 +328,7 @@ async function requestResponse(path, options = {}) {
     const response = await fetch(path, { credentials: "same-origin", ...fetchOptions });
     if (response.status === 401) {
       showLogin();
-      throw new Error("登录状态已失效");
+      throw new Error(t("登录状态已失效"));
     }
     return response;
   } finally {
@@ -338,7 +339,7 @@ async function requestResponse(path, options = {}) {
 async function request(path, options = {}) {
   const response = await requestResponse(path, options);
   if (!response.ok) {
-    let message = `请求失败（HTTP ${response.status}）`;
+    let message = t`请求失败（HTTP ${response.status}）`;
     let reasonCode = "";
     try {
       const payload = await response.json();
@@ -405,7 +406,7 @@ async function initialize() {
     await maybeShowOnboarding();
   } catch (error) {
     showApp();
-    setNotice(`无法连接 TeslaBox：${error.message}`, true);
+    setNotice(t`无法连接 TeslaBox：${error.message}`, true);
   }
 }
 
@@ -418,10 +419,10 @@ loginForm.addEventListener("submit", async (event) => {
     const response = await requestResponse("/api/v1/auth/login", {
       method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: $("password").value }),
-      loadingMessage:"正在验证登录…",
+      loadingMessage:t("正在验证登录…"),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "登录失败");
+    if (!response.ok) throw new Error(payload.error || t("登录失败"));
     $("password").value = "";
     state.mustChangePassword = Boolean(payload.must_change_password);
     showApp();
@@ -443,7 +444,7 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 $("logout-button").addEventListener("click", async () => {
-  await requestResponse("/api/v1/auth/logout", { method: "POST", loadingMessage:"正在退出管理页面…" });
+  await requestResponse("/api/v1/auth/logout", { method: "POST", loadingMessage:t("正在退出管理页面…") });
   closePasswordModal(true);
   closePlayer();
   showLogin();
@@ -527,6 +528,7 @@ $("wifi-scan").addEventListener("click", scanWiFi);
 $("saved-network-toggle").addEventListener("click", () => toggleNetworkPanel("saved-network-panel", "saved-network-toggle"));
 $("available-network-toggle").addEventListener("click", () => toggleNetworkPanel("available-network-panel", "available-network-toggle"));
 $("ap-band").addEventListener("change", () => populateAPChannels($("ap-band").value, 0, state.ap?.allowed_channels));
+$("ap-security").addEventListener("change", updateAPSecurityNotice);
 $("ap-form").addEventListener("submit", saveAPSettings);
 $("ap-repair-interface").addEventListener("click", repairAPInterface);
 $("export-settings-save").addEventListener("click", saveExportSettings);
@@ -607,7 +609,7 @@ document.querySelectorAll("[data-export-step]").forEach((button) => button.addEv
   document.querySelectorAll("[data-export-step]").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
   document.querySelectorAll("[data-export-adjust]").forEach((item) => {
     const [edge, direction] = item.dataset.exportAdjust.split(":");
-    item.textContent = `${edge === "start" ? "开始" : "结束"} ${Number(direction) < 0 ? "−" : "+"}${button.dataset.exportStep} 秒`;
+    item.textContent = t`${edge === "start" ? t("开始") : t("结束")} ${Number(direction) < 0 ? "−" : "+"}${button.dataset.exportStep} 秒`;
   });
 }));
 $("export-mode-clip").addEventListener("click", () => setExportMode("clip"));
@@ -672,13 +674,13 @@ async function refreshRecordings() {
 	button.disabled = true;
 	button.classList.add("is-loading");
 	button.setAttribute("aria-busy", "true");
-	button.textContent = "正在刷新…";
+	button.textContent = t("正在刷新…");
   try {
-    setNotice("正在读取车机刚写入的录像…", false, false);
+    setNotice(t("正在读取车机刚写入的录像…"), false, false);
     await request("/api/v1/scan", {method:"POST"});
     await refreshAll();
   } catch (error) {
-    setNotice(`刷新录像失败：${error.message}`, true);
+    setNotice(t`刷新录像失败：${error.message}`, true);
 	} finally {
 		button.disabled = false;
 		button.classList.remove("is-loading");
@@ -703,10 +705,10 @@ function closeNavigation() {
 function openPasswordModal(forced) {
   passwordChangeForced = Boolean(forced);
   $("password-modal").hidden = false;
-  $("password-modal-title").textContent = forced ? "请先修改默认密码" : "修改管理密码";
+  $("password-modal-title").textContent = forced ? t("请先修改默认密码") : t("修改管理密码");
   $("password-modal-detail").textContent = forced
-    ? "当前仍在使用首次启动默认密码 teslabox。修改成功前，设备管理和录像接口不会开放。"
-    : "新密码保存后，其他浏览器中的旧登录会话会立即失效。";
+    ? t("当前仍在使用首次启动默认密码 teslabox。修改成功前，设备管理和录像接口不会开放。")
+    : t("新密码保存后，其他浏览器中的旧登录会话会立即失效。");
   $("password-change-close").hidden = passwordChangeForced;
   $("password-change-error").textContent = "";
   $("current-password").value = "";
@@ -729,11 +731,11 @@ async function changeManagementPassword(event) {
   const errorElement = $("password-change-error");
   errorElement.textContent = "";
   if (newPassword !== confirmation) {
-    errorElement.textContent = "两次输入的新密码不一致";
+    errorElement.textContent = t("两次输入的新密码不一致");
     return;
   }
   if (newPassword.length < 8 || new TextEncoder().encode(newPassword).length > 128) {
-    errorElement.textContent = "新密码必须为 8 到 128 个字节";
+    errorElement.textContent = t("新密码必须为 8 到 128 个字节");
     return;
   }
   const button = $("password-change-submit");
@@ -744,7 +746,7 @@ async function changeManagementPassword(event) {
       body:JSON.stringify({current_password:currentPassword, new_password:newPassword}),
     });
     state.mustChangePassword = false;
-    $("password-status").textContent = "密码已更新";
+    $("password-status").textContent = t("密码已更新");
     closePasswordModal(true);
     await refreshAll();
     if (state.page === "settings") await loadSettings();
@@ -812,7 +814,7 @@ async function downloadDiagnosticReport() {
   const button = $("logs-download-report");
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = "正在收集…";
+  button.textContent = t("正在收集…");
   try {
     await globalThis.TeslaBoxPlaybackTrace?.drain();
     const source = $("logs-download-source").value;
@@ -820,9 +822,9 @@ async function downloadDiagnosticReport() {
     if (source) parameters.set("source", source);
     else if (playbackProbeLastID) parameters.set("probe_id", playbackProbeLastID);
     const reportPath = "/api/v1/diagnostics/report" + (parameters.size ? "?" + parameters : "");
-    const response = await requestResponse(reportPath, {cache:"no-store", loadingMessage:"正在生成完整诊断报告…"});
+    const response = await requestResponse(reportPath, {cache:"no-store", loadingMessage:t("正在生成完整诊断报告…")});
     if (!response.ok) {
-      let message = `生成诊断报告失败（HTTP ${response.status}）`;
+      let message = t`生成诊断报告失败（HTTP ${response.status}）`;
       try { message = (await response.json()).error || message; } catch (_) { /* 保留通用提示 */ }
       throw new Error(message);
     }
@@ -837,7 +839,7 @@ async function downloadDiagnosticReport() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast("诊断日志已下载，可以直接发给维护者。", "success");
+    showToast(t("诊断日志已下载，可以直接发给维护者。"), "success");
   } catch (error) {
     showToast(error.message, "error");
   } finally {
@@ -876,14 +878,14 @@ function renderMediaAssets(payload) {
   renderMusicPartitionAvailability(payload);
   const status = $("media-apply-status");
   status.className = `badge${payload.needs_apply ? " error" : " ok"}`;
-  status.textContent = payload.needs_apply ? "有待应用变更" : "已同步";
+  status.textContent = payload.needs_apply ? t("有待应用变更") : t("已同步");
   $("media-apply").disabled = !payload.needs_apply || !payload.image_available;
   if (!payload.image_available) {
-    $("media-apply-detail").textContent = payload.message || "TeslaCam 虚拟盘尚未初始化。";
+    $("media-apply-detail").textContent = payload.message || t("TeslaCam 虚拟盘尚未初始化。");
   } else if (payload.needs_apply) {
-    $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。`;
+    $("media-apply-detail").textContent = t`${payload.message ? `${payload.message} ` : ""}已暂存变更。应用时会暂停 USB Gadget，写入完成后需要插回 OTG 并执行温重启恢复。`;
   } else {
-    $("media-apply-detail").textContent = `${payload.message ? `${payload.message} ` : ""}当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。`;
+    $("media-apply-detail").textContent = t`${payload.message ? `${payload.message} ` : ""}当前没有待应用变更。上传或删除文件后，会在这里集中写入虚拟盘。`;
   }
 }
 
@@ -895,9 +897,9 @@ function renderMusicPartitionAvailability(payload) {
   $("media-music-files").disabled = disabled;
   $("media-music-upload").disabled = disabled;
   if (disabled) {
-    $("media-music-count").textContent = "未创建分区";
-    $("media-music-list").replaceChildren(Object.assign(document.createElement("p"), {className:"empty-state", textContent:"当前存储没有 FAT32 音乐分区。请在设置中心的“外接存储”中重新初始化并启用音乐分区。"}));
-    $("media-music-page-summary").textContent = "音乐导入已禁用";
+    $("media-music-count").textContent = t("未创建分区");
+    $("media-music-list").replaceChildren(Object.assign(document.createElement("p"), {className:"empty-state", textContent:t("当前存储没有 FAT32 音乐分区。请在设置中心的“外接存储”中重新初始化并启用音乐分区。")}));
+    $("media-music-page-summary").textContent = t("音乐导入已禁用");
   }
 }
 
@@ -910,17 +912,17 @@ function renderMediaUnavailable(message) {
     empty.textContent = message;
     list.append(empty);
   });
-  $("media-music-count").textContent = "0 首";
+  $("media-music-count").textContent = t("0 首");
   $("media-music-breadcrumb").replaceChildren();
   const musicEmpty = document.createElement("p");
   musicEmpty.className = "empty-state";
   musicEmpty.textContent = message;
   $("media-music-list").replaceChildren(musicEmpty);
-  $("media-music-page-summary").textContent = "无法读取";
+  $("media-music-page-summary").textContent = t("无法读取");
   $("media-music-back").disabled = true;
   $("media-music-prev").disabled = true;
   $("media-music-next").disabled = true;
-  $("media-apply-status").textContent = "不可用";
+  $("media-apply-status").textContent = t("不可用");
   $("media-apply-status").className = "badge error";
   $("media-apply").disabled = true;
 }
@@ -928,12 +930,12 @@ function renderMediaUnavailable(message) {
 function renderMediaCategory(category, assets) {
   const list = $(`media-${category}-list`);
   const count = $(`media-${category}-count`);
-  count.textContent = category === "wrap" ? `${assets.length} / 10` : `${assets.length} 个`;
+  count.textContent = category === "wrap" ? `${assets.length} / 10` : t`${assets.length} 个`;
   list.replaceChildren();
   if (!assets.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "暂无可识别媒体文件。";
+    empty.textContent = t("暂无可识别媒体文件。");
     list.append(empty);
     return;
   }
@@ -947,7 +949,7 @@ function musicAssets() {
 
 function renderMusicBrowser(assets) {
   const list = $("media-music-list");
-  $("media-music-count").textContent = `${assets.length} 首`;
+  $("media-music-count").textContent = t`${assets.length} 首`;
   renderMusicBreadcrumb();
   $("media-music-back").disabled = !state.musicPath;
   const entries = musicDirectoryEntries(assets, state.musicPath);
@@ -959,7 +961,7 @@ function renderMusicBrowser(assets) {
   if (!visible.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = state.musicPath ? "此目录没有可识别的歌曲。" : "暂无可识别歌曲。";
+    empty.textContent = state.musicPath ? t("此目录没有可识别的歌曲。") : t("暂无可识别歌曲。");
     list.append(empty);
   }
   visible.forEach((entry) => {
@@ -970,9 +972,9 @@ function renderMusicBrowser(assets) {
       const main = document.createElement("span");
       main.className = "media-asset-main";
       const name = document.createElement("strong");
-      name.textContent = `文件夹 · ${entry.name}`;
+      name.textContent = t`文件夹 · ${entry.name}`;
       const detail = document.createElement("small");
-      detail.textContent = `${entry.songCount} 首歌曲`;
+      detail.textContent = t`${entry.songCount} 首歌曲`;
       main.append(name, detail);
       const arrow = document.createElement("span");
       arrow.className = "media-directory-arrow";
@@ -988,7 +990,7 @@ function renderMusicBrowser(assets) {
     }
     list.append(createMediaAssetRow("music", entry.asset));
   });
-  $("media-music-page-summary").textContent = entries.length ? `第 ${state.musicPage + 1} / ${pageCount} 页 · ${entries.length} 项` : "0 项";
+  $("media-music-page-summary").textContent = entries.length ? t`第 ${state.musicPage + 1} / ${pageCount} 页 · ${entries.length} 项` : t("0 项");
   $("media-music-prev").disabled = state.musicPage === 0;
   $("media-music-next").disabled = state.musicPage >= pageCount - 1;
 }
@@ -1030,7 +1032,7 @@ function musicDirectoryEntries(assets, currentPath) {
     directory.songCount += 1;
     directories.set(path, directory);
   });
-  const order = (left, right) => left.name.localeCompare(right.name, "zh-CN", {numeric:true, sensitivity:"base"});
+  const order = (left, right) => left.name.localeCompare(right.name, globalThis.TeslaBoxI18n.locale, {numeric:true, sensitivity:"base"});
   return [...directories.values()].sort(order).concat(files.sort(order));
 }
 
@@ -1040,10 +1042,10 @@ function createMediaAssetRow(category, asset) {
   const main = document.createElement("div");
   main.className = "media-asset-main";
   const name = document.createElement("strong");
-  name.textContent = asset.name || "未命名媒体";
+  name.textContent = asset.name || t("未命名媒体");
   const detail = document.createElement("small");
   const files = Array.isArray(asset.files) ? asset.files : [];
-  detail.textContent = files.map((file) => `${file.name} · ${formatBytes(file.size_bytes)}`).join(" · ") || "文件详情不可用";
+  detail.textContent = files.map((file) => `${file.name} · ${formatBytes(file.size_bytes)}`).join(" · ") || t("文件详情不可用");
   main.append(name, detail);
   if (asset.preview_available && !asset.pending_delete) {
     const previewPath = `/api/v1/media-assets/${encodeURIComponent(asset.id)}/preview`;
@@ -1051,7 +1053,7 @@ function createMediaAssetRow(category, asset) {
       const preview = document.createElement("img");
       preview.className = "media-wrap-preview";
       preview.loading = "lazy";
-      preview.alt = `${asset.name || "皮肤"} 预览`;
+      preview.alt = t`${asset.name || t("皮肤")} 预览`;
       preview.src = previewPath;
       main.append(preview);
     } else if (category === "boombox") {
@@ -1067,12 +1069,12 @@ function createMediaAssetRow(category, asset) {
   actions.className = "media-asset-actions";
   const stateBadge = document.createElement("span");
   stateBadge.className = `badge${asset.pending_delete ? " error" : asset.applied ? " ok" : ""}`;
-  stateBadge.textContent = asset.external ? "直接写入" : asset.pending_delete ? "待删除" : asset.pending ? "待应用" : "已应用";
+  stateBadge.textContent = asset.external ? t("直接写入") : asset.pending_delete ? t("待删除") : asset.pending ? t("待应用") : t("已应用");
   actions.append(stateBadge);
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "ghost compact";
-  remove.textContent = "删除";
+  remove.textContent = t("删除");
   remove.addEventListener("click", () => deleteMediaAsset(asset));
   actions.append(remove);
   row.append(main, actions);
@@ -1081,7 +1083,7 @@ function createMediaAssetRow(category, asset) {
 
 async function uploadMediaFiles(category) {
 	if (category === "music" && state.mediaAssets?.music_partition_known && !state.mediaAssets?.music_partition_available) {
-		setMediaNotice("当前存储没有 FAT32 音乐分区，请先在设置中心重新初始化并启用音乐分区。", true);
+		setMediaNotice(t("当前存储没有 FAT32 音乐分区，请先在设置中心重新初始化并启用音乐分区。"), true);
 		return;
 	}
   const configuration = {
@@ -1095,7 +1097,7 @@ async function uploadMediaFiles(category) {
     const sequence = $("media-lightshow-sequence").files[0];
     const audio = $("media-lightshow-audio").files[0];
     if (!sequence || !audio) {
-      setMediaNotice("请同时选择 .fseq 序列文件和 MP3/WAV 音频文件", true);
+      setMediaNotice(t("请同时选择 .fseq 序列文件和 MP3/WAV 音频文件"), true);
       return;
     }
     form.append("sequence", sequence, sequence.name);
@@ -1104,7 +1106,7 @@ async function uploadMediaFiles(category) {
   } else {
     const files = configuration ? $(configuration.input).files : [];
     if (!files?.length) {
-      setMediaNotice("请先选择文件", true);
+      setMediaNotice(t("请先选择文件"), true);
       return;
     }
     for (const file of files) form.append(configuration.role, file, file.name);
@@ -1112,7 +1114,7 @@ async function uploadMediaFiles(category) {
   }
   button.disabled = true;
   const original = button.textContent;
-  button.textContent = "暂存中…";
+  button.textContent = t("暂存中…");
   try {
     const result = await request(`/api/v1/media-assets/upload?category=${encodeURIComponent(category)}`, {method:"POST", body:form});
     const count = Array.isArray(result.assets) ? result.assets.length : 0;
@@ -1120,7 +1122,7 @@ async function uploadMediaFiles(category) {
       state.musicPath = "";
       state.musicPage = 0;
     }
-    setMediaNotice(state.maintenance?.auto_recovery ? `已安全暂存 ${count} 个媒体资源；可直接应用，TeslaBox 会自动维护恢复。` : `已安全暂存 ${count} 个媒体资源；待确认 OTG 已断开后再应用。`, false);
+    setMediaNotice(state.maintenance?.auto_recovery ? t`已安全暂存 ${count} 个媒体资源；可直接应用，TeslaBox 会自动维护恢复。` : t`已安全暂存 ${count} 个媒体资源；待确认 OTG 已断开后再应用。`, false);
     if (category === "lightshow") {
       $("media-lightshow-sequence").value = "";
       $("media-lightshow-audio").value = "";
@@ -1142,14 +1144,14 @@ async function deleteMediaAsset(asset) {
     return;
   }
   const confirmed = await askConfirmation(
-    "删除媒体文件",
-    asset.applied ? "文件会标记为待删除，确认应用变更后才从车机虚拟盘移除。" : "这会丢弃尚未应用到车机的暂存文件。",
-    "确认删除", true,
+    t("删除媒体文件"),
+    asset.applied ? t("文件会标记为待删除，确认应用变更后才从车机虚拟盘移除。") : t("这会丢弃尚未应用到车机的暂存文件。"),
+    t("确认删除"), true,
   );
   if (!confirmed) return;
   try {
     await request(`/api/v1/media-assets/${encodeURIComponent(asset.id)}/delete`, {method:"POST"});
-    setMediaNotice(asset.applied ? "已标记删除；请在 OTG 断开后应用变更。" : "已删除暂存文件。", false);
+    setMediaNotice(asset.applied ? t("已标记删除；请在 OTG 断开后应用变更。") : t("已删除暂存文件。"), false);
     await loadMediaAssets();
   } catch (error) {
     setMediaNotice(error.message, true);
@@ -1159,13 +1161,13 @@ async function deleteMediaAsset(asset) {
 async function deleteExternalMediaAsset(asset) {
   const automatic = Boolean(state.maintenance?.auto_recovery);
   if (!automatic && !$("media-confirm-otg-disconnected").checked) {
-    setMediaNotice("请先物理拔掉 OTG 线，并勾选确认项。", true);
+    setMediaNotice(t("请先物理拔掉 OTG 线，并勾选确认项。"), true);
     return;
   }
   const confirmed = await askConfirmation(
-    "删除直接写入的媒体",
-    automatic ? "文件会立刻从虚拟盘删除。TeslaBox 会自动断开 USB Gadget，并在完成后自动温重启恢复。" : "文件会立刻从虚拟盘删除。TeslaBox 将暂停 USB Gadget；完成后请插回 OTG，并到日志中心执行温重启恢复。",
-    "确认删除", true,
+    t("删除直接写入的媒体"),
+    automatic ? t("文件会立刻从虚拟盘删除。TeslaBox 会自动断开 USB Gadget，并在完成后自动温重启恢复。") : t("文件会立刻从虚拟盘删除。TeslaBox 将暂停 USB Gadget；完成后请插回 OTG，并到日志中心执行温重启恢复。"),
+    t("确认删除"), true,
   );
   if (!confirmed) return;
   try {
@@ -1176,7 +1178,7 @@ async function deleteExternalMediaAsset(asset) {
       confirm_otg_disconnected: !automatic,
     });
     $("media-confirm-otg-disconnected").checked = false;
-    setMediaNotice(automatic ? "已删除直接写入的媒体，自动温重启恢复已提交。" : "已从虚拟盘删除直接写入的媒体。请插回 OTG 后到日志中心执行温重启恢复。", false);
+    setMediaNotice(automatic ? t("已删除直接写入的媒体，自动温重启恢复已提交。") : t("已从虚拟盘删除直接写入的媒体。请插回 OTG 后到日志中心执行温重启恢复。"), false);
     if (!automatic) await Promise.allSettled([loadMediaAssets(), loadStatus()]);
   } catch (error) {
     setMediaNotice(error.message, true);
@@ -1186,13 +1188,13 @@ async function deleteExternalMediaAsset(asset) {
 async function applyMediaAssets() {
   const automatic = Boolean(state.maintenance?.auto_recovery);
   if (!automatic && !$("media-confirm-otg-disconnected").checked) {
-    setMediaNotice("请先物理拔掉 OTG 线，并勾选确认项。", true);
+    setMediaNotice(t("请先物理拔掉 OTG 线，并勾选确认项。"), true);
     return;
   }
   const confirmed = await askConfirmation(
-    "安全应用媒体变更",
-    automatic ? "TeslaBox 会先自动断开 USB Gadget，再写入虚拟盘；完成后将自动温重启恢复。车机或电脑会短暂失去 USB 存储。" : "TeslaBox 将暂停 USB Gadget 并写入虚拟盘。本次运行不会重新绑定 OTG；完成后请插回 OTG，再到日志中心执行温重启恢复。",
-    "确认应用", true,
+    t("安全应用媒体变更"),
+    automatic ? t("TeslaBox 会先自动断开 USB Gadget，再写入虚拟盘；完成后将自动温重启恢复。车机或电脑会短暂失去 USB 存储。") : t("TeslaBox 将暂停 USB Gadget 并写入虚拟盘。本次运行不会重新绑定 OTG；完成后请插回 OTG，再到日志中心执行温重启恢复。"),
+    t("确认应用"), true,
   );
   if (!confirmed) return;
   const button = $("media-apply");
@@ -1200,7 +1202,7 @@ async function applyMediaAssets() {
   try {
     await postJSON("/api/v1/media-assets/apply", {confirm_otg_disconnected:!automatic});
     $("media-confirm-otg-disconnected").checked = false;
-    setMediaNotice(automatic ? "媒体变更已写入虚拟盘，自动温重启恢复已提交。" : "媒体变更已写入虚拟盘。请插回 OTG 后到日志中心执行温重启恢复。", false);
+    setMediaNotice(automatic ? t("媒体变更已写入虚拟盘，自动温重启恢复已提交。") : t("媒体变更已写入虚拟盘。请插回 OTG 后到日志中心执行温重启恢复。"), false);
     if (!automatic) await Promise.allSettled([loadMediaAssets(), loadStatus()]);
   } catch (error) {
     setMediaNotice(error.message, true);
@@ -1233,49 +1235,49 @@ function renderLogDiagnostics(storage) {
 	reconnect.hidden = !storage.gadget_paused || Boolean(storage.gadget_resume_pending);
 	warmRestart.hidden = !storage.gadget_paused || Boolean(storage.gadget_resume_pending);
 	if (storage.gadget_paused) {
-		badge.textContent = storage.gadget_resume_pending ? "等待冷启动" : "已安全断开";
+		badge.textContent = storage.gadget_resume_pending ? t("等待冷启动") : t("已安全断开");
 		badge.classList.add("ok");
 		warning.hidden = false;
 		warning.textContent = storage.gadget_resume_pending
-			? "已准备下次冷启动恢复。本次运行不会重新绑定 UDC；请保持 OTG 已插入，正常关机后断开主电源，再重新上电。"
-			: "USB Gadget 已从 UDC 解绑。同一开机周期禁止重新绑定；请先物理插入 OTG 线，再执行温重启恢复，冷启动可作为备用方案。";
+			? t("已准备下次冷启动恢复。本次运行不会重新绑定 UDC；请保持 OTG 已插入，正常关机后断开主电源，再重新上电。")
+			: t("USB Gadget 已从 UDC 解绑。同一开机周期禁止重新绑定；请先物理插入 OTG 线，再执行温重启恢复，冷启动可作为备用方案。");
   } else if (enumerationComplete && busSuspended) {
-    badge.textContent = "可能已断开";
+    badge.textContent = t("可能已断开");
     badge.classList.add("error");
     warning.hidden = false;
-		warning.textContent = "控制器仍保留 configured/high-speed，但 USB 总线已经挂起。它可能是主机正常休眠，也可能是 OTG 已拔出；当前内核无法无损区分，TeslaBox 不会为确认状态而运行时重绑。";
+		warning.textContent = t("控制器仍保留 configured/high-speed，但 USB 总线已经挂起。它可能是主机正常休眠，也可能是 OTG 已拔出；当前内核无法无损区分，TeslaBox 不会为确认状态而运行时重绑。");
   } else if (enumerationComplete) {
-    badge.textContent = "已完成枚举";
+    badge.textContent = t("已完成枚举");
     badge.classList.add("ok");
     warning.hidden = false;
-		warning.textContent = "该状态只表示 UDC 最近一次完成过枚举。部分 ROCK 3A 内核拔线后仍会保留 configured/high-speed，因此它不能证明物理 OTG 当前仍连接。";
+		warning.textContent = t("该状态只表示 UDC 最近一次完成过枚举。部分 ROCK 3A 内核拔线后仍会保留 configured/high-speed，因此它不能证明物理 OTG 当前仍连接。");
   } else if (gadget.host_detected) {
-    badge.textContent = "枚举未完成";
+    badge.textContent = t("枚举未完成");
     badge.classList.add("error");
     warning.hidden = false;
-    warning.textContent = `已检测到 USB 主机，但状态停留在 ${gadget.udc_state || "未知阶段"}，车机或电脑尚未完成设备描述符与配置枚举。请立即刷新 USB 枚举日志后再断线或重启。`;
+    warning.textContent = t`已检测到 USB 主机，但状态停留在 ${gadget.udc_state || t("未知阶段")}，车机或电脑尚未完成设备描述符与配置枚举。请立即刷新 USB 枚举日志后再断线或重启。`;
   } else if (gadget.bound) {
-    badge.textContent = "等待主机";
+    badge.textContent = t("等待主机");
   } else {
-    badge.textContent = "Gadget 未就绪";
+    badge.textContent = t("Gadget 未就绪");
     badge.classList.add("error");
   }
   $("logs-usb-state").textContent = gadget.udc_state || "not attached";
   $("logs-usb-speed").textContent = gadget.current_speed || "—";
   $("logs-udc").textContent = gadget.udc || gadget.selected_udc || "—";
-  $("logs-backing").textContent = gadget.image_path || "未绑定";
+  $("logs-backing").textContent = gadget.image_path || t("未绑定");
 }
 
 async function disconnectGadget() {
   const confirmed = await askConfirmation(
-    "安全断开 USB Gadget",
-		"请先确认车机或电脑上的 OTG 线已经物理拔出。继续后 TeslaBox 会解绑 UDC 并保持暂停；本次开机不会再重新绑定。",
-    "确认已拔线并断开", true,
+    t("安全断开 USB Gadget"),
+		t("请先确认车机或电脑上的 OTG 线已经物理拔出。继续后 TeslaBox 会解绑 UDC 并保持暂停；本次开机不会再重新绑定。"),
+    t("确认已拔线并断开"), true,
   );
   if (!confirmed) return;
   try {
     await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
-		setLogsNotice("USB Gadget 已安全断开；请先插入 OTG 线，再准备下次冷启动恢复", false);
+		setLogsNotice(t("USB Gadget 已安全断开；请先插入 OTG 线，再准备下次冷启动恢复"), false);
     await Promise.allSettled([loadLogs(), loadStatus()]);
   } catch (error) {
     setLogsNotice(error.message, true);
@@ -1284,14 +1286,14 @@ async function disconnectGadget() {
 
 async function reconnectGadget() {
 	const confirmed = await askConfirmation(
-		"准备下次冷启动恢复",
-		"请先把 OTG 线物理插入车机或电脑。确认后本次运行仍保持 UDC 解绑；请正常关机，断开主电源后重新上电，TeslaBox 只会在新的系统开机周期尝试一次绑定。",
-		"确认已插线并准备", true,
+		t("准备下次冷启动恢复"),
+		t("请先把 OTG 线物理插入车机或电脑。确认后本次运行仍保持 UDC 解绑；请正常关机，断开主电源后重新上电，TeslaBox 只会在新的系统开机周期尝试一次绑定。"),
+		t("确认已插线并准备"), true,
 	);
   if (!confirmed) return;
   try {
     await postJSON("/api/v1/gadget/reconnect", {confirm_physical_connection:true});
-		setLogsNotice("已准备下次冷启动恢复；请保持 OTG 已插入，关机断电后重新上电", false);
+		setLogsNotice(t("已准备下次冷启动恢复；请保持 OTG 已插入，关机断电后重新上电"), false);
     await Promise.allSettled([loadLogs(), loadStatus()]);
   } catch (error) {
     setLogsNotice(error.message, true);
@@ -1300,21 +1302,21 @@ async function reconnectGadget() {
 
 async function warmRestartGadget() {
 	const confirmed = await askConfirmation(
-		"温重启恢复 USB Gadget",
-		"请先把 OTG 线物理插入车机或电脑。确认后 TeslaBox 会保存恢复状态并自动重启；本次运行不会直接重新绑定 UDC。",
-		"确认已插线并重启", true,
+		t("温重启恢复 USB Gadget"),
+		t("请先把 OTG 线物理插入车机或电脑。确认后 TeslaBox 会保存恢复状态并自动重启；本次运行不会直接重新绑定 UDC。"),
+		t("确认已插线并重启"), true,
 	);
 	if (!confirmed) return;
 	try {
 		await postJSON("/api/v1/gadget/reboot-recover", {confirm_physical_connection:true});
-		setLogsNotice("温重启命令已提交，请等待设备重新上线", false);
+		setLogsNotice(t("温重启命令已提交，请等待设备重新上线"), false);
 	} catch (error) {
 		setLogsNotice(error.message, true);
 	}
 }
 
 function renderLogs(report) {
-  const labels = {usb:"USB 枚举", media:"视频与转码", application:"TeslaBox 服务", network:"网络与热点", carplay:"CarPlay 服务"};
+  const labels = {usb:t("USB 枚举"), media:t("视频与转码"), application:t("TeslaBox 服务"), network:t("网络与热点"), carplay:t("CarPlay 服务")};
   const lines = Array.isArray(report.lines) ? report.lines : [];
   const summaries = Array.isArray(report.summaries) ? report.summaries : [];
   const summary = $("logs-summary");
@@ -1325,10 +1327,10 @@ function renderLogs(report) {
     item.textContent = message;
     return item;
   }));
-  $("logs-output").textContent = lines.length ? lines.join("\n") : "当前来源暂无日志。";
-  const details = [`${labels[report.source] || report.source || "系统"} · ${lines.length} 行`, `生成于 ${formatDate(report.generated_at)}`];
-  if (report.limited) details.push("仅显示最新日志");
-  if (report.redacted) details.push(`已脱敏 ${report.redacted} 行`);
+  $("logs-output").textContent = lines.length ? lines.join("\n") : t("当前来源暂无日志。");
+  const details = [t`${labels[report.source] || report.source || t("系统")} · ${lines.length} 行`, t`生成于 ${formatDate(report.generated_at)}`];
+  if (report.limited) details.push(t("仅显示最新日志"));
+  if (report.redacted) details.push(t`已脱敏 ${report.redacted} 行`);
   $("logs-meta").textContent = details.join(" · ");
   if (Array.isArray(report.service_states)) renderGadgetServiceStates(report.service_states);
 }
@@ -1342,14 +1344,14 @@ function renderGadgetServiceStates(services) {
 function renderGadgetServiceState(elementID, service) {
   const element = $(elementID);
   if (!service || service.load_state === "not-found" || service.load_state === "unknown") {
-    element.textContent = "未安装";
+    element.textContent = t("未安装");
     return;
   }
   if (String(service.unit_file_state || "").startsWith("masked") && service.active_state === "inactive") {
-    element.textContent = "已屏蔽 · 未运行";
+    element.textContent = t("已屏蔽 · 未运行");
     return;
   }
-  element.textContent = `${service.unit_file_state || "状态未知"} · ${service.active_state || "未知"}`;
+  element.textContent = `${service.unit_file_state || t("状态未知")} · ${service.active_state || t("未知")}`;
 }
 
 function scheduleLogsRefresh() {
@@ -1367,7 +1369,7 @@ function toggleLogsAutoRefresh() {
   const button = $("logs-auto-refresh");
   const enabled = !logsAutoRefreshEnabled();
   button.setAttribute("aria-pressed", String(enabled));
-  button.lastElementChild.textContent = enabled ? "自动刷新：每 10 秒" : "自动刷新：已关闭";
+  button.lastElementChild.textContent = enabled ? t("自动刷新：每 10 秒") : t("自动刷新：已关闭");
   scheduleLogsRefresh();
 }
 
@@ -1386,9 +1388,9 @@ async function copyLogs() {
       document.execCommand("copy");
       textarea.remove();
     }
-    setLogsNotice("日志已复制。", false);
+    setLogsNotice(t("日志已复制。"), false);
   } catch (_) {
-    setLogsNotice("浏览器不允许自动复制，请选中日志内容后手动复制。", true);
+    setLogsNotice(t("浏览器不允许自动复制，请选中日志内容后手动复制。"), true);
   }
 }
 
@@ -1419,16 +1421,19 @@ async function loadSettings() {
     const results = await Promise.all([
       apply(request("/api/v1/network/wifi"), (value) => { state.wifi = value; renderWiFiSettings(value); }, (error) => renderWiFiUnavailable(error.message)),
       apply(request("/api/v1/network/ap"), (value) => { state.ap = value; if (!globalThis.TeslaBoxSettingsLayout?.isDirty("ap-settings-title")) renderAPSettings(value); }, (error) => renderAPUnavailable(error.message)),
+      apply(request("/api/v1/network/regulatory"), (value) => { state.regulatory = value; globalThis.TeslaBoxWirelessRegion?.render(value); }, (error) => globalThis.TeslaBoxWirelessRegion?.unavailable(error.message)),
       apply(request("/api/v1/storage/devices"), (value) => { state.storage = value; renderStorageDevices(value); }, (error) => renderStorageUnavailable(error.message)),
       apply(request("/api/v1/update"), (value) => { state.update = value; renderUpdate(value); }, (error) => renderUpdateUnavailable(error.message)),
       apply(request("/api/v1/maintenance"), (value) => { state.maintenance = value; renderMaintenanceSettings(value); }, (error) => renderMaintenanceUnavailable(error.message)),
       apply(request("/api/v1/storage/snapshot-reserve"), renderSnapshotReserveStatus, () => {}),
       apply(request("/api/v1/fan"), (value) => { if (!globalThis.TeslaBoxSettingsLayout?.isDirty("fan-settings-title")) { state.fan = value; renderFanSettings(); } }, (error) => renderFanUnavailable(error.message)),
+      apply(request("/api/v1/network/shared"), (value) => globalThis.TeslaBoxSharedNetwork?.render(value), (error) => globalThis.TeslaBoxSharedNetwork?.unavailable(error.message)),
+      apply(request("/api/v1/network/ethernet"), (value) => globalThis.TeslaBoxEthernet?.render(value), (error) => globalThis.TeslaBoxEthernet?.unavailable(error.message)),
     ]);
     if (!current()) return;
     state.settingsLoaded = true;
-    if (results.slice(0, 4).every(Boolean)) setSettingsNotice("设置已更新", false, false);
-    else setSettingsNotice("部分设置暂不可用，请检查设备状态", true);
+    if (results.slice(0, 5).every(Boolean) && results[8]) setSettingsNotice(t("设置已更新"), false, false);
+    else setSettingsNotice(t("部分设置暂不可用，请检查设备状态"), true);
   } finally {
     releaseRefresh();
   }
@@ -1441,7 +1446,7 @@ async function loadExportSettings() {
   if (settingsResult.status !== "fulfilled" || historyResult.status !== "fulfilled") {
     const reason = settingsResult.status === "rejected" ? settingsResult.reason : historyResult.reason;
     renderExportSettingsUnavailable(reason.message);
-    setSettingsNotice(`导出设置不可用：${reason.message}`, true);
+    setSettingsNotice(t`导出设置不可用：${reason.message}`, true);
     return;
   }
   state.exportSettings = settingsResult.value;
@@ -1450,17 +1455,17 @@ async function loadExportSettings() {
 }
 
 const fanSceneDefinitions = [
-  ["idle", "待机 / 持续录像"], ["single", "单路在线播放"], ["multi", "多路合成播放"],
-  ["export", "视频导出"], ["maintenance", "存储维护"],
+  ["idle", t("待机 / 持续录像")], ["single", t("单路在线播放")], ["multi", t("多路合成播放")],
+  ["export", t("视频导出")], ["maintenance", t("存储维护")],
 ];
 
 function renderFanSettings() {
   const fan = state.fan;
   if (!fan) return;
-  $("fan-status").textContent = fan.available ? "控制在线" : "硬件不可用";
+  $("fan-status").textContent = fan.available ? t("控制在线") : t("硬件不可用");
   $("fan-status").className = `badge ${fan.available ? "ok" : "error"}`;
-  $("fan-temperature").textContent = fan.temperature_c ? `${fan.temperature_c}℃` : "不可用";
-  $("fan-scene").textContent = ({idle:"待机 / 持续录像",single:"单路在线播放",multi:"多路合成播放",export:"视频导出",maintenance:"存储维护"})[fan.scenario] || fan.scenario || "待机";
+  $("fan-temperature").textContent = fan.temperature_c ? `${fan.temperature_c}℃` : t("不可用");
+  $("fan-scene").textContent = ({idle:t("待机 / 持续录像"),single:t("单路在线播放"),multi:t("多路合成播放"),export:t("视频导出"),maintenance:t("存储维护")})[fan.scenario] || fan.scenario || t("待机");
   $("fan-temperature-request").textContent = `${Number(fan.temperature_request || 0)}%`;
   $("fan-output").textContent = `${Number(fan.output_percent || 0)}%`;
   $("fan-maximum").value = String(fan.maximum_percent ?? 50);
@@ -1471,7 +1476,7 @@ function renderFanSettings() {
   renderFanScenes();
   renderFanCalculation();
   $("fan-save").disabled = false;
-  $("fan-detail").textContent = fan.available ? "场景请求与温度请求取较高值后，再乘以最大转速限制。" : (fan.reason || "当前板卡未提供可用的PWM风扇接口，不影响其他功能运行。");
+  $("fan-detail").textContent = fan.available ? t("场景请求与温度请求取较高值后，再乘以最大转速限制。") : (fan.reason || t("当前板卡未提供可用的PWM风扇接口，不影响其他功能运行。"));
 }
 
 function renderFanLevels() {
@@ -1480,7 +1485,7 @@ function renderFanLevels() {
   (state.fan?.temperature_levels || []).forEach((level, index) => {
     const row = document.createElement("label");
     row.className = "fan-level";
-    row.innerHTML = `<strong>档位 ${index+1}</strong><input data-fan-temperature type="number" min="20" max="100" value="${Number(level.temperature_c)}"><span>℃</span><input data-fan-percent type="number" min="0" max="100" value="${Number(level.percent)}"><span>%</span>`;
+    row.innerHTML = t`<strong>档位 ${index+1}</strong><input data-fan-temperature type="number" min="20" max="100" value="${Number(level.temperature_c)}"><span>℃</span><input data-fan-percent type="number" min="0" max="100" value="${Number(level.percent)}"><span>%</span>`;
     container.append(row);
   });
 }
@@ -1529,14 +1534,14 @@ async function saveFanSettings() {
     state.fan = await postJSON("/api/v1/fan", fanSettingsPayload());
     globalThis.TeslaBoxSettingsLayout?.markClean("fan-settings-title");
     renderFanSettings();
-    setSettingsNotice("风扇设置已保存", false);
-  } catch (error) { setSettingsNotice(`保存风扇设置失败：${error.message}`, true); }
+    setSettingsNotice(t("风扇设置已保存"), false);
+  } catch (error) { setSettingsNotice(t`保存风扇设置失败：${error.message}`, true); }
   finally { button.disabled = false; }
 }
 
 function renderFanUnavailable(message) {
-  $("fan-status").textContent = "不可用"; $("fan-status").className = "badge error";
-  $("fan-detail").textContent = `风扇控制暂不可用：${message}`; $("fan-save").disabled = true;
+  $("fan-status").textContent = t("不可用"); $("fan-status").className = "badge error";
+  $("fan-detail").textContent = t`风扇控制暂不可用：${message}`; $("fan-save").disabled = true;
 }
 
 function renderExportSettings() {
@@ -1551,7 +1556,7 @@ function renderExportSettings() {
   }
   $("export-settings-save").disabled = false;
   $("export-history-refresh").disabled = false;
-  $("export-retention-status").textContent = deleteAfterDownload ? "下载即清空" : `保留 ${settings.retain_count || 8} 个`;
+  $("export-retention-status").textContent = deleteAfterDownload ? t("下载即清空") : t`保留 ${settings.retain_count || 8} 个`;
   $("export-retention-status").className = "badge ok";
   renderExportRetentionControls();
   const history = Array.isArray(state.exportHistory) ? state.exportHistory : [];
@@ -1560,7 +1565,7 @@ function renderExportSettings() {
   if (history.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = deleteAfterDownload ? "下载即清空已开启；后续导出完整下载后不会保留在历史中。" : "暂时没有可再次下载的导出文件。";
+    empty.textContent = deleteAfterDownload ? t("下载即清空已开启；后续导出完整下载后不会保留在历史中。") : t("暂时没有可再次下载的导出文件。");
     root.append(empty);
     return;
   }
@@ -1570,21 +1575,21 @@ function renderExportSettings() {
     const copy = document.createElement("div");
     const title = document.createElement("strong");
     const source = task.request?.mode === "source";
-    title.textContent = source ? "多路原画压缩包" : exportTaskLabel(task.request);
+    title.textContent = source ? t("多路原画压缩包") : exportTaskLabel(task.request);
     const detail = document.createElement("small");
     const completedAt = task.completed_at || task.created_at;
-    const size = task.output_bytes ? ` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
+    const size = task.output_bytes ? t` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? t` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
     detail.textContent = `${formatDate(completedAt)}${size}`;
     copy.append(title, detail);
     const download = document.createElement("a");
     download.className = "secondary compact";
     download.href = `/api/v1/exports/${encodeURIComponent(task.id)}/download`;
     download.download = "";
-    download.textContent = "再次下载";
+    download.textContent = t("再次下载");
     const remove = document.createElement("button");
     remove.className = "danger-button compact";
     remove.type = "button";
-    remove.textContent = "删除";
+    remove.textContent = t("删除");
     remove.addEventListener("click", () => deleteExportHistoryTask(task, remove));
     const actions = document.createElement("div");
     actions.className = "export-history-actions";
@@ -1595,19 +1600,19 @@ function renderExportSettings() {
 }
 
 async function deleteExportHistoryTask(task, button) {
-  const label = task.request?.mode === "source" ? "多路原画压缩包" : exportTaskLabel(task.request);
-  if (!window.confirm(`确认删除“${label}”？删除后无法再次下载。`)) return;
+  const label = task.request?.mode === "source" ? t("多路原画压缩包") : exportTaskLabel(task.request);
+  if (!window.confirm(t`确认删除“${label}”？删除后无法再次下载。`)) return;
   button.disabled = true;
-  button.textContent = "删除中…";
+  button.textContent = t("删除中…");
   try {
     await request(`/api/v1/exports/history/${encodeURIComponent(task.id)}`, {method:"DELETE"});
     state.exportHistory = (state.exportHistory || []).filter((item) => item.id !== task.id);
     renderExportSettings();
-    setSettingsNotice("历史导出已删除，数据盘空间已释放", false);
+    setSettingsNotice(t("历史导出已删除，数据盘空间已释放"), false);
   } catch (error) {
     button.disabled = false;
-    button.textContent = "删除";
-    setSettingsNotice(`删除历史导出失败：${error.message}`, true);
+    button.textContent = t("删除");
+    setSettingsNotice(t`删除历史导出失败：${error.message}`, true);
   }
 }
 
@@ -1615,8 +1620,8 @@ function renderExportRetentionControls() {
   const deleteAfterDownload = $("export-delete-after-download").checked;
   $("export-retain-count").disabled = deleteAfterDownload;
   $("export-settings-detail").textContent = deleteAfterDownload
-    ? "仅在浏览器完整接收文件后删除；网络中断或关闭页面时会保留，方便再次下载。"
-    : `将保留最近 ${$("export-retain-count").value} 个已完成导出，超过后自动清理最旧文件。`;
+    ? t("仅在浏览器完整接收文件后删除；网络中断或关闭页面时会保留，方便再次下载。")
+    : t`将保留最近 ${$("export-retain-count").value} 个已完成导出，超过后自动清理最旧文件。`;
 }
 
 function renderExportSettingsUnavailable(message) {
@@ -1624,9 +1629,9 @@ function renderExportSettingsUnavailable(message) {
   state.exportHistory = [];
   $("export-settings-save").disabled = true;
   $("export-history-refresh").disabled = true;
-  $("export-retention-status").textContent = "不可用";
+  $("export-retention-status").textContent = t("不可用");
   $("export-retention-status").className = "badge error";
-  $("export-settings-detail").textContent = `导出设置暂不可用：${message}`;
+  $("export-settings-detail").textContent = t`导出设置暂不可用：${message}`;
   $("export-history-list").replaceChildren();
 }
 
@@ -1644,7 +1649,7 @@ async function saveExportSettings() {
     });
     globalThis.TeslaBoxSettingsLayout?.markClean("export-settings-title");
     await loadExportSettings();
-    setSettingsNotice("导出文件保留设置已保存", false);
+    setSettingsNotice(t("导出文件保留设置已保存"), false);
   } catch (error) {
     setSettingsNotice(error.message, true);
   } finally {
@@ -1653,9 +1658,9 @@ async function saveExportSettings() {
 }
 
 function exportTaskLabel(request) {
-  const labels = {composite6:"六路合成视频", composite4a:"四路合成 A 视频", composite4b:"四路合成 B 视频", composite3:"三路合成视频"};
-  if (request?.layout === "single") return `${cameraLabel(request.cameras?.[0] || "front")}单路视频`;
-  return labels[request?.layout] || "导出视频";
+  const labels = {composite6:t("六路合成视频"), composite4a:t("四路合成 A 视频"), composite4b:t("四路合成 B 视频"), composite3:t("三路合成视频")};
+  if (request?.layout === "single") return t`${cameraLabel(request.cameras?.[0] || "front")}单路视频`;
+  return labels[request?.layout] || t("导出视频");
 }
 
 function renderMaintenanceSettings(settings) {
@@ -1665,14 +1670,14 @@ function renderMaintenanceSettings(settings) {
   $("snapshot-reserve-repair").disabled = false;
   toggle.disabled = false;
   toggle.setAttribute("aria-pressed", String(enabled));
-  $("maintenance-toggle-title").textContent = enabled ? "媒体自动恢复已开启" : "媒体自动恢复已禁用";
-  $("maintenance-toggle-detail").textContent = enabled ? "点击后切换为手动维护" : "点击后启用";
-  $("maintenance-status").textContent = enabled ? "媒体自动恢复" : "媒体手动恢复";
+  $("maintenance-toggle-title").textContent = enabled ? t("媒体自动恢复已开启") : t("媒体自动恢复已禁用");
+  $("maintenance-toggle-detail").textContent = enabled ? t("点击后切换为手动维护") : t("点击后启用");
+  $("maintenance-status").textContent = enabled ? t("媒体自动恢复") : t("媒体手动恢复");
   $("maintenance-status").className = `badge${enabled ? " ok" : ""}`;
   $("media-confirm-otg-row").hidden = enabled;
   $("media-maintenance-warning").textContent = enabled
-    ? "自动维护恢复已启用。应用媒体或删除直接写入文件时，TeslaBox 会自动解绑 USB Gadget、完成写入后温重启；车机或电脑会短暂失去 USB 存储。"
-    : "媒体变更默认需要先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。在线更新仍会自动重启恢复。";
+    ? t("自动维护恢复已启用。应用媒体或删除直接写入文件时，TeslaBox 会自动解绑 USB Gadget、完成写入后温重启；车机或电脑会短暂失去 USB 存储。")
+    : t("媒体变更默认需要先物理拔掉连接车机或电脑的 OTG 线。TeslaBox 会暂停 USB Gadget、写入虚拟盘并保持暂停；完成后请插回 OTG，再到日志中心执行温重启恢复。在线更新仍会自动重启恢复。");
 }
 
 function renderMaintenanceUnavailable(message) {
@@ -1682,13 +1687,13 @@ function renderMaintenanceUnavailable(message) {
   toggle.disabled = true;
   $("storage-reclaim").disabled = true;
   $("snapshot-reserve-repair").disabled = true;
-  $("maintenance-toggle-title").textContent = "媒体自动恢复不可用";
-  $("maintenance-toggle-detail").textContent = "请检查设备状态";
-  $("maintenance-status").textContent = "不可用";
+  $("maintenance-toggle-title").textContent = t("媒体自动恢复不可用");
+  $("maintenance-toggle-detail").textContent = t("请检查设备状态");
+  $("maintenance-status").textContent = t("不可用");
   $("maintenance-status").className = "badge error";
   $("media-confirm-otg-row").hidden = false;
-  $("media-maintenance-warning").textContent = "自动维护设置暂不可用。应用变更前必须先物理拔掉连接车机或电脑的 OTG 线，并在完成后手动温重启恢复。";
-  setSettingsNotice(`自动维护设置不可用：${message}`, true);
+  $("media-maintenance-warning").textContent = t("自动维护设置暂不可用。应用变更前必须先物理拔掉连接车机或电脑的 OTG 线，并在完成后手动温重启恢复。");
+  setSettingsNotice(t`自动维护设置不可用：${message}`, true);
 }
 
 async function toggleMaintenanceAutoRecovery() {
@@ -1696,9 +1701,9 @@ async function toggleMaintenanceAutoRecovery() {
   const enabled = !Boolean(state.maintenance?.auto_recovery);
   if (enabled) {
     const confirmed = await askConfirmation(
-      "启用媒体自动恢复",
-      "以后应用媒体或删除直接写入文件时，TeslaBox 会自动断开 USB Gadget 并温重启。车机或电脑会短暂失去存储设备；仅在已验证可稳定重新枚举时启用。",
-      "确认启用", true,
+      t("启用媒体自动恢复"),
+      t("以后应用媒体或删除直接写入文件时，TeslaBox 会自动断开 USB Gadget 并温重启。车机或电脑会短暂失去存储设备；仅在已验证可稳定重新枚举时启用。"),
+      t("确认启用"), true,
     );
     if (!confirmed) return;
   }
@@ -1706,7 +1711,7 @@ async function toggleMaintenanceAutoRecovery() {
   try {
     state.maintenance = await postJSON("/api/v1/maintenance", {auto_recovery:enabled, confirm_risk:enabled});
     renderMaintenanceSettings(state.maintenance);
-    setSettingsNotice(enabled ? "媒体自动恢复已启用" : "媒体已恢复为手动维护模式", false);
+    setSettingsNotice(enabled ? t("媒体自动恢复已启用") : t("媒体已恢复为手动维护模式"), false);
   } catch (error) {
     setSettingsNotice(error.message, true);
     await loadSettings();
@@ -1718,27 +1723,27 @@ async function toggleMaintenanceAutoRecovery() {
 async function reclaimStorageSpace() {
   const automatic = Boolean(state.maintenance?.auto_recovery);
   const lifecycle = automatic
-    ? "TeslaBox 会自动断开 USB Gadget，完成后温重启恢复。"
-    : "请先物理拔掉车机或电脑的 OTG 线；完成后请插回 OTG，并在日志中心执行温重启恢复。";
+    ? t("TeslaBox 会自动断开 USB Gadget，完成后温重启恢复。")
+    : t("请先物理拔掉车机或电脑的 OTG 线；完成后请插回 OTG，并在日志中心执行温重启恢复。");
   const confirmed = await askConfirmation(
-    "回收虚拟盘旧空间",
-    `系统会先检查 exFAT，只对分配位图确认空闲的簇执行外层打洞。${lifecycle} 操作可能持续数分钟，请勿断电或拔出数据盘。`,
-    "确认回收",
+    t("回收虚拟盘旧空间"),
+    t`系统会先检查 exFAT，只对分配位图确认空闲的簇执行外层打洞。${lifecycle} 操作可能持续数分钟，请勿断电或拔出数据盘。`,
+    t("确认回收"),
     true,
   );
   if (!confirmed) return;
   const button = $("storage-reclaim");
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = "正在回收…";
-  setSettingsNotice("正在检查 exFAT 分配位图并回收外层空间，请勿断电…", false, false);
+  button.textContent = t("正在回收…");
+  setSettingsNotice(t("正在检查 exFAT 分配位图并回收外层空间，请勿断电…"), false, false);
   try {
     const result = await postJSON("/api/v1/storage/reclaim", {
       confirm_otg_disconnected: !automatic,
     });
-    const summary = `已检查 ${formatNumber(result.free_clusters || 0)} 个空闲簇，外层实际释放 ${formatBytes(result.reclaimed_bytes || 0)}。`;
+    const summary = t`已检查 ${formatNumber(result.free_clusters || 0)} 个空闲簇，外层实际释放 ${formatBytes(result.reclaimed_bytes || 0)}。`;
     setSettingsNotice(
-      automatic ? `${summary} 自动温重启恢复已提交。` : `${summary} 请插回 OTG 后到日志中心执行温重启恢复。`,
+      automatic ? t`${summary} 自动温重启恢复已提交。` : t`${summary} 请插回 OTG 后到日志中心执行温重启恢复。`,
       false,
     );
     if (!automatic) await loadStatus();
@@ -1753,79 +1758,79 @@ async function reclaimStorageSpace() {
 async function repairSnapshotReserve() {
   const automatic = Boolean(state.maintenance?.auto_recovery);
   const confirmed = await askConfirmation(
-    "修复快照预留空间",
-    "系统会进入维护窗口，重新测量实际缺口，并且只打洞回收达到安全目标所需的 exFAT 空闲簇。操作可在中断后安全重试，不会删除录像。",
-    "确认修复",
+    t("修复快照预留空间"),
+    t("系统会进入维护窗口，重新测量实际缺口，并且只打洞回收达到安全目标所需的 exFAT 空闲簇。操作可在中断后安全重试，不会删除录像。"),
+    t("确认修复"),
     true,
   );
   if (!confirmed) return;
   const button = $("snapshot-reserve-repair");
   button.disabled = true;
-  button.textContent = "正在修复…";
-  setSettingsNotice("正在校验文件系统并定量回收快照空间，请勿断电或插拔数据盘…", false, false);
+  button.textContent = t("正在修复…");
+  setSettingsNotice(t("正在校验文件系统并定量回收快照空间，请勿断电或插拔数据盘…"), false, false);
   try {
     const result = await postJSON("/api/v1/storage/snapshot-reserve/repair", {confirm_otg_disconnected:!automatic});
     const states = {
-      completed:"修复完成",
-      cancelled_safe:"已满足运行门槛",
-      cancelled_unsafe:"空间仍不足",
-      interrupted:"修复已中断",
-      failed:"修复失败",
+      completed:t("修复完成"),
+      cancelled_safe:t("已满足运行门槛"),
+      cancelled_unsafe:t("空间仍不足"),
+      interrupted:t("修复已中断"),
+      failed:t("修复失败"),
     };
-    const summary = `${states[result.state] || "修复结束"}：目标 ${formatBytes(result.target_bytes || 0)}，实际释放 ${formatBytes(result.reclaimed_bytes || 0)}，外层可用 ${formatBytes(result.outer_free_bytes || 0)}。${result.message || ""}`;
+    const summary = t`${states[result.state] || t("修复结束")}：目标 ${formatBytes(result.target_bytes || 0)}，实际释放 ${formatBytes(result.reclaimed_bytes || 0)}，外层可用 ${formatBytes(result.outer_free_bytes || 0)}。${result.message || ""}`;
     setSettingsNotice(summary, !result.runtime_ready);
     if (!automatic || !result.runtime_ready) await loadStatus();
   } catch (error) {
-    setSettingsNotice(`修复中断：${error.message}。重新执行时会按磁盘实际状态继续。`, true);
+    setSettingsNotice(t`修复中断：${error.message}。重新执行时会按磁盘实际状态继续。`, true);
   } finally {
     button.disabled = false;
-    button.textContent = "修复快照预留空间";
+    button.textContent = t("修复快照预留空间");
   }
 }
 
 function renderSnapshotReserveStatus(result) {
   const interrupted = ["running", "interrupted", "failed"].includes(result.state);
   $("snapshot-reserve-cancel").hidden = !interrupted;
-  const labels = {pending:"待修复", repairing:"修复中", interrupted:"修复中断", completed:"修复完成", no_reclaimable_space:"无可回收空间"};
-  $("snapshot-reserve-detail").textContent = `${labels[result.phase] || "状态正常"} · 外层可用 ${formatBytes(result.outer_free_bytes || 0)} · 运行门槛 ${formatBytes(result.required_bytes || 0)}`;
+  const labels = {pending:t("待修复"), repairing:t("修复中"), interrupted:t("修复中断"), completed:t("修复完成"), no_reclaimable_space:t("无可回收空间")};
+  $("snapshot-reserve-detail").textContent = t`${labels[result.phase] || t("状态正常")} · 外层可用 ${formatBytes(result.outer_free_bytes || 0)} · 运行门槛 ${formatBytes(result.required_bytes || 0)}`;
   if (!result.runtime_ready && result.reason_code === "needs_maintenance_diagnosis") {
-    setSettingsNotice(`快照空间需要维护：外层可用 ${formatBytes(result.outer_free_bytes || 0)}，运行期至少需要 ${formatBytes(result.required_bytes || 0)}。`, true);
+    setSettingsNotice(t`快照空间需要维护：外层可用 ${formatBytes(result.outer_free_bytes || 0)}，运行期至少需要 ${formatBytes(result.required_bytes || 0)}。`, true);
   } else if (interrupted) {
-    setSettingsNotice(`上次快照空间修复未正常结束：${result.message || "可以继续修复或执行安全放弃校验。"}`, true);
+    setSettingsNotice(t`上次快照空间修复未正常结束：${result.message || t("可以继续修复或执行安全放弃校验。")}`, true);
   }
 }
 
 async function cancelSnapshotReserveRepair() {
   const confirmed = await askConfirmation(
-    "安全放弃修复",
-    "系统不会回滚已经释放的空闲簇。放弃前会重新检查 exFAT 和运行期空间；只有校验通过后才允许冷启动恢复 Gadget。",
-    "确认放弃",
+    t("安全放弃修复"),
+    t("系统不会回滚已经释放的空闲簇。放弃前会重新检查 exFAT 和运行期空间；只有校验通过后才允许冷启动恢复 Gadget。"),
+    t("确认放弃"),
     true,
   );
   if (!confirmed) return;
   const result = await postJSON("/api/v1/storage/snapshot-reserve/cancel", {confirm_otg_disconnected:true});
   renderSnapshotReserveStatus(result);
-  setSettingsNotice(result.message || "放弃校验完成", !result.runtime_ready);
+  setSettingsNotice(result.message || t("放弃校验完成"), !result.runtime_ready);
 }
 
 function renderUpdate(update) {
   const labels = {
-    disabled:"未配置", idle:"可检查", checking:"检查中", available:"发现更新", current:"已是最新",
-    downloading:"下载中", downloaded:"等待安装", installing:"正在安装", failed:"更新失败",
+    disabled:t("未配置"), idle:t("可检查"), checking:t("检查中"), available:t("发现更新"), current:t("已是最新"),
+    downloading:t("下载中"), downloaded:t("等待安装"), installing:t("正在安装"), failed:t("更新失败"),
   };
-  if (update.selected_action === "rollback" && update.state === "available") labels.available = "已选择回退";
-  $("update-status").textContent = labels[update.state] || "状态未知";
+  if (update.selected_action === "rollback" && update.state === "available") labels.available = t("已选择回退");
+  $("update-status").textContent = labels[update.state] || t("状态未知");
   $("update-status").className = `badge${["current", "downloaded"].includes(update.state) ? " ok" : update.state === "failed" ? " error" : ""}`;
   $("update-current-version").textContent = update.current_version || "dev";
   $("update-latest-version").textContent = update.latest_version || "—";
-  $("update-target-label").firstChild.textContent = update.selected_action === "rollback" ? "回退目标" : "最新版本";
+  $("update-target-label").firstChild.textContent = update.selected_action === "rollback" ? t("回退目标") : t("最新版本");
   const channels = Array.isArray(update.channels) ? update.channels : [];
   const selectedChannel = update.channel || "stable";
   const selectedOption = channels.find((option) => option.id === selectedChannel);
   const detail = update.configured
-    ? `更新通道：${selectedOption?.label || selectedChannel}${update.current_commit && update.current_commit !== "unknown" ? ` · 提交 ${update.current_commit.slice(0, 12)}` : ""}`
-    : "尚未配置 Gitee 更新清单地址和设备公钥。";
-  const installDetail = update.install_result === "success" ? "上次更新已成功安装。" : "";
+    ? t`更新通道：${selectedOption?.label || selectedChannel}${update.current_commit && update.current_commit !== "unknown" ? t` · 提交 ${update.current_commit.slice(0, 12)}` : ""}`
+    : t("尚未配置 Gitee 更新清单地址和设备公钥。");
+  const installDetail = update.install_result === "success" ? t("上次更新已成功安装。") : "";
   $("update-version-detail").textContent = update.error || update.message || installDetail || detail;
   $("update-release-notes").hidden = !update.release_notes;
   renderReleaseNotes($("update-release-notes"), update.release_notes);
@@ -1835,22 +1840,22 @@ function renderUpdate(update) {
   $("update-progress-detail").textContent = `${Number(update.progress_percent || 0)}% · ${formatBytes(update.downloaded_bytes || 0)} / ${formatBytes(update.total_bytes || 0)}`;
   const channelBusy = ["checking", "downloading", "downloaded", "installing"].includes(update.state);
   const fallbackChannels = [
-    {id:"stable", label:"稳定版", description:"只接收维护者正式发布并签名的版本。", available:true},
-    {id:"beta", label:"内测版", description:"可接收维护者发布的预览版本，可能包含尚未覆盖全部场景的改动。", available:false},
+    {id:"stable", label:t("稳定版"), description:t("只接收维护者正式发布并签名的版本。"), available:true},
+    {id:"beta", label:t("内测版"), description:t("可接收维护者发布的预览版本，可能包含尚未覆盖全部场景的改动。"), available:false},
   ];
   const usableChannels = channels.length ? channels : fallbackChannels;
   usableChannels.forEach((option) => {
     const button = $(option.id === "beta" ? "update-channel-beta" : "update-channel-stable");
     button.classList.toggle("active", option.id === selectedChannel);
     button.disabled = !update.configured || !option.available || channelBusy;
-    button.title = option.available ? option.description : "该更新源尚未配置";
+    button.title = option.available ? option.description : t("该更新源尚未配置");
   });
-  $("update-channel-detail").textContent = selectedOption?.description || "稳定版只接收正式发布；内测版可接收预览更新。";
+  $("update-channel-detail").textContent = selectedOption?.description || t("稳定版只接收正式发布；内测版可接收预览更新。");
   $("update-check").disabled = !update.configured || ["checking", "downloading", "installing"].includes(update.state);
   $("update-download").hidden = update.state !== "available";
   $("update-install").hidden = update.state !== "downloaded";
-  $("update-download").textContent = update.selected_action === "rollback" ? "下载回退版本" : "下载更新";
-  $("update-install").textContent = update.selected_action === "rollback" ? "回退并重启" : "安装并重启";
+  $("update-download").textContent = update.selected_action === "rollback" ? t("下载回退版本") : t("下载更新");
+  $("update-install").textContent = update.selected_action === "rollback" ? t("回退并重启") : t("安装并重启");
   $("update-history-section").hidden = !update.history_configured;
   if (["downloading", "installing"].includes(update.state)) scheduleUpdatePoll();
   else clearUpdatePoll();
@@ -1860,9 +1865,9 @@ async function setUpdateChannel(channel) {
   if (state.update?.channel === channel) return;
   if (channel === "beta") {
     const confirmed = await askConfirmation(
-      "切换到内测版",
-      "内测版会显示维护者签名的预览更新，可能包含尚未覆盖全部车辆和存储场景的改动。稳定版只接收正式发布。切换后需要重新检查更新。",
-      "确认切换到内测版",
+      t("切换到内测版"),
+      t("内测版会显示维护者签名的预览更新，可能包含尚未覆盖全部车辆和存储场景的改动。稳定版只接收正式发布。切换后需要重新检查更新。"),
+      t("确认切换到内测版"),
       true,
     );
     if (!confirmed) return;
@@ -1873,7 +1878,7 @@ async function setUpdateChannel(channel) {
     $("update-history-list").hidden = true;
     $("update-history-detail").hidden = true;
     renderUpdate(state.update);
-    setUpdateNotice(`已切换到${channel === "beta" ? "内测版" : "稳定版"}，请重新检查更新。`, false);
+    setUpdateNotice(t`已切换到${channel === "beta" ? t("内测版") : t("稳定版")}，请重新检查更新。`, false);
   } catch (error) {
     setUpdateNotice(error.message, true);
   }
@@ -1881,7 +1886,7 @@ async function setUpdateChannel(channel) {
 
 function renderUpdateUnavailable(message) {
   clearUpdatePoll();
-  $("update-status").textContent = "不可用";
+  $("update-status").textContent = t("不可用");
   $("update-status").className = "badge error";
   $("update-version-detail").textContent = message;
   $("update-channel-stable").disabled = true;
@@ -1906,7 +1911,7 @@ function scheduleUpdatePoll() {
       renderUpdate(state.update);
     } catch (_) {
       if (state.update?.state === "installing") {
-        $("update-version-detail").textContent = "服务正在重启，页面恢复后请重新检查版本。";
+        $("update-version-detail").textContent = t("服务正在重启，页面恢复后请重新检查版本。");
         scheduleUpdatePoll();
       }
     }
@@ -1923,7 +1928,7 @@ async function checkUpdate() {
   try {
     state.update = await postJSON("/api/v1/update/check", {});
     renderUpdate(state.update);
-    setUpdateNotice(state.update.available ? `发现 ${state.update.latest_version} 更新` : "当前已是最新版本", false);
+    setUpdateNotice(state.update.available ? t`发现 ${state.update.latest_version} 更新` : t("当前已是最新版本"), false);
   } catch (error) {
     setUpdateNotice(error.message, true);
     await refreshUpdateStatus();
@@ -1952,10 +1957,10 @@ function renderUpdateHistory(history) {
   const list = $("update-history-list");
   const releases = Array.isArray(history.releases) ? history.releases : [];
   detail.hidden = false;
-  detail.textContent = history.message || (history.generated_at ? `版本目录更新于 ${formatDate(history.generated_at)}` : "历史版本目录已校验");
+  detail.textContent = history.message || (history.generated_at ? t`版本目录更新于 ${formatDate(history.generated_at)}` : t("历史版本目录已校验"));
   list.replaceChildren();
   if (!releases.length) {
-    detail.textContent = "没有可直接安装的历史版本。维护者需要把兼容版本加入签名目录。";
+    detail.textContent = t("没有可直接安装的历史版本。维护者需要把兼容版本加入签名目录。");
     list.hidden = true;
     return;
   }
@@ -1966,7 +1971,7 @@ function renderUpdateHistory(history) {
     const title = document.createElement("strong");
     title.textContent = release.version;
     const metadata = document.createElement("small");
-    metadata.textContent = `${release.action === "rollback" ? "可回退" : "可安装"}${release.published_at ? ` · 发布于 ${formatDate(release.published_at)}` : ""}`;
+    metadata.textContent = `${release.action === "rollback" ? t("可回退") : t("可安装")}${release.published_at ? t` · 发布于 ${formatDate(release.published_at)}` : ""}`;
     copy.append(title, metadata);
     if (release.release_notes) {
       const notes = document.createElement("div");
@@ -1977,7 +1982,7 @@ function renderUpdateHistory(history) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary";
-    button.textContent = release.action === "rollback" ? "选择回退" : "选择安装";
+    button.textContent = release.action === "rollback" ? t("选择回退") : t("选择安装");
     button.addEventListener("click", () => selectUpdateVersion(release));
     item.append(copy, button);
     list.append(item);
@@ -1988,15 +1993,15 @@ function renderUpdateHistory(history) {
 async function selectUpdateVersion(release) {
   const rollback = release.action === "rollback";
   const confirmed = await askConfirmation(
-    rollback ? "选择 TeslaBox 回退版本" : "选择指定 TeslaBox 版本",
-    `${rollback ? "将回退" : "将安装"} TeslaBox 至 ${release.version}。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版可以升级 FFmpeg，但回退不会主动降级已安装的媒体运行时。确认后仍需下载并安装。`,
-    rollback ? "确认选择回退版本" : "确认选择版本", rollback,
+    rollback ? t("选择 TeslaBox 回退版本") : t("选择指定 TeslaBox 版本"),
+    t`${rollback ? t("将回退") : t("将安装")} TeslaBox 至 ${release.version}。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版可以升级 FFmpeg，但回退不会主动降级已安装的媒体运行时。确认后仍需下载并安装。`,
+    rollback ? t("确认选择回退版本") : t("确认选择版本"), rollback,
   );
   if (!confirmed) return;
   try {
     state.update = await postJSON("/api/v1/update/select", {version:release.version});
     renderUpdate(state.update);
-    setUpdateNotice(`${rollback ? "已选择回退" : "已选择"} ${release.version}，请继续下载并安装`, false);
+    setUpdateNotice(t`${rollback ? t("已选择回退") : t("已选择")} ${release.version}，请继续下载并安装`, false);
   } catch (error) {
     setUpdateNotice(error.message, true);
   }
@@ -2006,7 +2011,7 @@ async function downloadUpdate() {
   try {
     state.update = await postJSON("/api/v1/update/download", {});
     renderUpdate(state.update);
-    setUpdateNotice(state.update.selected_action === "rollback" ? "回退包正在后台下载并校验" : "更新包正在后台下载并校验", false);
+    setUpdateNotice(state.update.selected_action === "rollback" ? t("回退包正在后台下载并校验") : t("更新包正在后台下载并校验"), false);
   } catch (error) {
     setUpdateNotice(error.message, true);
   }
@@ -2016,24 +2021,24 @@ async function installUpdate() {
   const automatic = Boolean(state.maintenance?.update_auto_recovery);
   const rollback = state.update?.selected_action === "rollback";
   const confirmed = await askConfirmation(
-    rollback ? "回退 TeslaBox" : "安装系统更新",
-		automatic ? `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"}。TeslaBox 会自动断开 USB Gadget，安装健康检查通过后自动重启恢复；车机或电脑会短暂失去 USB 存储。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版会一并更新 FFmpeg。` : `将${rollback ? "回退" : "安装"} ${state.update?.latest_version || "已下载版本"} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
-		automatic ? `确认自动维护${rollback ? "回退" : "安装"}` : `确认已拔线并${rollback ? "回退" : "安装"}`, true,
+    rollback ? t("回退 TeslaBox") : t("安装系统更新"),
+		automatic ? t`将${rollback ? t("回退") : t("安装")} ${state.update?.latest_version || t("已下载版本")}。TeslaBox 会自动断开 USB Gadget，安装健康检查通过后自动重启恢复；车机或电脑会短暂失去 USB 存储。内核、无线驱动和 systemd 不会变更；带媒体运行时的新版会一并更新 FFmpeg。` : t`将${rollback ? t("回退") : t("安装")} ${state.update?.latest_version || t("已下载版本")} 并重启 TeslaBox 服务。请先物理拔掉车机 OTG。即使页面仍显示 configured，也可以确认继续：TeslaBox 会先真正解绑 UDC，再提交更新。更新后请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`,
+		automatic ? t`确认自动维护${rollback ? t("回退") : t("安装")}` : t`确认已拔线并${rollback ? t("回退") : t("安装")}`, true,
   );
   if (!confirmed) return;
   try {
     if (!automatic) {
       const storage = await request("/api/v1/storage");
       if (storage.gadget_status?.bound) {
-        setUpdateNotice("已确认 OTG 物理断开，正在安全解绑 USB Gadget…", false);
+        setUpdateNotice(t("已确认 OTG 物理断开，正在安全解绑 USB Gadget…"), false);
         await postJSON("/api/v1/gadget/disconnect", {confirm_physical_disconnect:true});
       }
     }
     state.update = await postJSON("/api/v1/update/install", {});
     renderUpdate(state.update);
-		setUpdateNotice(automatic ? `${rollback ? "回退" : "安装"}请求已提交。新程序健康检查通过后，设备会自动重启恢复 USB Gadget。` : `${rollback ? "回退" : "安装"}请求已提交。服务重启后 Gadget 会继续保持安全断开；请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`, false);
+		setUpdateNotice(automatic ? t`${rollback ? t("回退") : t("安装")}请求已提交。新程序健康检查通过后，设备会自动重启恢复 USB Gadget。` : t`${rollback ? t("回退") : t("安装")}请求已提交。服务重启后 Gadget 会继续保持安全断开；请插好 OTG，在日志中心准备下次冷启动，再关机断电重启。`, false);
 	} catch (error) {
-		setUpdateNotice(automatic ? `${error.message}。自动维护未完成，请在日志中心确认 USB Gadget 状态。` : `${error.message}。USB Gadget 会继续保持安全断开；请先插入 OTG 线，再到日志中心准备下次冷启动。`, true);
+		setUpdateNotice(automatic ? t`${error.message}。自动维护未完成，请在日志中心确认 USB Gadget 状态。` : t`${error.message}。USB Gadget 会继续保持安全断开；请先插入 OTG 线，再到日志中心准备下次冷启动。`, true);
   }
 }
 
@@ -2046,50 +2051,95 @@ async function refreshUpdateStatus() {
   }
 }
 
+function wifiConnectionState(wifi) {
+  const value = wifi.connection_state;
+  // SSID 和历史 active 标记都不能证明已取得地址；缺少状态或配置身份时必须保留为待确认。
+  if (!["connected","connecting","disconnecting","disconnected","unavailable","unknown"].includes(value)) return "unknown";
+  return value === "connected" && !wifi.connection_uuid ? "unknown" : value;
+}
+
+function partitionWiFiNetworks(wifi) {
+  const saved = wifi.saved_networks || [];
+  const points = wifi.available_networks || [];
+  const nearby = new Map(points.map(point => [point.ssid, point]));
+  const savedSSIDs = new Set(saved.map(network => network.ssid));
+  const confirmed = wifiConnectionState(wifi) === "connected";
+  const activeUUID = confirmed ? wifi.connection_uuid : "";
+  const known = [], remaining = [];
+  saved.forEach(network => {
+    const point = nearby.get(network.ssid);
+    const active = Boolean(activeUUID && network.uuid === activeUUID);
+    const connecting = wifi.connection_state === "connecting" && network.uuid === wifi.connection_uuid;
+    const item = {...network, active, connecting, point};
+    (point || active || connecting ? known : remaining).push(item);
+  });
+  known.sort((a,b) => Number(b.active || b.connecting) - Number(a.active || a.connecting) || Number(b.point?.signal || 0) - Number(a.point?.signal || 0));
+  return {known, remaining, available:points.filter(point => !savedSSIDs.has(point.ssid) && !point.saved)};
+}
+
 function renderWiFiSettings(wifi) {
   const available = Boolean(wifi.available);
-  $("wifi-interface").textContent = available ? wifi.interface : "不可用";
+  $("wifi-interface").textContent = available ? wifi.interface : t("不可用");
   $("wifi-mac-address").textContent = wifi.mac_address || "—";
-  $("wifi-ip-address").textContent = available ? wifi.ip_address || "未获取" : "—";
-  $("wifi-status").textContent = !available ? "不可用" : wifi.current_connection ? `已连接 · ${wifi.current_connection}` : "未连接";
-  $("wifi-status").className = `hardware-value${available && wifi.current_connection ? " ok" : " error"}`;
+  $("wifi-ip-address").textContent = available ? wifi.ip_address || t("未获取") : "—";
+  const connectionState = wifiConnectionState(wifi);
+  const connected = connectionState === "connected";
+  const details = available && connected && wifi.details?.available ? wifi.details : null;
+  const missing = available && connected ? t("未知") : "—";
+  if (details) $("wifi-ip-address").textContent = (details.addresses || []).join("\n") || t("尚未取得 IP 地址");
+  $("wifi-link-speed").textContent = details?.bitrate_kbps > 0 ? `${Number((details.bitrate_kbps / 1000).toFixed(1))} Mbps` : missing;
+  $("wifi-frequency").textContent = details?.frequency_mhz > 0 ? `${details.frequency_mhz} MHz` : missing;
+  $("wifi-signal").textContent = details && Number.isFinite(details.signal) && details.signal >= 0 && details.signal <= 100 ? `${details.signal}%` : missing;
+  $("wifi-gateway").textContent = details ? (details.gateways || []).join("\n") || t("无") : missing;
+  $("wifi-dns").textContent = details ? [...new Set(details.dns || [])].join("\n") || t("无") : missing;
+  $("wifi-mtu").textContent = details?.mtu > 0 ? String(details.mtu) : missing;
+  const statusLabels = {connecting:t("正在连接／获取地址"), disconnecting:t("正在断开"), unknown:t("状态待确认"), disconnected:t("未连接")};
+  $("wifi-status").textContent = !available ? t("不可用") : connected ? t`已连接 · ${wifi.current_connection}` : `${statusLabels[connectionState] || t("未连接")}${wifi.pending_connection ? ` · ${wifi.pending_connection}` : ""}`;
+  $("wifi-status").className = `hardware-value${available && connected ? " ok" : " error"}`;
   const warnings = [];
   if (wifi.single_radio_notice) warnings.push(wifi.single_radio_notice);
   if (wifi.recovery?.last_error) {
-    const retry = wifi.recovery.next_attempt_at ? `，下次尝试 ${new Date(wifi.recovery.next_attempt_at).toLocaleTimeString("zh-CN", {hour12:false})}` : "";
-    warnings.push(`上游连接协调：${wifi.recovery.last_error}${retry}`);
+    const retry = wifi.recovery.next_attempt_at ? t`，下次尝试 ${new Date(wifi.recovery.next_attempt_at).toLocaleTimeString(globalThis.TeslaBoxI18n.locale, {hour12:false})}` : "";
+    warnings.push(t`上游连接协调：${wifi.recovery.last_error}${retry}`);
   } else if (wifi.recovery?.last_success_at) {
-    warnings.push(`上游连接协调最近成功：${new Date(wifi.recovery.last_success_at).toLocaleString("zh-CN", {hour12:false})}`);
+    warnings.push(t`上游连接协调最近成功：${new Date(wifi.recovery.last_success_at).toLocaleString(globalThis.TeslaBoxI18n.locale, {hour12:false})}`);
   }
   $("wifi-warning").hidden = warnings.length === 0;
   $("wifi-warning").textContent = warnings.join(" ");
   renderSavedNetworks(wifi.saved_networks || [], available);
-  renderAvailableNetworks(available ? wifi.available_networks || [] : []);
+  renderAvailableNetworks(available ? partitionWiFiNetworks(wifi).available : []);
   $("wifi-scan").disabled = !available;
-  $("wifi-scan").title = available ? "手动扫描附近 WiFi" : "未检测到可用的无线网卡";
+  $("wifi-scan").title = available ? t("手动扫描附近 WiFi") : t("未检测到可用的无线网卡");
 }
 
 function renderWiFiUnavailable(message) {
-  $("wifi-interface").textContent = "不可用";
+  $("wifi-interface").textContent = t("不可用");
   $("wifi-mac-address").textContent = "—";
   $("wifi-ip-address").textContent = "—";
-  $("wifi-status").textContent = "不可用";
+  for (const id of ["wifi-link-speed","wifi-frequency","wifi-signal","wifi-gateway","wifi-dns","wifi-mtu"]) $(id).textContent = "—";
+  $("wifi-status").textContent = t("不可用");
   $("wifi-status").className = "hardware-value error";
   $("wifi-warning").hidden = false;
   $("wifi-warning").textContent = message;
   renderSavedNetworks([], false);
   renderAvailableNetworks([]);
   $("wifi-scan").disabled = true;
-  $("wifi-scan").title = "无线管理暂不可用";
+  $("wifi-scan").title = t("无线管理暂不可用");
 }
 
 function renderSavedNetworks(networks, wifiAvailable = true) {
-  const list = $("saved-network-list");
+  const groups = partitionWiFiNetworks({...state.wifi, saved_networks:networks});
+  renderSavedNetworkRows(groups.known, wifiAvailable, "known-network-list", t("附近暂无已保存的网络"));
+  renderSavedNetworkRows(groups.remaining, wifiAvailable, "saved-network-list", t("暂无其他已保存的网络"));
+}
+
+function renderSavedNetworkRows(networks, wifiAvailable, listID, emptyMessage) {
+  const list = $(listID);
   list.replaceChildren();
   if (!networks.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "暂无已保存的客户端 WiFi";
+    empty.textContent = emptyMessage;
     list.append(empty);
     return;
   }
@@ -2101,7 +2151,7 @@ function renderSavedNetworks(networks, wifiAvailable = true) {
     const title = document.createElement("strong");
     title.textContent = network.ssid || network.name;
     const detail = document.createElement("small");
-    detail.textContent = `${network.active ? "当前已连接" : network.requires_password ? "需要重新输入密码" : "已保存"} · ${network.auto_connect ? "自动连接" : "手动连接"} · ${formatWiFiIPv4Summary(network.ipv4)}`;
+    detail.textContent = `${network.active ? t("当前已连接") : network.connecting ? t("正在连接／获取地址") : network.requires_password ? t("需要重新输入密码") : t("已保存")} · ${network.auto_connect ? t("自动连接") : t("手动连接")} · ${formatWiFiIPv4Summary(network.ipv4)}${network.point ? ` · ${network.point.band} · ${network.point.signal}%` : ""}${network.name && network.name !== network.ssid ? t` · 配置：${network.name}` : ""}`;
     identity.append(title, detail);
     const actions = document.createElement("div");
     actions.className = "network-actions";
@@ -2110,28 +2160,27 @@ function renderSavedNetworks(networks, wifiAvailable = true) {
     const autoConnectInput = document.createElement("input");
     autoConnectInput.type = "checkbox";
     autoConnectInput.checked = Boolean(network.auto_connect);
-    autoConnectInput.setAttribute("aria-label", `${network.ssid || network.name} 自动连接`);
+    autoConnectInput.setAttribute("aria-label", t`${network.ssid || network.name} 自动连接`);
     autoConnectInput.addEventListener("change", () => updateWiFiAutoConnect(network, autoConnectInput));
     const autoConnectText = document.createElement("span");
-    autoConnectText.textContent = "自动连接";
+    autoConnectText.textContent = t("自动连接");
     autoConnect.append(autoConnectInput, autoConnectText);
     const connect = document.createElement("button");
     connect.type = "button";
     connect.className = "secondary";
-    connect.textContent = network.active ? "已连接" : "连接";
-    connect.disabled = !wifiAvailable || network.active;
-    connect.title = wifiAvailable ? "" : "未检测到可用的无线网卡";
-    connect.addEventListener("click", () => selectSavedWiFi(network));
+    connect.textContent = network.active ? t("断开连接") : network.connecting ? t("取消连接") : t("连接");
+    connect.disabled = !wifiAvailable;
+    connect.title = wifiAvailable ? "" : t("未检测到可用的无线网卡");
+    connect.addEventListener("click", () => network.active || network.connecting ? disconnectWiFi(network) : selectSavedWiFi(network));
     const ipv4 = document.createElement("button");
     ipv4.type = "button";
     ipv4.className = "ghost";
-    ipv4.textContent = "IP 设置";
+    ipv4.textContent = t("IP 设置");
     ipv4.addEventListener("click", () => openWiFiIPv4Modal(network));
     const forget = document.createElement("button");
     forget.type = "button";
     forget.className = "ghost";
-    forget.textContent = "忘记";
-    forget.disabled = network.active;
+    forget.textContent = t("忘记");
     forget.addEventListener("click", () => forgetWiFi(network));
     actions.append(autoConnect, connect, ipv4, forget);
     row.append(identity, actions);
@@ -2145,7 +2194,7 @@ function toggleNetworkPanel(panelID, toggleID) {
   const expanded = panel.hidden;
   panel.hidden = !expanded;
   toggle.setAttribute("aria-expanded", String(expanded));
-  toggle.textContent = expanded ? "收起" : "展开";
+  toggle.textContent = expanded ? t("收起") : t("展开");
 }
 
 function renderAvailableNetworks(networks) {
@@ -2156,7 +2205,7 @@ function renderAvailableNetworks(networks) {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty-state";
-    cell.textContent = "暂无扫描结果，请点击扫描网络";
+    cell.textContent = t("暂无扫描结果，请点击扫描网络");
     row.append(cell);
     list.append(row);
     return;
@@ -2182,9 +2231,9 @@ function renderAvailableNetworks(networks) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = network.saved ? "secondary" : "primary";
-    button.textContent = network.saved ? "连接已保存" : "连接";
+    button.textContent = network.saved ? t("连接已保存") : t("连接");
     button.disabled = !supportedWiFiSecurity(network.security);
-    button.title = button.disabled ? "第一版暂不支持该加密类型" : "";
+    button.title = button.disabled ? t("第一版暂不支持该加密类型") : "";
     button.addEventListener("click", () => openAvailableWiFi(network));
     action.append(button);
     row.append(ssid, signal, band, security, action);
@@ -2195,17 +2244,18 @@ function renderAvailableNetworks(networks) {
 async function scanWiFi() {
   const button = $("wifi-scan");
   button.disabled = true;
-  button.textContent = "扫描中…";
+  button.textContent = t("扫描中…");
   try {
     const response = await postJSON("/api/v1/network/wifi/scan", {});
     state.wifi.available_networks = response.items || [];
-    renderAvailableNetworks(state.wifi.available_networks);
-    setSettingsNotice(`扫描完成，发现 ${state.wifi.available_networks.length} 个网络`, false);
+    renderSavedNetworks(state.wifi.saved_networks || [], Boolean(state.wifi.available));
+    renderAvailableNetworks(partitionWiFiNetworks(state.wifi).available);
+    setSettingsNotice(t`扫描完成，发现 ${state.wifi.available_networks.length} 个网络`, false);
   } catch (error) {
     setSettingsNotice(error.message, true);
   } finally {
     button.disabled = !state.wifi?.available;
-    button.textContent = "扫描网络";
+    button.textContent = t("扫描网络");
   }
 }
 
@@ -2230,8 +2280,8 @@ function selectSavedWiFi(network) {
     ssid:network.ssid,
     security:accessPoint?.security || network.security || "WPA2",
   };
-  $("wifi-modal-title").textContent = `重新连接 ${network.ssid}`;
-  $("wifi-modal-detail").textContent = "旧配置没有可供后台服务读取的密码，请重新输入一次；保存后会恢复开机自动连接。";
+  $("wifi-modal-title").textContent = t`重新连接 ${network.ssid}`;
+  $("wifi-modal-detail").textContent = t("旧配置没有可供后台服务读取的密码，请重新输入一次；保存后会恢复开机自动连接。");
   $("wifi-password-label").hidden = false;
   $("wifi-password").required = true;
   $("wifi-password").value = "";
@@ -2246,7 +2296,7 @@ async function updateWiFiAutoConnect(network, input) {
   try {
     await postJSON("/api/v1/network/wifi/autoconnect", {uuid:network.uuid, enabled});
     network.auto_connect = enabled;
-    setSettingsNotice(enabled ? "已开启自动连接" : "已关闭自动连接", false);
+    setSettingsNotice(enabled ? t("已开启自动连接") : t("已关闭自动连接"), false);
   } catch (error) {
     input.checked = !enabled;
     setSettingsNotice(error.message, true);
@@ -2266,8 +2316,8 @@ function openAvailableWiFi(network) {
     return;
   }
   pendingWiFi = network;
-  $("wifi-modal-title").textContent = `连接 ${network.ssid}`;
-  $("wifi-modal-detail").textContent = `${network.band} · 信号 ${network.signal}% · ${network.security}`;
+  $("wifi-modal-title").textContent = t`连接 ${network.ssid}`;
+  $("wifi-modal-detail").textContent = t`${network.band} · 信号 ${network.signal}% · ${network.security}`;
   const needsPassword = network.security !== "OPEN";
   $("wifi-password-label").hidden = !needsPassword;
   $("wifi-password").required = needsPassword;
@@ -2285,15 +2335,15 @@ function closeWiFiModal() {
 
 function formatWiFiIPv4Summary(settings) {
   if (!settings || settings.mode !== "static") return "DHCP";
-  const address = settings.address && settings.subnet_mask ? `${settings.address} / ${settings.subnet_mask}` : "静态 IPv4";
-  return `静态 ${address}`;
+  const address = settings.address && settings.subnet_mask ? `${settings.address} / ${settings.subnet_mask}` : t("静态 IPv4");
+  return t`静态 ${address}`;
 }
 
 function openWiFiIPv4Modal(network) {
   pendingWiFiIPv4Network = network;
   const settings = network.ipv4 || {mode:"dhcp", dns:[]};
-  $("wifi-ipv4-modal-title").textContent = `${network.ssid || network.name} 的 IPv4 设置`;
-  $("wifi-ipv4-modal-detail").textContent = network.active ? "当前正在连接此网络，保存后会立即重新获取网络地址。" : "此配置会在下次连接该 WiFi 时自动生效。";
+  $("wifi-ipv4-modal-title").textContent = t`${network.ssid || network.name} 的 IPv4 设置`;
+  $("wifi-ipv4-modal-detail").textContent = network.active ? t("当前正在连接此网络，保存后会立即重新获取网络地址。") : t("此配置会在下次连接该 WiFi 时自动生效。");
   $("wifi-ipv4-mode").value = settings.mode === "static" ? "static" : "dhcp";
   $("wifi-ipv4-address").value = settings.address || "";
   $("wifi-ipv4-mask").value = settings.subnet_mask || "";
@@ -2330,9 +2380,9 @@ async function saveWiFiIPv4Settings(event) {
   if (network.active) {
     $("wifi-ipv4-modal").hidden = true;
     const confirmed = await askConfirmation(
-      "应用当前 WiFi 的 IPv4 设置",
-      "保存后 WiFi 会立即重新连接，当前页面可能断开。请记住新的 IP 地址，或通过 TeslaBox 热点重新进入设置中心。",
-      "确认保存", true,
+      t("应用当前 WiFi 的 IPv4 设置"),
+      t("保存后 WiFi 会立即重新连接，当前页面可能断开。请记住新的 IP 地址，或通过 TeslaBox 热点重新进入设置中心。"),
+      t("确认保存"), true,
     );
     if (!confirmed) {
       $("wifi-ipv4-modal").hidden = false;
@@ -2340,10 +2390,10 @@ async function saveWiFiIPv4Settings(event) {
     }
   }
   closeWiFiIPv4Modal();
-  setSettingsNotice(network.active ? "正在应用 IPv4 设置，页面可能短暂断开…" : "正在保存 WiFi IPv4 设置…", false);
+  setSettingsNotice(network.active ? t("正在应用 IPv4 设置，页面可能短暂断开…") : t("正在保存 WiFi IPv4 设置…"), false);
   try {
     await postJSON("/api/v1/network/wifi/ipv4", payload);
-    setSettingsNotice(network.active ? "IPv4 设置已应用；如页面断开，请使用新 IP 或 TeslaBox 热点重新访问。" : "WiFi IPv4 设置已保存，将在下次连接时生效。", false);
+    setSettingsNotice(network.active ? t("IPv4 设置已应用；如页面断开，请使用新 IP 或 TeslaBox 热点重新访问。") : t("WiFi IPv4 设置已保存，将在下次连接时生效。"), false);
     if (!network.active) await loadSettings();
   } catch (error) {
     setSettingsNotice(error.message, true);
@@ -2363,22 +2413,22 @@ async function connectNewWiFi(event) {
 }
 
 async function runWiFiConnect(payload) {
-  setSettingsNotice("正在连接 WiFi；若需要同步信道，热点会短暂重启…", false);
+  setSettingsNotice(t("正在连接 WiFi；若需要同步信道，热点会短暂重启…"), false);
   try {
-    await postJSON("/api/v1/network/wifi/connect", payload);
-    setSettingsNotice("WiFi 已连接", false);
+    const response = await postJSON("/api/v1/network/wifi/connect", payload);
+    setSettingsNotice(response?.connected ? t("WiFi 已连接") : t("连接请求已处理，正在确认实际网络状态…"), false);
     await loadSettings();
   } catch (error) {
     if (error.reasonCode === "carplay_network_reserved" && !payload.confirm_carplay_reconnect) {
       const confirmed = await askConfirmation(
-        "强制连接 Wi-Fi",
-        "连接此 Wi-Fi 会暂时中断 CarPlay，并可能让热点和当前页面短暂断开。连接结束后会自动重新启动 CarPlay，录像继续运行。是否继续？",
-        "中断 CarPlay 并连接", true,
+        t("强制连接 Wi-Fi"),
+        t("连接此 Wi-Fi 会暂时中断 CarPlay，并可能让热点和当前页面短暂断开。连接结束后会自动重新启动 CarPlay，录像继续运行。是否继续？"),
+        t("中断 CarPlay 并连接"), true,
       );
       if (confirmed) {
         await runWiFiConnect({...payload, confirm_carplay_reconnect:true});
       } else {
-        setSettingsNotice("已取消连接，保持当前 CarPlay 会话", false);
+        setSettingsNotice(t("已取消连接，保持当前 CarPlay 会话"), false);
       }
       return;
     }
@@ -2387,11 +2437,24 @@ async function runWiFiConnect(payload) {
 }
 
 async function forgetWiFi(network) {
-  const confirmed = await askConfirmation("忘记网络", `确定删除“${network.ssid || network.name}”的已保存配置吗？页面不会再自动连接该网络。`, "忘记网络", true);
+  const activeWarning = network.active || network.connecting ? t("这会同时断开此 WiFi；如果当前通过它访问页面，请先插网线或连接 TeslaBox 热点。") : "";
+  const confirmed = await askConfirmation(t("忘记网络"), t`确定删除“${network.ssid || network.name}”的已保存配置吗？${activeWarning}同名的其他配置不会被删除。`, t("忘记网络"), true);
   if (!confirmed) return;
   try {
     await postJSON("/api/v1/network/wifi/forget", {uuid:network.uuid});
-    setSettingsNotice("已忘记网络", false);
+    setSettingsNotice(t("已忘记网络"), false);
+    await loadSettings();
+  } catch (error) {
+    setSettingsNotice(error.message, true);
+  }
+}
+
+async function disconnectWiFi(network) {
+  const confirmed = await askConfirmation(t("断开 WiFi"), t`确定断开“${network.ssid || network.name}”吗？已保存的密码和自动连接偏好会保留。如果当前通过它访问页面，请先插网线或连接 TeslaBox 热点。`, t("断开连接"), true);
+  if (!confirmed) return;
+  try {
+    await postJSON("/api/v1/network/wifi/disconnect", {uuid:network.uuid});
+    setSettingsNotice(t("WiFi 已断开；手动连接或重启后可以恢复"), false);
     await loadSettings();
   } catch (error) {
     setSettingsNotice(error.message, true);
@@ -2400,22 +2463,23 @@ async function forgetWiFi(network) {
 
 function renderAPSettings(ap) {
   const available = Boolean(ap.available);
-  const labels = {disabled:"已停用", starting:"正在启动", running:"运行中", degraded:"启动异常", blocked:"受限", failed:"启动失败", recovering:"正在恢复"};
+  const labels = {disabled:t("已停用"), starting:t("正在启动"), running:t("运行中"), degraded:t("启动异常"), blocked:t("受限"), failed:t("启动失败"), recovering:t("正在恢复")};
   const operationalState = !available ? "unavailable" : (ap.state || (ap.enabled ? "running" : "disabled"));
-  $("ap-status").textContent = !available ? "不可用" : (labels[operationalState] || "状态未知");
+  $("ap-status").textContent = !available ? t("不可用") : (labels[operationalState] || t("状态未知"));
   $("ap-status").className = `hardware-value${operationalState === "running" ? " ok" : operationalState === "starting" || operationalState === "recovering" ? "" : " error"}`;
   $("ap-interface").textContent = ap.interface || "—";
   $("ap-interface-role").textContent = ap.interface_role || "—";
   $("ap-mac-address").textContent = ap.mac_address || "—";
-  $("ap-active-band").textContent = ap.active_band === "a" ? "5 GHz" : ap.active_band === "bg" ? "2.4 GHz" : operationalState === "running" ? "读取中" : "未运行";
-  $("ap-active-channel").textContent = ap.active_channel ? String(ap.active_channel) : operationalState === "running" ? "读取中" : "未运行";
+  $("ap-active-band").textContent = ap.active_band === "a" ? "5 GHz" : ap.active_band === "bg" ? "2.4 GHz" : operationalState === "running" ? t("读取中") : t("未运行");
+  $("ap-active-channel").textContent = ap.active_channel ? String(ap.active_channel) : operationalState === "running" ? t("读取中") : t("未运行");
   $("ap-ssid").value = ap.ssid || "";
   $("ap-band").value = ap.band || "a";
   populateAPChannels($("ap-band").value, Number(ap.channel || 0), ap.allowed_channels);
   $("ap-enabled").checked = Boolean(ap.desired_enabled ?? ap.enabled);
   $("ap-autoconnect").checked = Boolean(ap.auto_connect);
   $("ap-address").textContent = ap.address || "—";
-  $("ap-sharing").textContent = ap.sharing ? "已开启" : "未开启";
+  $("ap-sharing").textContent = ap.sharing ? t("已开启") : t("未开启");
+  renderAPSecurity(ap, operationalState);
   const notices = [];
   if (operationalState !== "running" && ap.status_message) notices.push(ap.status_message);
   if (ap.suggested_action) notices.push(ap.suggested_action);
@@ -2424,41 +2488,80 @@ function renderAPSettings(ap) {
   $("ap-capability-notice").textContent = notices.join(" ");
   $("ap-repair-interface").hidden = !Array.isArray(ap.conflicting_profiles) || ap.conflicting_profiles.length === 0;
   const preferredBand = ap.band === "bg" ? "2.4 GHz" : "5 GHz";
-  const preferredChannel = ap.channel ? `信道 ${ap.channel}` : "自动信道";
+  const preferredChannel = ap.channel ? t`信道 ${ap.channel}` : t("自动信道");
   $("ap-channel-detail").textContent = ["same_channel", "unknown"].includes(ap.concurrency_mode)
-    ? `首选配置为 ${preferredBand} / ${preferredChannel}；连接上游 WiFi 时，热点会切换到上游的实际频段和信道。`
-    : `首选配置为 ${preferredBand} / ${preferredChannel}；当前无线能力允许时，热点会保持该配置。`;
+    ? t`首选配置为 ${preferredBand} / ${preferredChannel}；连接上游 WiFi 时，热点会切换到上游的实际频段和信道。`
+    : t`首选配置为 ${preferredBand} / ${preferredChannel}；当前无线能力允许时，热点会保持该配置。`;
   $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = !available; });
 }
 
 function renderAPUnavailable(message) {
-  $("ap-status").textContent = "不可用";
+  $("ap-status").textContent = t("不可用");
   $("ap-status").className = "hardware-value error";
   $("ap-interface").textContent = "—";
   $("ap-interface-role").textContent = "—";
   $("ap-mac-address").textContent = "—";
   $("ap-active-band").textContent = "—";
   $("ap-active-channel").textContent = "—";
+  $("ap-configured-security").textContent = "—";
+  $("ap-active-security").textContent = "—";
+  $("ap-security").replaceChildren();
   $("ap-address").textContent = message;
   $("ap-capability-notice").hidden = false;
   $("ap-capability-notice").textContent = message;
   $("ap-repair-interface").hidden = true;
-  $("ap-channel-detail").textContent = "无法读取热点能力和当前工作信道。";
+  $("ap-channel-detail").textContent = t("无法读取热点能力和当前工作信道。");
   $("ap-form").querySelectorAll("input,select,button").forEach((element) => { element.disabled = true; });
+}
+
+function renderAPSecurity(ap, operationalState) {
+  const labels = {wpa2:"WPA2-Personal（AES）", wpa3:"WPA3-Personal（SAE）", "wpa2-wpa3":t("WPA2/WPA3 混合")};
+  $("ap-configured-security").textContent = labels[ap.security_mode] || (ap.security ? t`既有配置（${ap.security}，未确认具体版本）` : t("未确认"));
+  // 不能用已保存配置替代运行态；控制接口不可读时明确保留未知。
+  $("ap-active-security").textContent = operationalState === "running"
+    ? (labels[ap.active_security] || t("未验证")) : t("未运行");
+  const select = $("ap-security");
+  select.replaceChildren();
+  const preserve = document.createElement("option");
+  preserve.value = "";
+  preserve.textContent = t("保留当前认证配置");
+  select.append(preserve);
+  const options = Array.isArray(ap.security_options) ? ap.security_options : [];
+  options.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.mode;
+    option.textContent = `${labels[item.mode] || item.label}${item.available ? "" : t("（不可用）")}`;
+    option.disabled = !item.available;
+    option.title = item.reason || "";
+    select.append(option);
+  });
+  select.value = "";
+  updateAPSecurityNotice();
+}
+
+function updateAPSecurityNotice() {
+  const options = Array.isArray(state.ap?.security_options) ? state.ap.security_options : [];
+  const selected = options.find((item) => item.mode === $("ap-security").value);
+  const reasons = selected ? [selected.reason].filter(Boolean) : options.filter((item) => !item.available).map((item) => `${item.label}：${item.reason}`);
+  $("ap-security-detail").textContent = [
+    t("推荐 WPA2-Personal（AES）以兼容车机。留空密码不修改已有密码；保留当前认证配置不会改变认证方式。"),
+    ...reasons,
+    t("运行认证来自接口报告，不等于真实终端验收。更改认证可能断开连接，建议通过网线操作；失败不自动降级。"),
+  ].join(" ");
 }
 
 async function repairAPInterface() {
   const confirmed = await askConfirmation(
-    "修复 AP 接口",
-    "系统将断开占用 AP 接口的普通 WiFi 配置，关闭它们的自动连接并解除接口绑定；不会删除已保存的 WiFi。请优先通过网线访问此页面。",
-    "确认修复",
+    t("修复 AP 接口"),
+    t("系统将断开占用 AP 接口的普通 WiFi 配置，关闭它们的自动连接并解除接口绑定；不会删除已保存的 WiFi。请优先通过网线访问此页面。"),
+    t("确认修复"),
     true,
   );
   if (!confirmed) return;
-  setSettingsNotice("正在提交 AP 接口修复…", false);
+  setSettingsNotice(t("正在提交 AP 接口修复…"), false);
   try {
     await postJSON("/api/v1/network/ap/repair", {});
-    setSettingsNotice("修复已提交，AP 接口将在 1 秒后释放，请稍后重新开启热点", false);
+    setSettingsNotice(t("修复已提交，AP 接口将在 1 秒后释放，请稍后重新开启热点"), false);
     window.setTimeout(() => loadSettings(), 2500);
   } catch (error) {
     setSettingsNotice(error.message, true);
@@ -2475,7 +2578,7 @@ function populateAPChannels(band, selected, allowedChannels = []) {
     const option = document.createElement("option");
     option.value = String(channel);
     const restricted = channel > 0 && supported.size > 0 && !supported.has(channel);
-    option.textContent = channel === 0 ? "自动（按网卡能力选择）" : `${channel}${restricted ? "（当前受限）" : ""}`;
+    option.textContent = channel === 0 ? t("自动（按网卡能力选择）") : `${channel}${restricted ? t("（当前受限）") : ""}`;
     option.disabled = restricted;
     option.selected = channel === selected;
     select.append(option);
@@ -2484,36 +2587,69 @@ function populateAPChannels(band, selected, allowedChannels = []) {
 
 async function saveAPSettings(event) {
   event.preventDefault();
-  const enabled = $("ap-enabled").checked;
-  const confirmed = await askConfirmation(
-    enabled ? "应用热点设置" : "关闭无线热点",
-    enabled
-      ? "保存后热点会重新启动，当前连接可能断开。请确认已经记住新的热点名称和密码。"
-      : "关闭后会同时关闭开机自动启动，通过该热点打开的页面会断开。需要重新开启时，请通过其他网络访问设置中心。",
-    enabled ? "保存并应用" : "确认关闭",
-    !enabled,
-  );
-  if (!confirmed) return;
-  const payload = {
-    enabled, ssid:$("ap-ssid").value, password:$("ap-password").value,
-    band:$("ap-band").value, channel:Number($("ap-channel").value), auto_connect:enabled && $("ap-autoconnect").checked,
-  };
-  setSettingsNotice(enabled ? "正在应用热点设置，页面可能断开…" : "正在提交关闭指令…", false);
+  if (state.apSaving) return;
+  state.apSaving = true;
+  try {
+    const enabled = $("ap-enabled").checked;
+    const confirmed = await askConfirmation(
+      enabled ? t("应用热点设置") : t("关闭无线热点"),
+      enabled
+        ? t("保存后热点会重新启动，当前连接可能断开。请确认已经记住新的热点名称和密码。")
+        : t("关闭后会同时关闭开机自动启动，通过该热点打开的页面会断开。需要重新开启时，请通过其他网络访问设置中心。"),
+      enabled ? t("保存并应用") : t("确认关闭"),
+      !enabled,
+    );
+    if (!confirmed) return;
+    const payload = {
+      enabled, ssid:$("ap-ssid").value, password:$("ap-password").value,
+      band:$("ap-band").value, channel:Number($("ap-channel").value), auto_connect:enabled && $("ap-autoconnect").checked,
+    };
+    if ($("ap-security").value) payload.security_mode = $("ap-security").value;
+    await runAPUpdate(payload);
+  } finally {
+    state.apSaving = false;
+  }
+}
+
+async function runAPUpdate(payload) {
+  const enabled = payload.enabled;
+  setSettingsNotice(enabled ? t("正在应用热点设置，页面可能断开…") : t("正在提交关闭指令…"), false);
   try {
     await postJSON("/api/v1/network/ap", payload);
+  } catch (error) {
+    if (error.reasonCode === "carplay_network_reserved" && !payload.confirm_carplay_reconnect) {
+      const confirmed = await askConfirmation(
+        t("中断 CarPlay 并应用热点设置"),
+        t("此操作会暂时中断 CarPlay，保存热点模板后请求重新启动 CarPlay；手机需要重新连接，当前页面也可能断开。CarPlay 运行时仍由专用热点接管接口，热点开关只控制普通热点；认证必须兼容当前 CarPlay。录像继续运行，建议通过网线操作。是否继续？"),
+        t("中断并应用"), true,
+      );
+      if (confirmed) await runAPUpdate({...payload, confirm_carplay_reconnect:true});
+      else setSettingsNotice(t("已取消热点修改，保持当前 CarPlay 会话"), false);
+      return;
+    }
+    setSettingsNotice(error.message, true);
+    return;
+  }
+  try {
     globalThis.TeslaBoxSettingsLayout?.markClean("ap-settings-title");
     $("ap-password").value = "";
+    if (payload.confirm_carplay_reconnect) {
+      setSettingsNotice(t("热点模板已保存；CarPlay 运行时仍由专用热点接管接口，请查看实际连接状态。"), false);
+      await loadSettings();
+      return;
+    }
     if (!enabled) {
-      $("ap-status").textContent = "正在关闭";
+      $("ap-status").textContent = t("正在关闭");
       $("ap-status").className = "hardware-value";
       $("ap-enabled").checked = false;
       $("ap-autoconnect").checked = false;
-      setSettingsNotice("关闭指令已提交，热点将在 1 秒后关闭", false);
+      setSettingsNotice(t("关闭指令已提交，热点将在 1 秒后关闭"), false);
       return;
     }
-    setSettingsNotice("热点设置已应用", false);
+    setSettingsNotice(t("热点设置已应用"), false);
     await loadSettings();
   } catch (error) {
+    // 保存成功后的刷新错误不能当作保存被拒绝，再次发起有副作用的请求。
     setSettingsNotice(error.message, true);
   }
 }
@@ -2526,7 +2662,7 @@ async function loadStorageDevices() {
     renderStorageDevices(state.storage);
     onboardingStorage = state.storage;
     if (onboardingState?.page_guide_complete && $("onboarding-modal").hidden) maybeShowStorageOnboarding();
-    setSettingsNotice("存储设备列表已更新", false);
+    setSettingsNotice(t("存储设备列表已更新"), false);
   } catch (error) {
     renderStorageUnavailable(error.message);
     setSettingsNotice(error.message, true);
@@ -2538,41 +2674,41 @@ async function loadStorageDevices() {
 async function inspectStorageFragmentation() {
   const button = $("storage-fragmentation-check");
   button.disabled = true;
-  button.textContent = "检查中…";
+  button.textContent = t("检查中…");
   try {
     const report = await request("/api/v1/storage/fragmentation");
     renderStorageFragmentation(report);
-    setSettingsNotice("镜像碎片检查完成", false);
+    setSettingsNotice(t("镜像碎片检查完成"), false);
   } catch (error) {
     $("storage-fragmentation-detail").textContent = error.message;
     setSettingsNotice(error.message, true);
   } finally {
     button.disabled = false;
-    button.textContent = "检查碎片";
+    button.textContent = t("检查碎片");
   }
 }
 
 function renderStorageFragmentation(report) {
-  const levels = {healthy:"正常", warning:"偏多", critical:"严重"};
-  $("storage-fragmentation-detail").textContent = `${levels[report.severity] || "未知"} · ${formatNumber(report.extent_count || 0)} 个 extent · ${report.reason || "无诊断说明"}`;
+  const levels = {healthy:t("正常"), warning:t("偏多"), critical:t("严重")};
+  $("storage-fragmentation-detail").textContent = t`${levels[report.severity] || t("未知")} · ${formatNumber(report.extent_count || 0)} 个 extent · ${report.reason || t("无诊断说明")}`;
 }
 
 async function migrateStorageCapacity() {
-  const confirmed = window.confirm("此操作会先预分配新增可写空间，再把固定 20GB 保留区优化为 10GB 或物理容量的 5%（取较大值），不会删除录像。操作期间必须保持供电稳定；旧式 95.9 GiB 分区仍需备份后重新初始化。请先物理拔掉 OTG，确认继续吗？");
+  const confirmed = window.confirm(t("此操作会先预分配新增可写空间，再把固定 20GB 保留区优化为 10GB 或物理容量的 5%（取较大值），不会删除录像。操作期间必须保持供电稳定；旧式 95.9 GiB 分区仍需备份后重新初始化。请先物理拔掉 OTG，确认继续吗？"));
   if (!confirmed) return;
   const button = $("storage-capacity-migrate");
   button.disabled = true;
-  button.textContent = "优化中，请勿断电…";
+  button.textContent = t("优化中，请勿断电…");
   try {
     const result = await postJSON("/api/v1/storage/migrate-capacity", {confirm_otg_disconnected:true});
-    const action = result.changed ? "保留空间已安全优化" : "容量布局无需调整";
-    const restart = result.requires_cold_boot ? "；请关机后重新上电恢复 Gadget" : "";
-    setSettingsNotice(`${action}：卷总容量 ${formatBytes(result.advertised_bytes)}，安全可写约 ${formatBytes(result.writable_bytes)}${restart}`, false);
+    const action = result.changed ? t("保留空间已安全优化") : t("容量布局无需调整");
+    const restart = result.requires_cold_boot ? t("；请关机后重新上电恢复 Gadget") : "";
+    setSettingsNotice(t`${action}：卷总容量 ${formatBytes(result.advertised_bytes)}，安全可写约 ${formatBytes(result.writable_bytes)}${restart}`, false);
   } catch (error) {
     setSettingsNotice(error.message, true);
   } finally {
     button.disabled = false;
-    button.textContent = "优化保留空间";
+    button.textContent = t("优化保留空间");
   }
 }
 
@@ -2581,13 +2717,13 @@ function renderStorageDevices(storage) {
   const list = $("storage-device-list");
   list.replaceChildren();
   const ready = devices.filter((device) => device.initialized).length;
-  $("storage-status").textContent = ready ? `${ready} 个已初始化` : devices.length ? "需要初始化" : "未检测到设备";
+  $("storage-status").textContent = ready ? t`${ready} 个已初始化` : devices.length ? t("需要初始化") : t("未检测到设备");
   $("storage-status").className = `badge${ready ? " ok" : devices.length ? " error" : ""}`;
   renderStorageBenchmark(storage.benchmark, storage.benchmark_error);
   if (!devices.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "未检测到具有稳定 by-id 的 USB 存储整盘";
+    empty.textContent = t("未检测到具有稳定 by-id 的 USB 存储整盘");
     list.append(empty);
     return;
   }
@@ -2597,9 +2733,9 @@ function renderStorageDevices(storage) {
     const identity = document.createElement("div");
     identity.className = "storage-device-identity";
     const title = document.createElement("strong");
-    title.textContent = device.model || "USB 存储设备";
+    title.textContent = device.model || t("USB 存储设备");
     const detail = document.createElement("small");
-    detail.textContent = `${formatBytes(device.size_bytes)} · 序列号 ${device.serial || "不可用"}`;
+    detail.textContent = t`${formatBytes(device.size_bytes)} · 序列号 ${device.serial || t("不可用")}`;
     const path = document.createElement("code");
     path.textContent = device.stable_path;
     identity.append(title, detail, path);
@@ -2615,7 +2751,7 @@ function renderStorageDevices(storage) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = device.can_resume || device.can_reinitialize ? "secondary compact" : "danger-button compact";
-      button.textContent = device.can_resume ? "继续初始化" : device.can_reinitialize ? "重新初始化" : "初始化设备";
+      button.textContent = device.can_resume ? t("继续初始化") : device.can_reinitialize ? t("重新初始化") : t("初始化设备");
       button.addEventListener("click", () => openStorageModal(device));
       stateBox.append(button);
     }
@@ -2623,7 +2759,7 @@ function renderStorageDevices(storage) {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.className = "ghost compact";
-      cancel.textContent = "放弃未完成任务";
+      cancel.textContent = t("放弃未完成任务");
       cancel.addEventListener("click", () => cancelStorageInitialization(device));
       stateBox.append(cancel);
     }
@@ -2634,19 +2770,19 @@ function renderStorageDevices(storage) {
 
 function renderStorageBenchmark(report, error) {
   if (error) {
-    $("storage-benchmark-detail").textContent = `性能体检记录不可用：${error}`;
+    $("storage-benchmark-detail").textContent = t`性能体检记录不可用：${error}`;
     return;
   }
   if (!report) {
-    $("storage-benchmark-detail").textContent = "尚无性能体检结果；新初始化数据盘时会自动执行一次。";
+    $("storage-benchmark-detail").textContent = t("尚无性能体检结果；新初始化数据盘时会自动执行一次。");
     return;
   }
-  const profiles = {stable:"稳定", limited:"受限", unsafe:"不建议"};
-  $("storage-benchmark-detail").textContent = `${profiles[report.profile] || "未知"} · 最低突发 ${Number(report.minimum_burst_mbps || 0).toFixed(1)} MB/s · 最长写停顿 ${formatDurationMS(report.maximum_write_stall_ms || 0)} · fsync P95 ${formatDurationMS(report.fsync_p95_ms || 0)}。${report.reason || ""}`;
+  const profiles = {stable:t("稳定"), limited:t("受限"), unsafe:t("不建议")};
+  $("storage-benchmark-detail").textContent = t`${profiles[report.profile] || t("未知")} · 最低突发 ${Number(report.minimum_burst_mbps || 0).toFixed(1)} MB/s · 最长写停顿 ${formatDurationMS(report.maximum_write_stall_ms || 0)} · fsync P95 ${formatDurationMS(report.fsync_p95_ms || 0)}。${report.reason || ""}`;
 }
 
 function renderStorageUnavailable(message) {
-  $("storage-status").textContent = "不可用";
+  $("storage-status").textContent = t("不可用");
   $("storage-status").className = "badge error";
   const list = $("storage-device-list");
   list.replaceChildren();
@@ -2657,22 +2793,22 @@ function renderStorageUnavailable(message) {
 }
 
 function storageStateLabel(device) {
-  if (device.active) return "当前数据盘";
-  if (device.initialized) return "已初始化";
-  if (device.state === "initializing") return "初始化中断";
-  if (device.state === "failed") return "初始化失败";
-  if (device.state === "unsafe") return "正在使用";
-  if (device.state === "unsupported") return "不支持";
-  return "未初始化";
+  if (device.active) return t("当前数据盘");
+  if (device.initialized) return t("已初始化");
+  if (device.state === "initializing") return t("初始化中断");
+  if (device.state === "failed") return t("初始化失败");
+  if (device.state === "unsafe") return t("正在使用");
+  if (device.state === "unsupported") return t("不支持");
+  return t("未初始化");
 }
 
 function openStorageModal(device) {
   pendingStorage = device;
   const reinitialize = Boolean(device.initialized && device.can_reinitialize);
-  $("storage-modal-title").textContent = device.can_resume ? "继续初始化存储设备" : reinitialize ? "重新初始化存储设备" : "初始化存储设备";
+  $("storage-modal-title").textContent = device.can_resume ? t("继续初始化存储设备") : reinitialize ? t("重新初始化存储设备") : t("初始化存储设备");
   const advertisedSize = device.planned_image_size_bytes || device.size_bytes;
   const writableSize = device.planned_writable_bytes || advertisedSize;
-  $("storage-modal-detail").textContent = `${device.model || "USB 存储设备"}，物理容量 ${formatBytes(device.size_bytes)}；TeslaCam 单分区卷显示完整 ${formatBytes(advertisedSize)}，安全可写约 ${formatBytes(writableSize)}，其余空间由受保护保留区留给快照和持续写入。目标序列号：${device.serial}。该操作会擦除整块设备。`;
+  $("storage-modal-detail").textContent = t`${device.model || t("USB 存储设备")}，物理容量 ${formatBytes(device.size_bytes)}；TeslaCam 单分区卷显示完整 ${formatBytes(advertisedSize)}，安全可写约 ${formatBytes(writableSize)}，其余空间由受保护保留区留给快照和持续写入。目标序列号：${device.serial}。该操作会擦除整块设备。`;
   $("storage-music-enabled").checked = false;
   $("storage-teslacam-percent").value = "80";
   $("storage-confirm-serial").value = "";
@@ -2690,7 +2826,7 @@ function renderStoragePartitionPreview() {
   const percent = Number($("storage-teslacam-percent").value || 80);
   const total = Number(pendingStorage.planned_writable_bytes || pendingStorage.planned_image_size_bytes || pendingStorage.size_bytes || 0);
   const teslaCam = Math.floor(total * percent / 100);
-  $("storage-partition-preview").textContent = `TeslaCam ${percent}%（约 ${formatBytes(teslaCam)}） · MUSIC ${100 - percent}%（约 ${formatBytes(total - teslaCam)}）`;
+  $("storage-partition-preview").textContent = t`TeslaCam ${percent}%（约 ${formatBytes(teslaCam)}） · MUSIC ${100 - percent}%（约 ${formatBytes(total - teslaCam)}）`;
 }
 
 function closeStorageModal() {
@@ -2728,10 +2864,10 @@ function maybeShowStorageOnboarding() {
   onboardingStorage = {...onboardingStorage, onboardingCandidate:candidate};
   const status = $("onboarding-storage-status");
   const detail = $("onboarding-storage-detail");
-  $("onboarding-storage-name").textContent = candidate.model || "初始化外接存储";
-  status.textContent = candidate.can_resume ? "可继续初始化" : "需要初始化";
+  $("onboarding-storage-name").textContent = candidate.model || t("初始化外接存储");
+  status.textContent = candidate.can_resume ? t("可继续初始化") : t("需要初始化");
   status.className = "badge error";
-  detail.textContent = `${formatBytes(candidate.size_bytes)} · ${candidate.serial ? `序列号 ${candidate.serial}` : "已取得稳定设备标识"}`;
+  detail.textContent = `${formatBytes(candidate.size_bytes)} · ${candidate.serial ? t`序列号 ${candidate.serial}` : t("已取得稳定设备标识")}`;
   $("onboarding-modal").hidden = false;
   window.setTimeout(() => $("onboarding-primary").focus(), 0);
 }
@@ -2743,7 +2879,7 @@ async function dismissOnboarding() {
   try {
     onboardingState = await postJSON("/api/v1/onboarding/storage-dismiss", {stable_path:candidate.stable_path}, {loading:false});
   } catch (error) {
-    showToast(`无法保存暂不处理状态：${error.message}`, true);
+    showToast(t`无法保存暂不处理状态：${error.message}`, true);
   }
 }
 
@@ -2779,7 +2915,7 @@ function renderPageGuideStep(index) {
   $("page-guide-detail").textContent = step.detail;
   $("page-guide-progress").textContent = `${pageGuideIndex + 1} / ${pageGuideSteps.length}`;
   $("page-guide-previous").hidden = pageGuideIndex === 0;
-  $("page-guide-next").textContent = pageGuideIndex === pageGuideSteps.length - 1 ? "完成" : "下一步";
+  $("page-guide-next").textContent = pageGuideIndex === pageGuideSteps.length - 1 ? t("完成") : t("下一步");
   window.requestAnimationFrame(positionPageGuide);
 }
 
@@ -2808,7 +2944,7 @@ async function completePageGuide() {
     onboardingState = await request("/api/v1/onboarding/page-complete", {method:"POST", loading:false});
     maybeShowStorageOnboarding();
   } catch (error) {
-    showToast(`无法保存页面引导状态：${error.message}`, true);
+    showToast(t`无法保存页面引导状态：${error.message}`, true);
   }
 }
 
@@ -2817,7 +2953,7 @@ async function initializeStorageDevice(event) {
   if (!pendingStorage) return;
   const button = $("storage-init-submit");
   button.disabled = true;
-  button.textContent = "初始化中，请勿拔出…";
+  button.textContent = t("初始化中，请勿拔出…");
   try {
     await postJSON("/api/v1/storage/initialize", {
       stable_path:pendingStorage.stable_path,
@@ -2829,29 +2965,29 @@ async function initializeStorageDevice(event) {
       teslacam_percent:Number($("storage-teslacam-percent").value || 80),
     });
     closeStorageModal();
-    setSettingsNotice("存储设备初始化完成；请插好 OTG 后到日志中心执行温重启恢复", false);
+    setSettingsNotice(t("存储设备初始化完成；请插好 OTG 后到日志中心执行温重启恢复"), false);
     await loadStorageDevices();
     await refreshAll();
   } catch (error) {
     setSettingsNotice(error.message, true);
   } finally {
     button.disabled = false;
-    button.textContent = "擦除并初始化";
+    button.textContent = t("擦除并初始化");
   }
 }
 
 async function cancelStorageInitialization(device) {
   const confirmed = await askConfirmation(
-    "放弃未完成初始化",
-    `将卸载 ${device.model || "目标设备"} 并恢复原活动数据盘选择，不会再次擦除设备。`,
-    "确认放弃", true,
+    t("放弃未完成初始化"),
+    t`将卸载 ${device.model || t("目标设备")} 并恢复原活动数据盘选择，不会再次擦除设备。`,
+    t("确认放弃"), true,
   );
   if (!confirmed) return;
   try {
     await postJSON("/api/v1/storage/initialize/cancel", {
       stable_path:device.stable_path, confirm_serial:device.serial,
     });
-    setSettingsNotice("已放弃未完成初始化任务", false);
+    setSettingsNotice(t("已放弃未完成初始化任务"), false);
     await loadStorageDevices();
   } catch (error) {
     setSettingsNotice(error.message, true);
@@ -2861,14 +2997,14 @@ async function cancelStorageInitialization(device) {
 async function requestPower(action) {
   const shutdown = action === "shutdown";
   const confirmed = await askConfirmation(
-    shutdown ? "关闭 TeslaBox" : "重启 TeslaBox",
-    shutdown ? "设备将停止服务并断开车机 USB。关机后必须重新断电上电才能启动。" : "设备将停止服务并断开车机 USB，预计稍后恢复。",
-    shutdown ? "确认关机" : "确认重启", true,
+    shutdown ? t("关闭 TeslaBox") : t("重启 TeslaBox"),
+    shutdown ? t("设备将停止服务并断开车机 USB。关机后必须重新断电上电才能启动。") : t("设备将停止服务并断开车机 USB，预计稍后恢复。"),
+    shutdown ? t("确认关机") : t("确认重启"), true,
   );
   if (!confirmed) return;
   try {
     await postJSON("/api/v1/system/power", {action});
-    setSettingsNotice(shutdown ? "关机命令已提交" : "重启命令已提交，请稍后重新连接", false);
+    setSettingsNotice(shutdown ? t("关机命令已提交") : t("重启命令已提交，请稍后重新连接"), false);
   } catch (error) {
     setSettingsNotice(error.message, true);
   }
@@ -2909,12 +3045,12 @@ async function loadStatus() {
     const storage = storageResult.value;
     renderStatus(storage);
     $("live-indicator").classList.add("online");
-    $("live-indicator").querySelector("span").textContent = "设备在线";
+    $("live-indicator").querySelector("span").textContent = t("设备在线");
     if (systemResult.status === "fulfilled") renderSystemStatus(systemResult.value);
     else renderSystemUnavailable();
   } catch (error) {
     $("live-indicator").classList.remove("online");
-    $("live-indicator").querySelector("span").textContent = "设备离线";
+    $("live-indicator").querySelector("span").textContent = t("设备离线");
     setNotice(error.message, true);
   }
 }
@@ -2926,42 +3062,42 @@ function renderStatus(storage) {
   const badge = $("usb-badge");
   badge.className = "badge";
 	if (storage.gadget_paused) {
-		badge.textContent = storage.gadget_resume_pending ? "等待冷启动" : "已安全断开";
+		badge.textContent = storage.gadget_resume_pending ? t("等待冷启动") : t("已安全断开");
 		badge.classList.add("ok");
-		$("usb-title").textContent = storage.gadget_resume_pending ? "已准备下次冷启动恢复" : "USB Gadget 保持暂停";
+		$("usb-title").textContent = storage.gadget_resume_pending ? t("已准备下次冷启动恢复") : t("USB Gadget 保持暂停");
   } else if (enumerationComplete && busSuspended) {
-    badge.textContent = "可能已断开";
+    badge.textContent = t("可能已断开");
     badge.classList.add("error");
-    $("usb-title").textContent = "主机休眠或 OTG 已拔出";
+    $("usb-title").textContent = t("主机休眠或 OTG 已拔出");
   } else if (enumerationComplete) {
-    badge.textContent = "已完成枚举";
+    badge.textContent = t("已完成枚举");
     badge.classList.add("ok");
-    $("usb-title").textContent = gadget.current_speed || "USB 枚举完成";
+    $("usb-title").textContent = gadget.current_speed || t("USB 枚举完成");
   } else if (gadget.host_detected) {
-    badge.textContent = "枚举未完成";
+    badge.textContent = t("枚举未完成");
     badge.classList.add("error");
-    $("usb-title").textContent = "USB 主机尚未完成识别";
+    $("usb-title").textContent = t("USB 主机尚未完成识别");
   } else if (gadget.bound) {
-    badge.textContent = "等待车机";
-    $("usb-title").textContent = "Gadget 已就绪";
+    badge.textContent = t("等待车机");
+    $("usb-title").textContent = t("Gadget 已就绪");
   } else {
-    badge.textContent = "未就绪";
+    badge.textContent = t("未就绪");
     badge.classList.add("error");
-    $("usb-title").textContent = "USB Gadget 未绑定";
+    $("usb-title").textContent = t("USB Gadget 未绑定");
   }
 	if (storage.gadget_resume_pending) {
-		$("usb-detail").textContent = "本次运行保持解绑 · 请关机断电后重新上电";
+		$("usb-detail").textContent = t("本次运行保持解绑 · 请关机断电后重新上电");
 	} else if (busSuspended) {
-    $("usb-detail").textContent = "USB 总线已挂起 · Gadget 仍保持就绪";
+    $("usb-detail").textContent = t("USB 总线已挂起 · Gadget 仍保持就绪");
   } else {
-    const usbSemantics = enumerationComplete && !storage.gadget_paused ? "内核可能保留该枚举状态" : "";
-    $("usb-detail").textContent = [gadget.udc_state || "状态未知", storage.phase || "UNKNOWN", usbSemantics].filter(Boolean).join(" · ");
+    const usbSemantics = enumerationComplete && !storage.gadget_paused ? t("内核可能保留该枚举状态") : "";
+    $("usb-detail").textContent = [gadget.udc_state || t("状态未知"), storage.phase || "UNKNOWN", usbSemantics].filter(Boolean).join(" · ");
   }
   const scan = storage.scan_progress;
   storageScanActive = Boolean(scan);
-  $("video-count").textContent = storage.media_snapshot ? `${formatNumber(storage.video_count || 0)} 个`
-    : storage.cached_index_at ? `${formatNumber(storage.cached_video_count || 0)} 个`
-    : scan?.stage === "scanning" && scan.discovered > 0 ? `${formatNumber(scan.discovered)} 个` : "—";
+  $("video-count").textContent = storage.media_snapshot ? t`${formatNumber(storage.video_count || 0)} 个`
+    : storage.cached_index_at ? t`${formatNumber(storage.cached_video_count || 0)} 个`
+    : scan?.stage === "scanning" && scan.discovered > 0 ? t`${formatNumber(scan.discovered)} 个` : "—";
 
   const outerSpace = storage.snapshot_space || {};
   const liveVolumeSpace = storage.media_snapshot?.volume_space || {};
@@ -2976,11 +3112,11 @@ function renderStatus(storage) {
   $("space-progress").style.background = freePercent < 10 ? "var(--warning)" : "var(--ok)";
   const outerPercent = Number(outerSpace.free_percent || 0);
   const sampledAt = storage.media_volume_space_updated_at ? formatDate(storage.media_volume_space_updated_at) : "";
-  const volumeLabel = hasLiveVolumeSpace ? "exFAT" : `exFAT 上次采样${sampledAt ? `于 ${sampledAt}` : ""}`;
-  const outerLabel = Number(outerSpace.total_bytes) > 0 ? ` · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）` : "";
+  const volumeLabel = hasLiveVolumeSpace ? "exFAT" : t`exFAT 上次采样${sampledAt ? t`于 ${sampledAt}` : ""}`;
+  const outerLabel = Number(outerSpace.total_bytes) > 0 ? t` · 外层 XFS 可用 ${formatBytes(outerSpace.free_bytes || 0)}（${outerPercent.toFixed(1)}%）` : "";
   $("space-detail").textContent = hasVolumeSpace
-    ? `${volumeLabel} · 可用 ${freePercent.toFixed(1)}%${outerLabel}`
-    : `正在读取车机虚拟盘空间，完成后自动显示${outerLabel}`;
+    ? t`${volumeLabel} · 可用 ${freePercent.toFixed(1)}%${outerLabel}`
+    : t`正在读取车机虚拟盘空间，完成后自动显示${outerLabel}`;
 
   const snapshot = storage.media_snapshot;
   const snapshotSpaceProtected = !snapshot && Boolean(storage.cached_index_at) &&
@@ -2988,32 +3124,33 @@ function renderStatus(storage) {
   recordingSnapshotSpaceBlocked = snapshotSpaceProtected;
   $("snapshot-state").className = "badge";
   if (scan) {
-    $("snapshot-state").textContent = snapshot ? "更新中 · 旧索引可用" : "正在建立";
+    $("snapshot-state").textContent = snapshot ? t("更新中 · 旧索引可用") : t("正在建立");
     $("snapshot-detail").textContent = scan.stage === "scanning"
-      ? `已发现 ${formatNumber(scan.discovered)} 个单路 MP4 · 扫描完成后发布索引`
-      : scan.stage === "repairing" ? "正在修复快照副本，随后重新统计" : "正在准备只读快照，随后开始统计";
+      ? t`已发现 ${formatNumber(scan.discovered)} 个单路 MP4 · 扫描完成后发布索引`
+      : scan.stage === "repairing" ? t("正在修复快照副本，随后重新统计") : t("正在准备只读快照，随后开始统计");
   } else if (storage.snapshot_error) {
-    $("snapshot-state").textContent = snapshot ? "旧索引可播放" : snapshotSpaceProtected ? "历史索引 · 空间保护" : "等待重试";
-    const updatedAt = snapshot?.created_at ? `上次成功快照于 ${formatDate(snapshot.created_at)}`
-      : storage.cached_index_at ? `历史索引保存于 ${formatDate(storage.cached_index_at)}` : "索引尚未完成";
-    const retryAt = storage.snapshot_retry_at ? ` · 下次重试 ${formatDate(storage.snapshot_retry_at)}` : "";
+    $("snapshot-state").textContent = snapshot ? t("旧索引可播放") : snapshotSpaceProtected ? t("历史索引 · 空间保护") : t("等待重试");
+    const updatedAt = snapshot?.created_at ? t`上次成功快照于 ${formatDate(snapshot.created_at)}`
+      : storage.cached_index_at ? t`历史索引保存于 ${formatDate(storage.cached_index_at)}` : t("索引尚未完成");
+    const retryAt = storage.snapshot_retry_at ? t` · 下次重试 ${formatDate(storage.snapshot_retry_at)}` : "";
     $("snapshot-detail").textContent = snapshotSpaceProtected
-      ? `${updatedAt} · 当前只读快照因外层空间不足已回收；释放空间后自动核对并恢复时长与播放${retryAt}`
+      ? t`${updatedAt} · 当前只读快照因外层空间不足已回收；释放空间后自动核对并恢复时长与播放${retryAt}`
       : `${updatedAt} · ${storage.snapshot_error}${retryAt}`;
   } else if (!snapshot && storage.cached_index_at) {
-    $("snapshot-state").textContent = "历史索引 · 待核对";
-    $("snapshot-detail").textContent = `上次保存于 ${formatDate(storage.cached_index_at)} · 当前录像核对完成后可播放`;
+    $("snapshot-state").textContent = t("历史索引 · 待核对");
+    $("snapshot-detail").textContent = t`上次保存于 ${formatDate(storage.cached_index_at)} · 当前录像核对完成后可播放`;
   } else {
-    $("snapshot-state").textContent = snapshot ? "可播放" : "尚未建立";
+    $("snapshot-state").textContent = snapshot ? t("可播放") : t("尚未建立");
     $("snapshot-state").classList.add(snapshot ? "ok" : "error");
-    $("snapshot-detail").textContent = snapshot ? `当前快照内的单路 MP4 · 更新于 ${formatDate(snapshot.created_at)}` : "等待首次快照";
+    $("snapshot-detail").textContent = snapshot ? t`当前快照内的单路 MP4 · 更新于 ${formatDate(snapshot.created_at)}` : t("等待首次快照");
   }
 }
 
 function renderSystemStatus(system) {
+  globalThis.TeslaBoxInternetStatus?.render(system);
   const indicator = $("internet-indicator");
   indicator.className = `internet-indicator ${system.internet_available ? "online" : "offline"}`;
-  indicator.querySelector("span").textContent = system.internet_available ? "互联网" : "无互联网";
+  indicator.querySelector("span").textContent = system.internet_available ? t("互联网") : t("无互联网");
 
   const temperature = Number(system.temperature_c);
   const temperatureValue = $("temperature-value");
@@ -3023,10 +3160,10 @@ function renderSystemStatus(system) {
     const level = temperature >= 85 ? "danger" : temperature >= 70 ? "warning" : "normal";
     temperatureValue.classList.toggle("metric-warning", level === "warning");
     temperatureValue.classList.toggle("metric-danger", level === "danger");
-    $("temperature-detail").textContent = ({normal:"温度正常", warning:"温度偏高", danger:"温度过高"})[level];
+    $("temperature-detail").textContent = ({normal:t("温度正常"), warning:t("温度偏高"), danger:t("温度过高")})[level];
   } else {
     temperatureValue.textContent = "—";
-    $("temperature-detail").textContent = "传感器不可用";
+    $("temperature-detail").textContent = t("传感器不可用");
   }
   renderUsage("cpu", system.cpu_used_percent, system.uptime_seconds);
   renderCapacityUsage("memory", system.memory);
@@ -3034,16 +3171,17 @@ function renderSystemStatus(system) {
 }
 
 function renderSystemUnavailable() {
+  globalThis.TeslaBoxInternetStatus?.unavailable();
   const indicator = $("internet-indicator");
   indicator.className = "internet-indicator unknown";
-  indicator.querySelector("span").textContent = "网络状态未知";
+  indicator.querySelector("span").textContent = t("网络状态未知");
   for (const prefix of ["cpu", "memory", "system-disk"]) {
     $(`${prefix}-value`).textContent = "—";
     $(`${prefix}-progress`).style.width = "0";
-    $(`${prefix}-detail`).textContent = "状态接口不可用";
+    $(`${prefix}-detail`).textContent = t("状态接口不可用");
   }
   $("temperature-value").textContent = "—";
-  $("temperature-detail").textContent = "状态接口不可用";
+  $("temperature-detail").textContent = t("状态接口不可用");
 }
 
 function renderUsage(prefix, percentValue, uptimeSeconds) {
@@ -3051,18 +3189,18 @@ function renderUsage(prefix, percentValue, uptimeSeconds) {
   if (!Number.isFinite(percent)) {
     $(`${prefix}-value`).textContent = "—";
     $(`${prefix}-progress`).style.width = "0";
-    $(`${prefix}-detail`).textContent = "等待下一次采样";
+    $(`${prefix}-detail`).textContent = t("等待下一次采样");
     return;
   }
   renderPercent(prefix, percent);
-  $(`${prefix}-detail`).textContent = `已运行 ${formatUptime(uptimeSeconds)}`;
+  $(`${prefix}-detail`).textContent = t`已运行 ${formatUptime(uptimeSeconds)}`;
 }
 
 function renderCapacityUsage(prefix, usage) {
   if (!usage || !Number(usage.total_bytes)) {
     $(`${prefix}-value`).textContent = "—";
     $(`${prefix}-progress`).style.width = "0";
-    $(`${prefix}-detail`).textContent = "状态不可用";
+    $(`${prefix}-detail`).textContent = t("状态不可用");
     return;
   }
   renderPercent(prefix, Number(usage.used_percent || 0));
@@ -3084,7 +3222,7 @@ async function loadSessions(silent = false, automatic = false) {
   const operation = async () => {
     state.loading = true;
     if (!silent) {
-      setNotice("正在整理完整录像时间轴…", false, false);
+      setNotice(t("正在整理完整录像时间轴…"), false, false);
     }
     try {
       const archiveParams = new URLSearchParams({ limit: "50", clip_type: "archive" });
@@ -3103,7 +3241,7 @@ async function loadSessions(silent = false, automatic = false) {
           for (let page = 0; page < archivePages; page++) {
             archiveParams.set("offset", String(page * 50));
             const payload = await request(`/api/v1/video-sessions?${archiveParams}`, {loading: !silent});
-            if (pages.length && payload.snapshot_id !== pages[0].snapshot_id) throw new Error("录像正在更新，请稍后重试");
+            if (pages.length && payload.snapshot_id !== pages[0].snapshot_id) throw new Error(t("录像正在更新，请稍后重试"));
             pages.push(payload);
             if ((page + 1) * 50 >= payload.total) break;
           }
@@ -3112,7 +3250,7 @@ async function loadSessions(silent = false, automatic = false) {
       ]);
       // 自动请求开始后用户可能进入删除选择；此时保留原列表，避免已选卡片被重建。
       if (automatic && recordingInteractionActive()) return;
-      if (archivePayloads.length && recentPayload.snapshot_id !== archivePayloads[0].snapshot_id) throw new Error("录像正在更新，请稍后重试");
+      if (archivePayloads.length && recentPayload.snapshot_id !== archivePayloads[0].snapshot_id) throw new Error(t("录像正在更新，请稍后重试"));
       const nextRecent = (recentPayload.items || []).filter((session) => session.clip_type === "recent");
       const nextArchive = archivePayloads.flatMap((payload) => payload.items || []);
       const unchanged = JSON.stringify(recentSessions) === JSON.stringify(nextRecent) && JSON.stringify(archivedSessions) === JSON.stringify(nextArchive);
@@ -3125,9 +3263,9 @@ async function loadSessions(silent = false, automatic = false) {
       reconcileRecordingSelection();
       state.total = archivedSessions.length;
       if (!automatic || !unchanged) renderArchiveTimeline();
-      $("result-count").textContent = `${formatNumber(archiveTotal)} 段已保存/哨兵录像`;
+      $("result-count").textContent = t`${formatNumber(archiveTotal)} 段已保存/哨兵录像`;
       $("load-more").hidden = archivedSessions.length >= archiveTotal;
-      if (!silent) setNotice(archivedSessions.length === 0 ? "当前筛选条件下没有已保存或哨兵录像" : "", false, false);
+      if (!silent) setNotice(archivedSessions.length === 0 ? t("当前筛选条件下没有已保存或哨兵录像") : "", false, false);
     } catch (error) {
       if (automatic) console.warn("后台刷新录像索引失败", error);
       else setNotice(error.message, true);
@@ -3258,8 +3396,8 @@ function createRecordingMenu(session) {
   button.type = "button";
   button.className = "session-more-toggle";
   button.textContent = "⋯";
-  button.title = "更多";
-  button.setAttribute("aria-label", `更多操作：${formatSessionRange(session.start_at, session.end_at)}`);
+  button.title = t("更多");
+  button.setAttribute("aria-label", t`更多操作：${formatSessionRange(session.start_at, session.end_at)}`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   const panel = document.createElement("div");
@@ -3267,12 +3405,12 @@ function createRecordingMenu(session) {
   panel.id = `recording-menu-${session.id}`;
   panel.hidden = true;
   panel.setAttribute("role", "menu");
-  panel.setAttribute("aria-label", "录像操作");
+  panel.setAttribute("aria-label", t("录像操作"));
   button.setAttribute("aria-controls", panel.id);
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "session-menu-delete";
-  remove.textContent = "删除";
+  remove.textContent = t("删除");
   remove.setAttribute("role", "menuitem");
   remove.disabled = recordingDeleteInProgress || session.cached || !["saved", "sentry", "recent"].includes(session.clip_type);
   remove.addEventListener("click", () => { void deleteRecordingSession(session, remove); });
@@ -3318,7 +3456,7 @@ function createSessionTimeline(session) {
   card.classList.toggle("selection-enabled", recordingDeleteMode && selectable);
   card.classList.toggle("selected", selected);
   if (recordingDeleteMode && selectable) {
-    card.setAttribute("aria-label", `选择 ${formatSessionRange(session.start_at, session.end_at)}`);
+    card.setAttribute("aria-label", t`选择 ${formatSessionRange(session.start_at, session.end_at)}`);
     card.addEventListener("click", (event) => {
       if (recordingDeleteInProgress || isSessionCardAction(event.target)) return;
       toggleRecordingSessionSelection(session.id);
@@ -3332,7 +3470,7 @@ function createSessionTimeline(session) {
     thumbnail.className = "session-thumbnail";
     const image = document.createElement("img");
     image.src = session.thumbnail_url;
-    image.alt = `${clipLabel(session.clip_type)}缩略图`;
+    image.alt = t`${clipLabel(session.clip_type)}缩略图`;
     image.loading = "lazy";
     image.decoding = "async";
     image.addEventListener("error", () => {
@@ -3347,7 +3485,7 @@ function createSessionTimeline(session) {
   if (recordingDeleteMode && selectable) {
     const selector = document.createElement("p");
     selector.className = "session-select";
-    selector.textContent = selected ? "已选择 · 点击卡片任意空白区域取消" : "删除模式 · 点击卡片任意空白区域选择";
+    selector.textContent = selected ? t("已选择 · 点击卡片任意空白区域取消") : t("删除模式 · 点击卡片任意空白区域选择");
     heading.append(selector);
   }
   const title = document.createElement("h3");
@@ -3385,10 +3523,10 @@ function createSessionTimeline(session) {
   const open = document.createElement("button");
   open.className = "primary session-open";
   open.type = "button";
-  open.textContent = "打开完整录像";
+  open.textContent = t("打开完整录像");
   if (session.cached) {
     open.disabled = true;
-    open.textContent = recordingSnapshotSpaceBlocked ? "空间不足 · 暂不可播放" : "历史索引 · 等待核对";
+    open.textContent = recordingSnapshotSpaceBlocked ? t("空间不足 · 暂不可播放") : t("历史索引 · 等待核对");
   }
   open.addEventListener("click", () => {
     const display = state.view === "multi" ? "composite" : "single";
@@ -3400,7 +3538,7 @@ function createSessionTimeline(session) {
   if (!session.complete) {
     const status = document.createElement("span");
     status.className = "session-warning";
-    status.textContent = "部分分钟存在视角缺失";
+    status.textContent = t("部分分钟存在视角缺失");
     aside.append(status);
   }
   aside.append(actions);
@@ -3409,7 +3547,7 @@ function createSessionTimeline(session) {
   const body = document.createElement("div");
   body.className = "session-timeline-body";
   if (state.view === "multi") {
-    body.append(createTrackRow(session, "六路合并", ""));
+    body.append(createTrackRow(session, t("六路合并"), ""));
   } else {
     const cameras = cameraOrder.filter((camera) => session.cameras.includes(camera));
     cameras.forEach((camera) => body.append(createTrackRow(session, cameraLabel(camera), camera)));
@@ -3439,7 +3577,7 @@ function handleRecordingDeleteAction() {
 async function deleteSelectedRecordingSessions() {
   const selected = selectableRecordingSessions().filter((session) => selectedRecordingSessions.has(session.id));
   if (selected.length === 0) {
-    setNotice("请先选择要删除的录像", true);
+    setNotice(t("请先选择要删除的录像"), true);
     return;
   }
   await deleteRecordingSessions(selected, $("recording-delete-selected"));
@@ -3452,7 +3590,7 @@ async function deleteRecordingSessions(sessions, button) {
     maintenance = await request("/api/v1/maintenance");
     state.maintenance = maintenance;
   } catch (error) {
-    setNotice(`无法确认 Gadget 维护策略：${error.message}`, true);
+    setNotice(t`无法确认 Gadget 维护策略：${error.message}`, true);
     return;
   }
   const automatic = Boolean(maintenance.auto_recovery);
@@ -3461,22 +3599,22 @@ async function deleteRecordingSessions(sessions, button) {
   const totalSize = sessions.reduce((total, session) => total+Number(session.total_size || 0), 0);
   const single = sessions.length === 1;
   const scope = single
-    ? (recentCount ? "这段最近录像" : "这段录像及其整个事件目录")
-    : `已选择 ${formatNumber(sessions.length)} 段录像${recentCount ? `（包含最近录像 ${formatNumber(recentCount)} 段）` : ""}`;
+    ? (recentCount ? t("这段最近录像") : t("这段录像及其整个事件目录"))
+    : t`已选择 ${formatNumber(sessions.length)} 段录像${recentCount ? t`（包含最近录像 ${formatNumber(recentCount)} 段）` : ""}`;
   const lifecycle = automatic
-    ? "TeslaBox 会只断开一次 USB Gadget，在同一个维护窗口内完成批量删除和空间回收，然后只安排一次温重启恢复。"
-    : "请先物理拔掉车机或电脑的 OTG 线；删除和空间回收完成后 Gadget 会保持暂停，请插回 OTG 并只执行一次温重启恢复。";
+    ? t("TeslaBox 会只断开一次 USB Gadget，在同一个维护窗口内完成批量删除和空间回收，然后只安排一次温重启恢复。")
+    : t("请先物理拔掉车机或电脑的 OTG 线；删除和空间回收完成后 Gadget 会保持暂停，请插回 OTG 并只执行一次温重启恢复。");
   const confirmed = await askConfirmation(
-    single && recentCount ? "删除最近录像" : single ? "删除录像" : "批量删除录像",
-    `${scope}，共 ${formatNumber(segmentCount)} 个录像片段、约 ${formatBytes(totalSize)}。${lifecycle} 删除完成后会依据 exFAT 空闲位图自动返还外层数据盘空间，无需再到设置中心点“回收历史旧空间”。`,
-    single && recentCount ? "确认删除" : single ? "确认删除" : `确认删除 ${formatNumber(sessions.length)} 段`,
+    single && recentCount ? t("删除最近录像") : single ? t("删除录像") : t("批量删除录像"),
+    t`${scope}，共 ${formatNumber(segmentCount)} 个录像片段、约 ${formatBytes(totalSize)}。${lifecycle} 删除完成后会依据 exFAT 空闲位图自动返还外层数据盘空间，无需再到设置中心点“回收历史旧空间”。`,
+    single && recentCount ? t("确认删除") : single ? t("确认删除") : t`确认删除 ${formatNumber(sessions.length)} 段`,
     true,
   );
   if (!confirmed) return;
 
   recordingDeleteInProgress = true;
   button.disabled = true;
-  button.textContent = "删除并恢复空间中…";
+  button.textContent = t("删除并恢复空间中…");
   renderArchiveTimeline();
   try {
     if (activeSession && sessions.some((session) => session.id === activeSession.id)) closePlayer();
@@ -3484,21 +3622,21 @@ async function deleteRecordingSessions(sessions, button) {
       session_ids: sessions.map((session) => session.id),
       confirm_otg_disconnected: !automatic,
     });
-    const eventSummary = result.deleted_events ? `，包含 ${formatNumber(result.deleted_events)} 个事件目录` : "";
+    const eventSummary = result.deleted_events ? t`，包含 ${formatNumber(result.deleted_events)} 个事件目录` : "";
     const reclaim = result.space_reclaim || {};
     const reclaimSummary = result.reclaim_error
-      ? ` 外层空间自动恢复失败：${result.reclaim_error}；录像已经删除，可稍后使用“回收历史旧空间”补做。`
-      : ` 外层数据盘实际恢复 ${formatBytes(reclaim.reclaimed_bytes || 0)}；若显示 0，通常表示 discard 已在删除时完成释放或这些空闲簇此前已经回收。`;
-    const summary = `已处理 ${formatNumber(sessions.length)} 段录像，删除 ${formatNumber(result.deleted_files || 0)} 个文件${eventSummary}，释放虚拟盘内部 ${formatBytes(result.deleted_bytes || 0)}。${reclaimSummary}`;
+      ? t` 外层空间自动恢复失败：${result.reclaim_error}；录像已经删除，可稍后使用“回收历史旧空间”补做。`
+      : t` 外层数据盘实际恢复 ${formatBytes(reclaim.reclaimed_bytes || 0)}；若显示 0，通常表示 discard 已在删除时完成释放或这些空闲簇此前已经回收。`;
+    const summary = t`已处理 ${formatNumber(sessions.length)} 段录像，删除 ${formatNumber(result.deleted_files || 0)} 个文件${eventSummary}，释放虚拟盘内部 ${formatBytes(result.deleted_bytes || 0)}。${reclaimSummary}`;
     const deletedIDs = new Set(sessions.map((session) => session.id));
     recentSessions = recentSessions.filter((session) => !deletedIDs.has(session.id));
     archivedSessions = archivedSessions.filter((session) => !deletedIDs.has(session.id));
     state.total = archivedSessions.length;
-    $("result-count").textContent = `${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
+    $("result-count").textContent = t`${formatNumber(archivedSessions.length)} 段已保存/哨兵录像`;
     selectedRecordingSessions.clear();
     recordingDeleteMode = false;
     setNotice(
-      automatic ? `${summary} 已提交一次温重启恢复。` : `${summary} 请插回 OTG 后到日志中心执行一次温重启恢复。`,
+      automatic ? t`${summary} 已提交一次温重启恢复。` : t`${summary} 请插回 OTG 后到日志中心执行一次温重启恢复。`,
       Boolean(result.reclaim_error),
     );
     if (!automatic) await Promise.allSettled([loadStatus(), loadSessions(true)]);
@@ -3553,20 +3691,20 @@ function updateRecordingBulkActions() {
   toolbar.hidden = !recordingDeleteMode || sessions.length === 0;
   selectAll.hidden = !recordingDeleteMode;
   selectAll.disabled = recordingDeleteInProgress || sessions.length === 0;
-  selectAll.textContent = selected.length === sessions.length && sessions.length > 0 ? "取消全选" : "全选已保存/哨兵";
+  selectAll.textContent = selected.length === sessions.length && sessions.length > 0 ? t("取消全选") : t("全选已保存/哨兵");
   deleteButton.disabled = recordingDeleteInProgress;
   deleteButton.textContent = recordingDeleteInProgress
-    ? "删除并恢复空间中…"
+    ? t("删除并恢复空间中…")
     : selected.length > 0
-      ? "删除已选并恢复空间"
+      ? t("删除已选并恢复空间")
       : recordingDeleteMode
-        ? "取消删除"
-        : "删除录像";
+        ? t("取消删除")
+        : t("删除录像");
   const selectedCount = $("recording-selected-count");
   selectedCount.hidden = !recordingDeleteMode;
   selectedCount.textContent = selected.length === 0
-    ? `删除模式：点击已保存或哨兵录像选择，最近录像仅支持单独删除`
-    : `已选择 ${formatNumber(selected.length)} / ${formatNumber(sessions.length)} 段`;
+    ? t`删除模式：点击已保存或哨兵录像选择，最近录像仅支持单独删除`
+    : t`已选择 ${formatNumber(selected.length)} / ${formatNumber(sessions.length)} 段`;
 }
 
 function createTrackRow(session, labelText, camera) {
@@ -3581,8 +3719,8 @@ function createTrackRow(session, labelText, camera) {
   const segment = document.createElement("button");
   segment.type = "button";
   segment.className = `track-segment continuous${hasCamera ? "" : " missing"}${session.complete ? "" : " incomplete"}`;
-  segment.title = "点击时间轴可跳转到对应录像位置";
-  if (session.cached) { segment.disabled = true; segment.title = "历史索引，正在核对当前录像"; }
+  segment.title = t("点击时间轴可跳转到对应录像位置");
+  if (session.cached) { segment.disabled = true; segment.title = t("历史索引，正在核对当前录像"); }
   segment.setAttribute("aria-label", segment.title);
   segment.addEventListener("click", (event) => {
     const bounds = track.getBoundingClientRect();
@@ -3628,7 +3766,7 @@ function observePlaybackTrack(element, video, source, server = false) {
 }
 
 async function openSessionPlayer(summary, camera, position, display, resolvePosition, autoplay = false) {
-	if (summary.cached) { setNotice("正在核对当前录像，完成后即可播放", false, false); return; }
+	if (summary.cached) { setNotice(t("正在核对当前录像，完成后即可播放"), false, false); return; }
 	const sequence = ++sessionOpenSequence;
 	sessionOpening = true;
 	sessionOpenController?.abort();
@@ -3674,14 +3812,14 @@ async function openSessionPlayer(summary, camera, position, display, resolvePosi
         return openSessionPlayer(refreshed, camera, position, display, resolvePosition, autoplay);
       }
       if (refreshed) {
-        setNotice("录像索引正在更新，请稍后再试", false, false);
+        setNotice(t("录像索引正在更新，请稍后再试"), false, false);
         return;
       }
-      setNotice("该录像已被删除", false);
+      setNotice(t("该录像已被删除"), false);
       return;
     }
-    if (!playerModal.hidden) showPlayerMessage(`无法打开录像：${error.message}`);
-    else setNotice(`无法打开录像：${error.message}`, true);
+    if (!playerModal.hidden) showPlayerMessage(t`无法打开录像：${error.message}`);
+    else setNotice(t`无法打开录像：${error.message}`, true);
   } finally {
     if(sequence===sessionOpenSequence)sessionOpening=false;
   }
@@ -3716,12 +3854,12 @@ function renderPlayerMeta(session) {
   const badge = document.createElement("span");
   badge.className = `clip-badge clip-${clipTypeClass(session.clip_type)}`;
   badge.textContent = clipLabel(session.clip_type);
-	meta.replaceChildren(badge, document.createTextNode(`${session.segment_count} 个片段 · ${sessionDurationLabel(session)}`));
+	meta.replaceChildren(badge, document.createTextNode(t`${session.segment_count} 个片段 · ${sessionDurationLabel(session)}`));
   const unreadable = sessionUnreadableVideoCount(session);
   if (unreadable > 0) {
     const warning = document.createElement("span");
     warning.className = "session-warning";
-    warning.textContent = `${unreadable} 个文件暂不可读取，可能尚未写完、已损坏或已由车机移除`;
+    warning.textContent = t`${unreadable} 个文件暂不可读取，可能尚未写完、已损坏或已由车机移除`;
     meta.append(warning);
   }
   if (session.event_metadata) {
@@ -3738,11 +3876,11 @@ function sessionDurationLabel(session) {
   // 历史核对结果对用户就是录像时长，不暴露“缓存”等内部实现状态。
   if (session.duration_state === "cached") return formatDuration(session.duration_seconds);
   if (session.duration_state === "verified") return formatDuration(session.duration_seconds);
-  if (session.duration_state === "unavailable") return session.duration_display_known ? formatDuration(session.duration_seconds) : "部分文件不可读取";
-  if (session.cached && recordingSnapshotSpaceBlocked) return "待释放空间后核对";
-  if (session.cached) return "待当前录像核对";
-  if (Number(session.duration_seconds) > 0) return `约 ${formatDuration(session.duration_seconds)}`;
-  return "正在读取时长";
+  if (session.duration_state === "unavailable") return session.duration_display_known ? formatDuration(session.duration_seconds) : t("部分文件不可读取");
+  if (session.cached && recordingSnapshotSpaceBlocked) return t("待释放空间后核对");
+  if (session.cached) return t("待当前录像核对");
+  if (Number(session.duration_seconds) > 0) return t`约 ${formatDuration(session.duration_seconds)}`;
+  return t("正在读取时长");
 }
 
 function sessionUnreadableVideoCount(session) {
@@ -3808,7 +3946,7 @@ async function loadSessionPosition(position, autoplay, preferredMomentIndex = -1
   } catch (error) {
     if (token !== loadToken || activeSession !== session) return false;
     reportPlaybackDiagnostic("load_failed", `snapshot_refresh_failed:${error.status || ""}:${error.message}`);
-    showPlayerMessage(error.message || "录像状态发生变化，请刷新列表后重新打开");
+    showPlayerMessage(error.message || t("录像状态发生变化，请刷新列表后重新打开"));
     return false;
   }
 }
@@ -3826,18 +3964,18 @@ async function refreshPlaybackSessionSnapshot(session, position, preferredMoment
     if (error.status !== 409) throw error;
   }
   // 循环窗口会覆盖，不能把旧窗口的相对秒数套在新的窗口上。
-  if (session.id.startsWith("rw-")) throw new Error("最近录像已更新或循环覆盖，请刷新列表后重新打开对应时间段");
+  if (session.id.startsWith("rw-")) throw new Error(t("最近录像已更新或循环覆盖，请刷新列表后重新打开对应时间段"));
   const selected = selectMomentAtPosition(session, position, preferredMomentIndex);
-  if (!selected) throw new Error("原录像时刻已不可用，请刷新列表后重新选择");
+  if (!selected) throw new Error(t("原录像时刻已不可用，请刷新列表后重新选择"));
   const latest = await request(endpoint, {loading:false});
   globalThis.TeslaBoxPlaybackTrace?.mark(sessionVideo,"snapshot_refresh","detail_received");
   if (!current()) return null;
   if (!latest.snapshot_id || latest.snapshot_id === session.snapshot_id) return null;
   const momentIndex = latest.moments?.findIndex(moment => moment.id === selected.moment.id &&
     moment.recorded_at === selected.moment.recorded_at) ?? -1;
-  if (latest.id !== session.id || momentIndex < 0) throw new Error("所选录像已被删除或更新，请刷新列表后重新选择");
+  if (latest.id !== session.id || momentIndex < 0) throw new Error(t("所选录像已被删除或更新，请刷新列表后重新选择"));
   const moment = latest.moments[momentIndex];
-  if (selected.localTime > timelineMomentDuration(moment)) throw new Error("所选录像时刻已不可用，请重新选择播放位置");
+  if (selected.localTime > timelineMomentDuration(moment)) throw new Error(t("所选录像时刻已不可用，请重新选择播放位置"));
   return {session:latest, momentIndex, position:timelineMomentStart(moment)+selected.localTime};
 }
 
@@ -3857,7 +3995,7 @@ async function loadSessionPositionAttempt(position, autoplay, preferredMomentInd
     $("session-timeline").value = String(requestedPosition);
     $("current-time").textContent = formatDuration(requestedPosition);
     if (!selection) {
-      showPlayerMessage("这个时刻缺少当前视角录像");
+      showPlayerMessage(t("这个时刻缺少当前视角录像"));
       releaseCompositeAuxiliaryTracks();
       releaseVideoElement(sessionVideo);
       return false;
@@ -3867,7 +4005,7 @@ async function loadSessionPositionAttempt(position, autoplay, preferredMomentInd
     activeVideo = selection.video;
     resetPlaybackTelemetryLoad();
     if (usesServerTranscode()) return await loadServerSingle(selection, autoplay, token);
-    $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
+    $("segment-status").textContent = t`第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)}`;
     $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
     const source = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/content`);
     observePlaybackTrack(sessionVideo, activeVideo, source);
@@ -3887,7 +4025,7 @@ async function loadSessionPositionAttempt(position, autoplay, preferredMomentInd
       if (!loaded) {
         reportPlaybackDiagnostic("load_failed", "单路原画视频元数据加载失败");
         releaseVideoElement(sessionVideo);
-        showPlayerMessage("单路视频加载失败，具体媒体错误或等待超时已记录，请重试或切换压缩画质");
+        showPlayerMessage(t("单路视频加载失败，具体媒体错误或等待超时已记录，请重试或切换压缩画质"));
         return false;
       }
     }
@@ -3905,7 +4043,7 @@ async function loadSessionPositionAttempt(position, autoplay, preferredMomentInd
 async function loadCompositePosition(position, autoplay, token, preferredMomentIndex = -1) {
   const selection = selectMomentAtPosition(activeSession, position, preferredMomentIndex);
   if (!selection || selection.moment.videos.length === 0) {
-    showPlayerMessage("这个时刻没有可播放的摄像头画面");
+    showPlayerMessage(t("这个时刻没有可播放的摄像头画面"));
     releaseCompositeAuxiliaryTracks();
     releaseVideoElement(sessionVideo);
     return false;
@@ -3917,7 +4055,7 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
     .map((camera) => selection.moment.videos.find((video) => video.camera === camera))
     .filter((video) => video && videoCoversAbsolutePosition(video, selection.absolute));
   if (layoutVideos.length === 0) {
-    showPlayerMessage("这个时刻缺少当前布局需要的摄像头画面");
+    showPlayerMessage(t("这个时刻缺少当前布局需要的摄像头画面"));
     releaseCompositeAuxiliaryTracks();
     releaseVideoElement(sessionVideo);
     return false;
@@ -3956,10 +4094,10 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
     releaseCompositeTrackMap(nextTracks);
     releaseVideoElement(sessionVideo);
     if (canAutomaticallyFallback()) {
-      showPlayerMessage("原画多路视频加载失败，正在尝试压缩画质");
+      showPlayerMessage(t("原画多路视频加载失败，正在尝试压缩画质"));
       requestPlaybackFallback("原画多路视频加载失败");
     } else {
-      showPlayerMessage("原画多路视频加载失败，请重试或切换“自动”画质");
+      showPlayerMessage(t("原画多路视频加载失败，请重试或切换“自动”画质"));
     }
     return false;
   }
@@ -3970,13 +4108,13 @@ async function loadCompositePosition(position, autoplay, token, preferredMomentI
       nextTracks.delete(camera);
       showCompositeTrackLoadFailure(camera);
     });
-    showPlayerMessage(`部分原画视角加载失败，已保留其余 ${nextTracks.size} 路；切换布局或再次拖动可重试`);
+    showPlayerMessage(t`部分原画视角加载失败，已保留其余 ${nextTracks.size} 路；切换布局或再次拖动可重试`);
   }
   applyCompositeFrameGeometry(nextTracks.get(masterVideo.camera)?.element);
   clearUnusedCompositeTracks(nextTracks);
   compositeTracks = nextTracks;
   startPlaybackTelemetryLoad(activeVideo);
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
+  $("segment-status").textContent = t`第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${nextTracks.size} 路可用 · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`);
   renderCameraSwitcher();
   // 定位已完成；辅助视角的 play() 可能长期等待缓冲，不能继续锁住时间轴，
@@ -4012,7 +4150,7 @@ async function loadServerComposite(selection, layout, masterVideo, autoplay, tok
   activeTelemetryMediaOffset = Math.max(0, (selection.absolute-new Date(activeVideo.recorded_at).getTime())/1000);
   compositeTracks = new Map([[masterVideo.camera, {element:sessionVideo, video:masterVideo, lastHardSync:0}]]);
   startPlaybackTelemetryLoad(activeVideo);
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
+  $("segment-status").textContent = t`第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${layout.label} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(masterVideo.id)}/download`);
   applyDisplayState();
   applyServerCompositeFrameGeometry();
@@ -4038,7 +4176,7 @@ async function loadServerSingle(selection, autoplay, token) {
     if (!loaded) {
       reportPlaybackDiagnostic("load_failed", "单路转码视频元数据加载失败");
       releaseVideoElement(sessionVideo);
-      showPlayerMessage("单路转码视频加载失败，请稍后重试");
+      showPlayerMessage(t("单路转码视频加载失败，请稍后重试"));
       return false;
     }
   }
@@ -4050,7 +4188,7 @@ async function loadServerSingle(selection, autoplay, token) {
   activeTelemetryMediaOffset = Math.max(0, selection.localTime);
   compositeTracks = new Map([[activeCamera, {element:sessionVideo, video:activeVideo, lastHardSync:0}]]);
   startPlaybackTelemetryLoad(activeVideo);
-  $("segment-status").textContent = `第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)} · ${qualityLabel(effectivePlaybackQuality)}`;
+  $("segment-status").textContent = t`第 ${activeMomentIndex+1} / ${activeSession.moments.length} 分钟 · ${cameraLabel(activeCamera)} · ${qualityLabel(effectivePlaybackQuality)}`;
   $("download-link").href = sessionMediaURL(`/api/v1/videos/${encodeURIComponent(activeVideo.id)}/download`);
   applyDisplayState();
   if (autoplay) void playVideoSafely(sessionVideo, token);
@@ -4115,7 +4253,7 @@ function ensureCompositeTiles() {
     label.textContent = cameraLabel(camera);
     const placeholder = document.createElement("span");
     placeholder.className = "composite-tile-placeholder";
-    placeholder.textContent = "该分钟缺少画面";
+    placeholder.textContent = t("该分钟缺少画面");
     tile.append(label, placeholder);
     compositeGrid.append(tile);
   });
@@ -4124,7 +4262,7 @@ function ensureCompositeTiles() {
 function resetCompositePlaceholders() {
   ensureCompositeTiles();
   compositeGrid.querySelectorAll(".composite-tile-placeholder").forEach((placeholder) => {
-    placeholder.textContent = "该分钟缺少画面";
+    placeholder.textContent = t("该分钟缺少画面");
   });
 }
 
@@ -4139,7 +4277,7 @@ function attachCompositeElement(camera, element) {
 function showCompositeTrackLoadFailure(camera) {
   const placeholder = compositeGrid.querySelector(`[data-camera="${camera}"] .composite-tile-placeholder`);
   if (!placeholder) return;
-  placeholder.textContent = "画面加载失败，可切换布局重试";
+  placeholder.textContent = t("画面加载失败，可切换布局重试");
   placeholder.hidden = false;
 }
 
@@ -4148,7 +4286,7 @@ function reportCompositeLoadFailures(failedTracks) {
     reportPlaybackDiagnostic("load_failed", `原画视角加载失败:${camera}`, track.element);
   });
   const details = failedTracks.map(([camera, track]) =>
-    `${cameraLabel(camera)}(错误 ${track.element.error?.code || 0}/状态 ${track.element.readyState || 0})`);
+    t`${cameraLabel(camera)}(错误 ${track.element.error?.code || 0}/状态 ${track.element.readyState || 0})`);
   reportPlaybackDiagnostic("load_failed", `原画多路视频元数据加载失败${details.length ? `：${details.join("、")}` : ""}`);
 }
 
@@ -4308,7 +4446,7 @@ function cachePlaybackTelemetry(videoID, timeline) {
 }
 
 function requestPlaybackTelemetry(video, signal) {
-  if (!video?.id) return Promise.reject(new Error("缺少 SEI 视频标识"));
+  if (!video?.id) return Promise.reject(new Error(t("缺少 SEI 视频标识")));
   const key = telemetryCacheKey(video);
   const cached = telemetryByVideo.get(key);
   if (cached) return Promise.resolve(cached);
@@ -4371,7 +4509,7 @@ function startPlaybackTelemetryLoad(video) {
     scheduleAdjacentTelemetryPrefetch();
   }).catch((error) => {
     if (controller.signal.aborted || telemetryAbortController !== controller || activeVideo?.id !== videoID) return;
-    activeTelemetry = {available:false, message:`Tesla SEI 信息暂不可用：${error.message}`, samples:[]};
+    activeTelemetry = {available:false, message:t`Tesla SEI 信息暂不可用：${error.message}`, samples:[]};
     telemetryAbortController = null;
     renderPlaybackTelemetry();
   });
@@ -4387,11 +4525,11 @@ function renderPlaybackTelemetry() {
   const sourceSeconds = Math.max(0, (sessionVideo.currentTime || 0)+activeTelemetryMediaOffset);
   $("playback-timestamp").textContent = formatRecordingTimestamp(activeVideo.recorded_at, sourceSeconds);
   if (!activeTelemetry) {
-    renderPlaybackTelemetrySample(null, "loading", "正在读取 Tesla SEI 信息…");
+    renderPlaybackTelemetrySample(null, "loading", t("正在读取 Tesla SEI 信息…"));
     return;
   }
   if (!activeTelemetry.available) {
-    renderPlaybackTelemetrySample(null, "unavailable", activeTelemetry.message || "该录像没有 Tesla SEI 信息");
+    renderPlaybackTelemetrySample(null, "unavailable", activeTelemetry.message || t("该录像没有 Tesla SEI 信息"));
     return;
   }
   const samples = Array.isArray(activeTelemetry.samples) ? activeTelemetry.samples : [];
@@ -4401,7 +4539,7 @@ function renderPlaybackTelemetry() {
     if (Number(sample.offset_ms || 0) > currentMS) break;
     selected = sample;
   }
-  renderPlaybackTelemetrySample(selected?.metadata, selected?.metadata ? "ready" : "unavailable", "当前画面尚无 Tesla SEI 信息");
+  renderPlaybackTelemetrySample(selected?.metadata, selected?.metadata ? "ready" : "unavailable", t("当前画面尚无 Tesla SEI 信息"));
 }
 
 function renderPlaybackTelemetrySample(metadata, state, message) {
@@ -4431,11 +4569,11 @@ function renderPlaybackTelemetrySample(metadata, state, message) {
   $("playback-steering").textContent = hasSteering ? `${steeringSign}${Math.abs(steering).toFixed(1)}°` : "—";
   $("playback-steering-wheel").style.transform = `rotate(${hasSteering ? Math.max(-540, Math.min(540, steering)) : 0}deg)`;
   $("playback-brake").dataset.active = String(brakeApplied);
-  $("playback-brake").title = brakeApplied ? "刹车已踩下" : "刹车松开";
+  $("playback-brake").title = brakeApplied ? t("刹车已踩下") : t("刹车松开");
   $("playback-left-blinker").dataset.active = String(leftBlinker);
-  $("playback-left-blinker").title = leftBlinker ? "左转向灯已开启" : "左转向灯关闭";
+  $("playback-left-blinker").title = leftBlinker ? t("左转向灯已开启") : t("左转向灯关闭");
   $("playback-right-blinker").dataset.active = String(rightBlinker);
-  $("playback-right-blinker").title = rightBlinker ? "右转向灯已开启" : "右转向灯关闭";
+  $("playback-right-blinker").title = rightBlinker ? t("右转向灯已开启") : t("右转向灯关闭");
 }
 
 function normalizeAcceleratorPercent(value) {
@@ -4448,19 +4586,19 @@ function normalizeAcceleratorPercent(value) {
 function playbackAutopilotState(value) {
   const source = String(value || "").trim();
   const normalized = source.toUpperCase();
-  if (normalized.includes("FSD")) return {mode:"fsd", label:"FSD", title:`辅助驾驶：${source}`, steeringAssisted:true};
-  if (normalized === "EAP") return {mode:"steering", label:"EAP", title:"辅助驾驶：EAP", steeringAssisted:true};
+  if (normalized.includes("FSD")) return {mode:"fsd", label:"FSD", title:t`辅助驾驶：${source}`, steeringAssisted:true};
+  if (normalized === "EAP") return {mode:"steering", label:"EAP", title:t("辅助驾驶：EAP"), steeringAssisted:true};
   if (normalized === "AP" || normalized.includes("AUTOSTEER") || source.includes("自动辅助转向")) {
-    return {mode:"steering", label:"AP", title:`辅助驾驶：${source || "自动辅助转向"}`, steeringAssisted:true};
+    return {mode:"steering", label:"AP", title:t`辅助驾驶：${source || t("自动辅助转向")}`, steeringAssisted:true};
   }
-  if (normalized.includes("TACC")) return {mode:"tacc", label:"TACC", title:`辅助驾驶：${source}`, steeringAssisted:false};
-  if (!source || source === "无") return {mode:"off", label:"手动", title:"辅助驾驶：关闭", steeringAssisted:false};
-  return {mode:"unknown", label:source, title:`辅助驾驶：${source}`, steeringAssisted:false};
+  if (normalized.includes("TACC")) return {mode:"tacc", label:"TACC", title:t`辅助驾驶：${source}`, steeringAssisted:false};
+  if (!source || source === "无") return {mode:"off", label:t("手动"), title:t("辅助驾驶：关闭"), steeringAssisted:false};
+  return {mode:"unknown", label:source, title:t`辅助驾驶：${source}`, steeringAssisted:false};
 }
 
 function formatRecordingTimestamp(recordedAt, seconds) {
   const base = new Date(recordedAt);
-  if (!Number.isFinite(base.getTime())) return "录像时间未知";
+  if (!Number.isFinite(base.getTime())) return t("录像时间未知");
   const source = String(recordedAt || "");
   const match = source.match(/([+-])(\d{2}):(\d{2})$/);
   let offsetMS = 0;
@@ -4485,7 +4623,7 @@ function advanceToNextSegment() {
   if (next >= activeSession.moments.length) {
     $("session-timeline").value = String(activeSession.duration_seconds);
     $("current-time").textContent = formatDuration(activeSession.duration_seconds);
-    $("segment-status").textContent = "本段录像播放完毕";
+    $("segment-status").textContent = t("本段录像播放完毕");
     return;
   }
   const nextPosition = timelineMomentStart(activeSession.moments[next]);
@@ -4496,7 +4634,7 @@ function advanceToNextSegment() {
 function updatePlayButton() {
   const paused = sessionVideo.paused;
   $("play-toggle").dataset.state = paused ? "paused" : "playing";
-  $("play-toggle").setAttribute("aria-label", paused ? "播放" : "暂停");
+  $("play-toggle").setAttribute("aria-label", paused ? t("播放") : t("暂停"));
 }
 
 function currentSessionPosition() {
@@ -4650,7 +4788,7 @@ function updateExportRangeFromTime(changed) {
   const input = changed === "start" ? $("export-start-time") : $("export-end-time");
   const seconds = parseExportPosition(input.value);
   if (!Number.isFinite(seconds)) {
-    $("export-error").textContent = "请输入 时:分:秒，例如 00:03:25.5";
+    $("export-error").textContent = t("请输入 时:分:秒，例如 00:03:25.5");
     renderExportRange(Number($("export-range-start").value), Number($("export-range-end").value), exportTimeBounds().duration);
     return;
   }
@@ -4678,7 +4816,7 @@ function renderExportRange(start, end, maximum) {
   const endPercent = Math.max(startPercent, Math.min(100, end/maximum*100));
   $("export-range-track").style.setProperty("--range-start", `${startPercent}%`);
   $("export-range-track").style.setProperty("--range-end", `${endPercent}%`);
-  $("export-range-duration").textContent = `已选择 ${formatDuration(end-start)} · 总时长 ${formatDuration(maximum)}`;
+  $("export-range-duration").textContent = t`已选择 ${formatDuration(end-start)} · 总时长 ${formatDuration(maximum)}`;
   $("export-start-time").value = formatExportPosition(start);
   $("export-end-time").value = formatExportPosition(end);
 }
@@ -4719,7 +4857,7 @@ function setExportMode(mode) {
   $("export-clip-options").hidden = source;
   $("export-source-options").hidden = !source;
   $("export-source-direct").hidden = !source;
-  $("export-title").textContent = source ? "导出多路原画" : "导出剪辑视频";
+  $("export-title").textContent = source ? t("导出多路原画") : t("导出剪辑视频");
   if (source) {
     if (sourceExportSessionID !== activeSession?.id) resetSourceExportSelection();
     renderSourceExportOptions();
@@ -4752,8 +4890,8 @@ function renderExportOptions() {
   originalOption.disabled = $("export-layout").value !== "single";
   if (originalOption.disabled && $("export-quality").value === "original") $("export-quality").value = "high";
   $("export-quality-help").textContent = $("export-layout").value === "single"
-    ? "单路高保真和原画均使用 H.265（HEVC）硬编，避免 RK3568 H.264 编码残块；原画保留源分辨率。"
-    : "高保真多路合成会导出 H.265（HEVC）MP4，以避开 RKMPP H.264 多路残块；请使用支持 HEVC 的本地播放器。需要最广兼容或与网页原画完全一致时，请切换到“多路原画”下载原始文件和离线浏览页。";
+    ? t("单路高保真和原画均使用 H.265（HEVC）硬编，避免 RK3568 H.264 编码残块；原画保留源分辨率。")
+    : t("高保真多路合成会导出 H.265（HEVC）MP4，以避开 RKMPP H.264 多路残块；请使用支持 HEVC 的本地播放器。需要最广兼容或与网页原画完全一致时，请切换到“多路原画”下载原始文件和离线浏览页。");
 	renderExportOverlayOptions();
 }
 
@@ -4771,9 +4909,9 @@ function renderExportOverlayOptions() {
     selected.checked = true;
   }
   const help = {
-    dashcam:"时间直接绘制在左上角，不增加黑边；适合单路和多路的常规行车记录仪成片。",
-    top_bar:"在画面上方扩展独立信息栏，完全不遮挡录像内容。",
-    floating:"信息覆盖在画面顶部，成片尺寸不变，适合更紧凑的展示。",
+    dashcam:t("时间直接绘制在左上角，不增加黑边；适合单路和多路的常规行车记录仪成片。"),
+    top_bar:t("在画面上方扩展独立信息栏，完全不遮挡录像内容。"),
+    floating:t("信息覆盖在画面顶部，成片尺寸不变，适合更紧凑的展示。"),
   };
   $("export-overlay-mode-help").textContent = help[selected?.value] || "";
 }
@@ -4794,9 +4932,9 @@ function renderSourceExportOptions() {
     const start = formatDate(moment.recorded_at);
     const duration = Math.max(1, Math.round(timelineMomentDuration(moment)));
     const title = document.createElement("strong");
-    title.textContent = `第 ${index+1} 分钟 · ${start}`;
+    title.textContent = t`第 ${index+1} 分钟 · ${start}`;
     const detail = document.createElement("span");
-    detail.textContent = `${available} 路可用 · ${formatDuration(duration)}`;
+    detail.textContent = t`${available} 路可用 · ${formatDuration(duration)}`;
     button.append(title, detail);
     button.addEventListener("click", () => {
       if (sourceExportMomentIDs.has(moment.id)) sourceExportMomentIDs.delete(moment.id);
@@ -4817,7 +4955,7 @@ function renderSourceExportOptions() {
     button.classList.toggle("selected", selected);
     button.classList.toggle("unavailable", count === 0);
     button.setAttribute("aria-pressed", String(selected));
-    button.textContent = `${cameraLabel(camera)} · ${count} 个`;
+    button.textContent = t`${cameraLabel(camera)} · ${count} 个`;
     button.addEventListener("click", () => {
       if (sourceExportCameras.has(camera)) sourceExportCameras.delete(camera);
       else sourceExportCameras.add(camera);
@@ -4828,8 +4966,8 @@ function renderSourceExportOptions() {
 
   const summary = sourceExportFileSummary();
   const missing = sourceExportMomentIDs.size*sourceExportCameras.size-summary.count;
-  let text = `已选 ${sourceExportMomentIDs.size} 分钟 · ${sourceExportCameras.size} 路视角 · ${summary.count} 个源文件 · ${formatBytes(summary.bytes)}`;
-  if (missing > 0) text += ` · ${missing} 个视角在所选分钟中缺失，会自动跳过`;
+  let text = t`已选 ${sourceExportMomentIDs.size} 分钟 · ${sourceExportCameras.size} 路视角 · ${summary.count} 个源文件 · ${formatBytes(summary.bytes)}`;
+  if (missing > 0) text += t` · ${missing} 个视角在所选分钟中缺失，会自动跳过`;
   $("export-source-summary").textContent = text;
 }
 
@@ -4895,7 +5033,7 @@ function downloadSourceFiles() {
   const videos = selectedSourceVideos();
   $("export-error").textContent = "";
   if (videos.length === 0) {
-    $("export-error").textContent = "请至少选择一个包含录像的分钟和摄像头视角";
+    $("export-error").textContent = t("请至少选择一个包含录像的分钟和摄像头视角");
     return;
   }
   const button = $("export-source-direct");
@@ -4918,7 +5056,7 @@ function downloadSourceFiles() {
     button.classList.remove("is-loading");
     button.removeAttribute("aria-busy");
   }, 1200);
-  $("export-error").textContent = `已立即向浏览器发起 ${videos.length} 个原始 MP4 下载请求。浏览器如询问，请允许多个文件下载；若选中文件较多，建议使用“打包多路原画”后下载一个压缩包。`;
+  $("export-error").textContent = t`已立即向浏览器发起 ${videos.length} 个原始 MP4 下载请求。浏览器如询问，请允许多个文件下载；若选中文件较多，建议使用“打包多路原画”后下载一个压缩包。`;
 }
 
 async function createExportTask(event) {
@@ -4928,14 +5066,14 @@ async function createExportTask(event) {
     const summary = sourceExportFileSummary();
     $("export-error").textContent = "";
     if (sourceExportMomentIDs.size === 0 || sourceExportCameras.size === 0 || summary.count === 0) {
-      $("export-error").textContent = "请至少选择一个包含录像的分钟和摄像头视角";
+      $("export-error").textContent = t("请至少选择一个包含录像的分钟和摄像头视角");
       return;
     }
     $("export-submit").disabled = true;
     try {
       exportTask = await request("/api/v1/exports", {
         method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({mode:"source", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, moment_ids:[...sourceExportMomentIDs], cameras:[...sourceExportCameras]}),
+        body: JSON.stringify({mode:"source", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, source_revision:activeSession.source_revision, moment_ids:[...sourceExportMomentIDs], cameras:[...sourceExportCameras]}),
       });
       renderExportTask(exportTask);
       scheduleExportPoll(500);
@@ -4952,11 +5090,11 @@ async function createExportTask(event) {
   const duration = end-start;
   $("export-error").textContent = "";
   if (cameras.length === 0) {
-    $("export-error").textContent = "请至少选择一个摄像头视角";
+    $("export-error").textContent = t("请至少选择一个摄像头视角");
     return;
   }
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || duration < 1 || end > exportTimeBounds().duration+.01) {
-    $("export-error").textContent = "导出范围必须位于当前完整录像内，且结束时间必须晚于开始时间至少 1 秒";
+    $("export-error").textContent = t("导出范围必须位于当前完整录像内，且结束时间必须晚于开始时间至少 1 秒");
     return;
   }
   $("export-submit").disabled = true;
@@ -4965,11 +5103,11 @@ async function createExportTask(event) {
     pauseCompositeTracks();
     releaseCompositeAuxiliaryTracks();
     releaseVideoElement(sessionVideo);
-    showPlayerMessage("导出任务已接管硬件媒体资源，当前播放已停止");
+    showPlayerMessage(t("导出任务已接管硬件媒体资源，当前播放已停止"));
     exportTask = await request("/api/v1/exports", {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({
-        mode:"clip", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
+        mode:"clip", session_id:activeSession.id, snapshot_id:activeSession.snapshot_id, source_revision:activeSession.source_revision, start_seconds:start, duration_seconds:duration, layout, cameras, quality:$("export-quality").value,
         burn_timestamp:$("export-burn-timestamp").checked, burn_sei:$("export-burn-sei").checked,
         overlay_mode:document.querySelector('input[name="export-overlay-mode"]:checked')?.value || "",
       }),
@@ -5015,19 +5153,19 @@ async function cancelExportTask() {
 function renderExportTask(task) {
   globalThis.TeslaBoxSettingsLayout?.renderExportTask(task);
   const source = task.request?.mode === "source";
-  const labels = {queued:"正在排队", running:source ? "正在打包" : "正在导出", completed:source ? "打包完成" : "导出完成", failed:source ? "打包失败" : "导出失败", canceled:"已取消"};
+  const labels = {queued:t("正在排队"), running:source ? t("正在打包") : t("正在导出"), completed:source ? t("打包完成") : t("导出完成"), failed:source ? t("打包失败") : t("导出失败"), canceled:t("已取消")};
   const running = ["queued", "running"].includes(task.state);
   $("export-task-status").hidden = false;
-  $("export-state").textContent = task.state === "running" && task.phase === "preparing" ? "正在准备录像" : (labels[task.state] || task.state);
+  $("export-state").textContent = task.state === "running" && task.phase === "preparing" ? t("正在准备录像") : (labels[task.state] || task.state);
   $("export-progress").value = task.progress_percent || 0;
-  const size = task.output_bytes ? ` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? ` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
-  const files = source && task.file_count ? ` · ${task.file_count} 个源文件` : "";
-  const copyDetail = task.phase === "preparing" ? `准备录像 ${formatBytes(task.copied_bytes || 0)} / ${formatBytes(task.copy_total_bytes || 0)}` : `已完成 ${task.progress_percent || 0}%`;
-  $("export-detail").textContent = task.error || (running ? `${copyDetail}${files}${size}` : `可以修改参数后再次导出${files}${size}`);
+  const size = task.output_bytes ? t` · 实际 ${formatBytes(task.output_bytes)}` : (task.estimated_bytes ? t` · 预计 ${formatBytes(task.estimated_bytes)}` : "");
+  const files = source && task.file_count ? t` · ${task.file_count} 个源文件` : "";
+  const copyDetail = task.phase === "preparing" ? t`准备录像 ${formatBytes(task.copied_bytes || 0)} / ${formatBytes(task.copy_total_bytes || 0)}` : t`已完成 ${task.progress_percent || 0}%`;
+  $("export-detail").textContent = task.error || (running ? `${copyDetail}${files}${size}` : t`可以修改参数后再次导出${files}${size}`);
   $("export-cancel").hidden = !running;
   $("export-download").hidden = task.state !== "completed" || !task.download_ready;
   $("export-download").href = task.download_ready ? `/api/v1/exports/${encodeURIComponent(task.id)}/download` : "#";
-  $("export-download").textContent = source ? "下载压缩包" : "下载视频";
+  $("export-download").textContent = source ? t("下载压缩包") : t("下载视频");
   $("export-source-direct").hidden = !source;
   $("export-submit").disabled = running;
   updateExportSubmitLabel(task);
@@ -5035,7 +5173,7 @@ function renderExportTask(task) {
 
 function updateExportSubmitLabel(task = exportTask) {
   const source = (task?.request?.mode || exportMode) === "source";
-  $("export-submit").textContent = task?.state === "completed" ? (source ? "再次打包" : "再次导出") : (source ? "打包多路原画" : "开始导出");
+  $("export-submit").textContent = task?.state === "completed" ? (source ? t("再次打包") : t("再次导出")) : (source ? t("打包多路原画") : t("开始导出"));
 }
 
 function resetExportTaskUI() {
@@ -5044,7 +5182,7 @@ function resetExportTaskUI() {
   $("export-cancel").hidden = true;
   $("export-download").hidden = true;
   $("export-download").href = "#";
-  $("export-download").textContent = "下载视频";
+  $("export-download").textContent = t("下载视频");
   $("export-source-direct").hidden = exportMode !== "source";
   $("export-submit").disabled = false;
   updateExportSubmitLabel(null);
@@ -5186,10 +5324,10 @@ async function playVideoSafely(video, token = loadToken) {
     if (token !== loadToken || video.getAttribute("src") !== source) return false;
     const name = error?.name || "Error";
     reportPlaybackDiagnostic("media_error", `play_rejected:${name}:${String(error?.message || "").slice(0, 180)}`, video);
-    if (name === "NotAllowedError") showPlayerMessage("浏览器需要手动开始播放，请轻点播放继续");
-    else if (name === "AbortError") showPlayerMessage("播放请求被中断，请轻点播放重试");
-    else if (name === "NotSupportedError") showPlayerMessage("当前视频无法解析或格式不受支持，请重试或切换压缩画质");
-    else showPlayerMessage("视频播放失败，请重试；详细原因已记录到诊断报告");
+    if (name === "NotAllowedError") showPlayerMessage(t("浏览器需要手动开始播放，请轻点播放继续"));
+    else if (name === "AbortError") showPlayerMessage(t("播放请求被中断，请轻点播放重试"));
+    else if (name === "NotSupportedError") showPlayerMessage(t("当前视频无法解析或格式不受支持，请重试或切换压缩画质"));
+    else showPlayerMessage(t("视频播放失败，请重试；详细原因已记录到诊断报告"));
     return false;
   }
 }
@@ -5293,8 +5431,8 @@ function updatePlayerFullscreenDensity() {
 function updateFullscreenButton() {
   const button = $("fullscreen-button");
   const fullscreen = isPlayerFullscreen();
-  button.textContent = fullscreen ? "退出全屏" : "全屏";
-  button.setAttribute("aria-label", fullscreen ? "退出全屏播放" : "进入全屏播放");
+  button.textContent = fullscreen ? t("退出全屏") : t("全屏");
+  button.setAttribute("aria-label", fullscreen ? t("退出全屏播放") : t("进入全屏播放"));
 }
 
 function waitForMetadata(video, timeout = 4000, token = loadToken) {
@@ -5383,9 +5521,9 @@ function showPlayerLoading(token) {
   const loading = $("player-loading");
   const display = activeDisplay === "single"
     ? cameraLabel(activeCamera)
-    : (compositeLayouts[activeDisplay]?.label || "多路合成");
+    : (compositeLayouts[activeDisplay]?.label || t("多路合成"));
   loading.dataset.token = String(token);
-  $("player-loading-message").textContent = `正在加载${display} · ${qualityLabel(effectivePlaybackQuality)}…`;
+  $("player-loading-message").textContent = t`正在加载${display} · ${qualityLabel(effectivePlaybackQuality)}…`;
   loading.hidden = false;
 }
 
@@ -5439,7 +5577,7 @@ function setPlaybackQuality(quality) {
   playbackQuality = normalizePlaybackQuality(quality);
   resetPlaybackFallbackState();
   writePreference("teslabox-playback-quality", playbackQuality);
-  if (isAutomaticPlaybackQuality(playbackQuality)) showPlayerMessage(`自动画质：当前${qualityLabel(effectivePlaybackQuality)}；卡顿时会自动降低画质`);
+  if (isAutomaticPlaybackQuality(playbackQuality)) showPlayerMessage(t`自动画质：当前${qualityLabel(effectivePlaybackQuality)}；卡顿时会自动降低画质`);
   else hidePlayerMessage();
   if (activeSession) {
     const position = currentSessionPosition();
@@ -5466,7 +5604,7 @@ function usesServerTranscode() {
 }
 
 function qualityLabel(quality) {
-  return ({smooth:"流畅", standard:"标清", high:"高清", original:"原画", auto:"自动"})[quality] || "自动";
+  return ({smooth:t("流畅"), standard:t("标清"), high:t("高清"), original:t("原画"), auto:t("自动")})[quality] || t("自动");
 }
 
 const playbackFallbackLadder = {original:"high", high:"standard", standard:"smooth", smooth:"single"};
@@ -5491,7 +5629,7 @@ function isAutomaticPlaybackQuality(quality) {
 function refreshPlaybackQualityControl() {
   const qualitySelect = $("player-quality");
   const automaticOption = qualitySelect?.querySelector('option[value="auto"]');
-  if (automaticOption) automaticOption.textContent = `自动（当前：${qualityLabel(effectivePlaybackQuality)}）`;
+  if (automaticOption) automaticOption.textContent = t`自动（当前：${qualityLabel(effectivePlaybackQuality)}）`;
   if (qualitySelect) qualitySelect.value = playbackQuality;
 }
 
@@ -5518,7 +5656,7 @@ function requestPlaybackFallback(reason) {
   reportPlaybackDiagnostic("fallback_requested", reason);
   playbackFallbackInProgress = true;
   recoverPlayback(reason).catch(() => {
-    showPlayerMessage("自动降级失败，请手动选择单路原画");
+    showPlayerMessage(t("自动降级失败，请手动选择单路原画"));
   }).finally(() => {
     playbackFallbackInProgress = false;
   });
@@ -5540,12 +5678,12 @@ async function recoverPlayback(reason) {
       effectivePlaybackQuality = "original";
       activeDisplay = "single";
       activeCamera = preferredCamera(activeSession);
-      notice = `${reason}，已自动切换到单路原画`;
+      notice = t`${reason}，已自动切换到单路原画`;
     } else {
       effectivePlaybackQuality = next;
       notice = previous === "original"
-        ? `${reason}，原画不可用，已自动切换到高清合成`
-        : `${reason}，已自动降至${qualityLabel(next)}画质`;
+        ? t`${reason}，原画不可用，已自动切换到高清合成`
+        : t`${reason}，已自动降至${qualityLabel(next)}画质`;
     }
 
     refreshPlaybackQualityControl();
@@ -5559,7 +5697,7 @@ async function recoverPlayback(reason) {
       return;
     }
     if (next === "single") {
-      showPlayerMessage("板端合成和单路原画均无法播放，请稍后重试");
+      showPlayerMessage(t("板端合成和单路原画均无法播放，请稍后重试"));
       return;
     }
   }
@@ -5583,15 +5721,15 @@ function resetPlaybackDiagnostics() {
   lastPlaybackTime = 0;
   mediaThroughputSamples = [];
   observedMediaEntries.clear();
-  $("playback-throughput").textContent = "媒体吞吐：等待数据";
-  $("playback-stalls").textContent = "卡顿：0 次";
+  $("playback-throughput").textContent = t("媒体吞吐：等待数据");
+  $("playback-stalls").textContent = t("卡顿：0 次");
 }
 
 function markPlaybackStall() {
   if (!activeSession || sessionVideo.paused || isPlaybackBuffering) return;
   isPlaybackBuffering = true;
   playbackStalls++;
-  $("playback-stalls").textContent = `卡顿：${playbackStalls} 次`;
+  $("playback-stalls").textContent = t`卡顿：${playbackStalls} 次`;
   if (playbackStalls === 1 || playbackStalls%5 === 0) {
     reportPlaybackDiagnostic("playback_stall", `播放累计卡顿 ${playbackStalls} 次`);
   }
@@ -5653,14 +5791,14 @@ function updatePlaybackDiagnostics() {
   const connection = navigator.connection;
   const hints = [];
   if (connection?.effectiveType) hints.push(connection.effectiveType.toUpperCase());
-  if (Number.isFinite(connection?.downlink)) hints.push(`浏览器估算 ${connection.downlink.toFixed(1)} Mbps`);
+  if (Number.isFinite(connection?.downlink)) hints.push(t`浏览器估算 ${connection.downlink.toFixed(1)} Mbps`);
   if (Number.isFinite(connection?.rtt)) hints.push(`RTT ${connection.rtt} ms`);
-  $("playback-path").textContent = `链路：${classifyAccessPath()}${hints.length ? ` · ${hints.join(" · ")}` : ""}`;
+  $("playback-path").textContent = t`链路：${classifyAccessPath()}${hints.length ? ` · ${hints.join(" · ")}` : ""}`;
   const average = mediaThroughputSamples.length
     ? mediaThroughputSamples.reduce((sum, value) => sum+value, 0)/mediaThroughputSamples.length
     : 0;
-  $("playback-throughput").textContent = average > 0 ? `媒体实测：${average.toFixed(1)} Mbps` : "媒体吞吐：等待数据";
-  $("playback-buffer").textContent = `缓冲：${bufferedSeconds(sessionVideo).toFixed(1)} 秒`;
+  $("playback-throughput").textContent = average > 0 ? t`媒体实测：${average.toFixed(1)} Mbps` : t("媒体吞吐：等待数据");
+  $("playback-buffer").textContent = t`缓冲：${bufferedSeconds(sessionVideo).toFixed(1)} 秒`;
 }
 
 function monitorPlaybackProgress() {
@@ -5707,11 +5845,11 @@ function bufferedSeconds(video) {
 }
 
 function classifyAccessPath() {
-  if (isLocalAccessPath()) return "AP/局域网";
+  if (isLocalAccessPath()) return t("AP/局域网");
   const hostname = window.location.hostname.toLowerCase();
   const tailscale = hostname.match(/^100\.(\d+)\./);
   if (tailscale && Number(tailscale[1]) >= 64 && Number(tailscale[1]) <= 127) return "Tailscale";
-  return navigator.onLine ? "公网或中继（待服务端确认）" : "浏览器离线";
+  return navigator.onLine ? t("公网或中继（待服务端确认）") : t("浏览器离线");
 }
 
 function isLocalAccessPath() {
@@ -5734,7 +5872,7 @@ async function attachServerPlayback(source, token) {
     finishSessionVideoLoad(token);
     reportPlaybackDiagnostic("load_failed", `分片播放准备失败：${error.message}`);
     releaseVideoElement(sessionVideo);
-    showPlayerMessage(error.message || "视频准备失败，请稍后重试");
+    showPlayerMessage(error.message || t("视频准备失败，请稍后重试"));
     return false;
   }
 }
@@ -5814,8 +5952,8 @@ function archiveSessions(sessions, period) {
 function localMidnight(date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate()); }
 
 function archiveLabel(date, period) {
-  if (period === "month") return `${date.getFullYear()}年${date.getMonth()+1}月`;
-  return `${date.getFullYear()}年${date.getMonth()+1}月${date.getDate()}日`;
+  if (period === "month") return t`${date.getFullYear()}年${date.getMonth()+1}月`;
+  return t`${date.getFullYear()}年${date.getMonth()+1}月${date.getDate()}日`;
 }
 
 function normalizeTheme(theme) {
@@ -5939,9 +6077,9 @@ function renderCompatibilitySelect(select) {
   const entry = compatibilitySelects.get(select);
   if (!entry) return;
   const selected = select.options[select.selectedIndex];
-  entry.trigger.textContent = selected?.textContent?.trim() || "请选择";
+  entry.trigger.textContent = selected?.textContent?.trim() || t("请选择");
   entry.trigger.disabled = select.disabled;
-  entry.trigger.setAttribute("aria-label", select.getAttribute("aria-label") || selected?.textContent?.trim() || "选择选项");
+  entry.trigger.setAttribute("aria-label", select.getAttribute("aria-label") || selected?.textContent?.trim() || t("选择选项"));
   entry.wrapper.hidden = select.hidden;
   entry.options.textContent = "";
   const fragment = document.createDocumentFragment();
@@ -6021,7 +6159,7 @@ function showToast(message, error) {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "toast-dismiss";
-  dismiss.setAttribute("aria-label", "关闭提示");
+  dismiss.setAttribute("aria-label", t("关闭提示"));
   dismiss.textContent = "×";
   dismiss.addEventListener("click", () => dismissToast(toast));
   toast.append(icon, text, dismiss);
@@ -6042,11 +6180,11 @@ function dismissToast(toast) {
 }
 
 function cameraLabel(value) {
-  return ({front:"前视", back:"后视", left_repeater:"左翼子板", right_repeater:"右翼子板", left_pillar:"左 B 柱", right_pillar:"右 B 柱"})[value] || value || "未知摄像头";
+  return ({front:t("前视"), back:t("后视"), left_repeater:t("左翼子板"), right_repeater:t("右翼子板"), left_pillar:t("左 B 柱"), right_pillar:t("右 B 柱")})[value] || value || t("未知摄像头");
 }
 
 function clipLabel(value) {
-  return ({recent:"最近录像", saved:"已保存", sentry:"哨兵事件", track:"赛道录像"})[value] || value || "其他";
+  return ({recent:t("最近录像"), saved:t("已保存"), sentry:t("哨兵事件"), track:t("赛道录像")})[value] || value || t("其他");
 }
 
 function clipTypeClass(value) { return ["recent", "saved", "sentry", "track"].includes(value) ? value : "unknown"; }
@@ -6078,7 +6216,7 @@ function sessionEventPosition(session) {
 
 function eventMetadataText(metadata, includeLocation = true) {
   const parts = [];
-  if (metadata.occurred_at) parts.push(`触发于 ${formatTime(metadata.occurred_at)}`);
+  if (metadata.occurred_at) parts.push(t`触发于 ${formatTime(metadata.occurred_at)}`);
   if (includeLocation) {
     const location = eventLocation(metadata);
     if (location) parts.push(location);
@@ -6086,7 +6224,7 @@ function eventMetadataText(metadata, includeLocation = true) {
   if (metadata.reason || metadata.trigger_type) parts.push(eventReasonLabel(metadata));
   const camera = eventCameraView(metadata);
   if (camera) parts.push(cameraLabel(camera));
-  return parts.join(" · ") || "事件详情不可用";
+  return parts.join(" · ") || t("事件详情不可用");
 }
 
 function eventLocation(metadata) {
@@ -6111,23 +6249,23 @@ function eventPlace(metadata) {
 function eventReasonLabel(metadata) {
   const reason = typeof metadata === "string" ? metadata : String(metadata?.reason || "");
   const triggerType = typeof metadata === "string" ? "" : String(metadata?.trigger_type || "");
-  if (triggerType === "manual_save") return "手动保存录像";
-  if (triggerType === "manual_honk") return "鸣笛保存录像";
-  if (triggerType === "manual_other") return "用户手动保存录像";
-  if (triggerType === "sentry_object") return "哨兵检测到周边对象";
-  if (triggerType === "sentry_motion") return "哨兵检测到车辆震动";
-  if (triggerType === "sentry_alarm") return "哨兵警报触发";
-  if (triggerType === "sentry_other") return "哨兵模式事件";
-  if (triggerType === "vehicle_emergency_braking") return "自动紧急制动触发";
-  if (reason === "user_interaction_dashcam_icon_tapped") return "手动点击保存";
-  if (reason === "user_interaction_dashcam_panel_save" || reason === "user_interaction_dashcam_launcher_action_tapped") return "手动保存录像";
-  if (reason === "user_interaction_honk") return "鸣笛保存";
-  if (reason.startsWith("sentry_panic")) return "哨兵警报触发";
-  if (reason.startsWith("sentry_aware_accel")) return "哨兵检测到车辆震动";
-  if (reason.startsWith("sentry_aware_object")) return "哨兵检测到周边对象";
-  if (reason.startsWith("sentry_aware")) return "哨兵警戒触发";
-  if (reason === "vehicle_auto_emergency_braking") return "自动紧急制动触发";
-  return reason ? `车辆事件触发（${reason}）` : "车辆事件触发";
+  if (triggerType === "manual_save") return t("手动保存录像");
+  if (triggerType === "manual_honk") return t("鸣笛保存录像");
+  if (triggerType === "manual_other") return t("用户手动保存录像");
+  if (triggerType === "sentry_object") return t("哨兵检测到周边对象");
+  if (triggerType === "sentry_motion") return t("哨兵检测到车辆震动");
+  if (triggerType === "sentry_alarm") return t("哨兵警报触发");
+  if (triggerType === "sentry_other") return t("哨兵模式事件");
+  if (triggerType === "vehicle_emergency_braking") return t("自动紧急制动触发");
+  if (reason === "user_interaction_dashcam_icon_tapped") return t("手动点击保存");
+  if (reason === "user_interaction_dashcam_panel_save" || reason === "user_interaction_dashcam_launcher_action_tapped") return t("手动保存录像");
+  if (reason === "user_interaction_honk") return t("鸣笛保存");
+  if (reason.startsWith("sentry_panic")) return t("哨兵警报触发");
+  if (reason.startsWith("sentry_aware_accel")) return t("哨兵检测到车辆震动");
+  if (reason.startsWith("sentry_aware_object")) return t("哨兵检测到周边对象");
+  if (reason.startsWith("sentry_aware")) return t("哨兵警戒触发");
+  if (reason === "vehicle_auto_emergency_braking") return t("自动紧急制动触发");
+  return reason ? t`车辆事件触发（${reason}）` : t("车辆事件触发");
 }
 
 function eventCameraView(metadata) {
@@ -6139,19 +6277,19 @@ function eventCameraView(metadata) {
   return ({"0":"front", "1":"front", "2":"front", "3":"left_repeater", "4":"right_repeater", "5":"left_pillar", "6":"right_pillar", "7":"back"})[camera] || "";
 }
 
-function eventMarkerTitle(metadata) { return `事件时间点：${eventMetadataText(metadata)}`; }
+function eventMarkerTitle(metadata) { return t`事件时间点：${eventMetadataText(metadata)}`; }
 
 function formatDate(value) {
-  if (!value) return "时间未知";
-  return new Intl.DateTimeFormat("zh-CN", {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value));
+  if (!value) return t("时间未知");
+  return new Intl.DateTimeFormat(globalThis.TeslaBoxI18n.locale, {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value));
 }
 
 function formatTime(value) {
-  return new Intl.DateTimeFormat("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value));
+  return new Intl.DateTimeFormat(globalThis.TeslaBoxI18n.locale, {hour:"2-digit", minute:"2-digit", second:"2-digit"}).format(new Date(value));
 }
 
 function formatSessionRange(start, end) {
-  const date = new Intl.DateTimeFormat("zh-CN", {month:"2-digit", day:"2-digit"}).format(new Date(start));
+  const date = new Intl.DateTimeFormat(globalThis.TeslaBoxI18n.locale, {month:"2-digit", day:"2-digit"}).format(new Date(start));
   return `${date} ${formatTime(start)} — ${formatTime(end)}`;
 }
 
@@ -6166,8 +6304,8 @@ function formatDuration(value) {
 
 function formatDurationMS(value) {
   const milliseconds = Math.max(0, Number(value || 0));
-  if (milliseconds >= 1000) return `${(milliseconds/1000).toFixed(2)} 秒`;
-  return `${Math.round(milliseconds)} 毫秒`;
+  if (milliseconds >= 1000) return t`${(milliseconds/1000).toFixed(2)} 秒`;
+  return t`${Math.round(milliseconds)} 毫秒`;
 }
 
 function formatBytes(value) {
@@ -6180,16 +6318,16 @@ function formatBytes(value) {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
-function formatNumber(value) { return new Intl.NumberFormat("zh-CN").format(value); }
+function formatNumber(value) { return new Intl.NumberFormat(globalThis.TeslaBoxI18n.locale).format(value); }
 
 function formatUptime(value) {
   const seconds = Math.max(0, Number(value || 0));
   const days = Math.floor(seconds/86400);
   const hours = Math.floor((seconds%86400)/3600);
   const minutes = Math.floor((seconds%3600)/60);
-  if (days > 0) return `${days} 天 ${hours} 小时`;
-  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
-  return `${minutes} 分钟`;
+  if (days > 0) return t`${days} 天 ${hours} 小时`;
+  if (hours > 0) return t`${hours} 小时 ${minutes} 分钟`;
+  return t`${minutes} 分钟`;
 }
 
 let storageScanActive = false;

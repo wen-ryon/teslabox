@@ -218,9 +218,13 @@ func registerNASUploadRoutes(mux *http.ServeMux, controller Controller, admin NA
 			return
 		}
 		if !recentSnapshotMatches(req.SessionID, req.SnapshotID, state.MediaSnapshot.ID) || req.SnapshotID != "" && req.SnapshotID != state.MediaSnapshot.ID {
-			release()
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "录像快照已更新，请刷新后重新选择"})
-			return
+			if !unchangedSessionSelection(controller, state, req.SessionID, req.SourceRevision) {
+				release()
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "录像内容或时间轴已变化，请重新打开后选择上传范围"})
+				return
+			}
+			logger.Info("上传选择已衔接新快照", "session_id", req.SessionID, "previous_snapshot_id", req.SnapshotID, "snapshot_id", state.MediaSnapshot.ID)
+			req.SnapshotID = state.MediaSnapshot.ID
 		}
 		session, found := findVideoSession(state.Videos, req.SessionID)
 		if !found {

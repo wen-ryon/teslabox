@@ -1,6 +1,30 @@
 #!/bin/sh
 set -eu
 
+# 原生双接口直接使用驱动注册的 AP，不套用动态 VIF 创建和改 MAC 路径。
+NATIVE_AP_INTERFACE=""
+NATIVE_WIFI_INTERFACE=""
+if [ -d /sys/module/8852be ]; then
+	if ! native_roles=$(/usr/local/bin/teslabox network-roles-env); then
+		echo "teslabox-ap-setup: 原生角色待维护冷启动，保留当前上游，不创建额外接口" >&2
+		exit 0
+	fi
+	NATIVE_AP_INTERFACE=$(printf '%s\n' "$native_roles" | sed -n 's/^TESLABOX_AP_INTERFACE=//p')
+	NATIVE_WIFI_INTERFACE=$(printf '%s\n' "$native_roles" | sed -n 's/^TESLABOX_WIFI_INTERFACE=//p')
+	if [ -z "$NATIVE_AP_INTERFACE" ] || [ -z "$NATIVE_WIFI_INTERFACE" ]; then
+		echo "teslabox-ap-setup: 未确认唯一原生 AP/STA，保留当前网络" >&2
+		exit 0
+	fi
+fi
+
+# 冷启动和热插拔共用持久地区；失败时保留有线管理，不强开受限信道。
+if [ -x /usr/local/libexec/teslabox-wireless-region.sh ]; then
+	if ! /usr/local/libexec/teslabox-wireless-region.sh; then
+		echo "teslabox-ap-setup: 无线地区未生效，跳过热点启动" >&2
+		exit 0
+	fi
+fi
+
 AP_CONNECTION_NAME="TeslaBox-5G"
 AP_AUTOCONNECT=$(
 	/usr/bin/nmcli -g connection.autoconnect connection show id "$AP_CONNECTION_NAME" 2>/dev/null |
@@ -15,7 +39,7 @@ case "$AP_AUTOCONNECT" in
 		;;
 esac
 
-AP_INTERFACE="${TESLABOX_AP_INTERFACE:-}"
+AP_INTERFACE="${NATIVE_AP_INTERFACE:-${TESLABOX_AP_INTERFACE:-}}"
 if [ -z "$AP_INTERFACE" ]; then
 	AP_INTERFACE=$(/usr/bin/nmcli -g connection.interface-name connection show id "$AP_CONNECTION_NAME" 2>/dev/null | sed -n '1p' || true)
 fi
@@ -30,6 +54,10 @@ fi
 AP_INTERFACE="${AP_INTERFACE:-teslabox-ap}"
 
 detect_wifi_interface() {
+	if [ -n "$NATIVE_WIFI_INTERFACE" ]; then
+		printf '%s\n' "$NATIVE_WIFI_INTERFACE"
+		return
+	fi
 	if [ -n "${TESLABOX_WIFI_INTERFACE:-}" ]; then
 		if [ -e "/sys/class/net/${TESLABOX_WIFI_INTERFACE}" ]; then
 			printf '%s\n' "$TESLABOX_WIFI_INTERFACE"
@@ -210,7 +238,12 @@ preserve_upstream_with_single_role_ap() {
 	exit 0
 }
 
-if [ "$SEPARATE_AP_RADIO" = "true" ]; then
+if [ -n "$NATIVE_AP_INTERFACE" ]; then
+	if [ "$CONCURRENT_MODE" != "true" ] || [ "$ap_phy" != "$wifi_phy" ]; then
+		echo "teslabox-ap-setup: 原生双接口并发能力未确认，未创建第三接口或接管上游" >&2
+		exit 0
+	fi
+elif [ "$SEPARATE_AP_RADIO" = "true" ]; then
 	echo "teslabox-ap-setup: $AP_INTERFACE 与 $WIFI_INTERFACE 使用独立 PHY，热点无需跟随上游 WiFi 信道" >&2
 elif [ "$CONCURRENT_MODE" = "true" ]; then
 	if [ "$AP_INTERFACE" = "$WIFI_INTERFACE" ]; then
@@ -244,7 +277,7 @@ else
 	AP_INTERFACE="$WIFI_INTERFACE"
 fi
 
-if [ "$CONCURRENT_MODE" = "true" ] && [ "$SEPARATE_AP_RADIO" != "true" ]; then
+if [ -z "$NATIVE_AP_INTERFACE" ] && [ "$CONCURRENT_MODE" = "true" ] && [ "$SEPARATE_AP_RADIO" != "true" ]; then
 	# 虚拟接口默认继承物理接口的 MAC；两者同时启用会被内核以地址不唯一拒绝。
 	base_mac=$(cat "/sys/class/net/${WIFI_INTERFACE}/address")
 	ap_mac="02:${base_mac#*:}"
@@ -252,6 +285,10 @@ if [ "$CONCURRENT_MODE" = "true" ] && [ "$SEPARATE_AP_RADIO" != "true" ]; then
 	/usr/sbin/ip link set "$AP_INTERFACE" address "$ap_mac"
 fi
 
+# 接管前先关闭设备级自动连接，避免 managed=yes 与保护之间出现抢占窗口。
+if [ -n "$NATIVE_AP_INTERFACE" ]; then
+	/usr/bin/nmcli device set "$AP_INTERFACE" autoconnect no
+fi
 /usr/bin/nmcli device set "$AP_INTERFACE" managed yes
 /usr/bin/nmcli connection modify id "$AP_CONNECTION_NAME" \
 	connection.interface-name "$AP_INTERFACE" \

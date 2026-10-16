@@ -24,7 +24,9 @@ const kernelPolicyPath = "/usr/local/share/teslabox/kernel/rc1.json"
 const kernelControllerPath = "/usr/local/libexec/teslabox-kernel-upgrade.py"
 const kernelResumeRequestPath = "/var/lib/teslabox-system/kernel-upgrade/request.json"
 const kernelRelease = "5.10.160-teslabox3"
-const apfix6Digest = "31d0551815dc2163db700eb24239d98d003c65f270d05270d079887955b7ebce"
+
+// 该测试候选只信任本次构建的 apfix7；回滚须恢复整套 apfix6 程序、政策和模块。
+const rtl8852beDigest = "21a4cb2d7f55c8e9397e5d3b992083a8e9fd13ab7145a9c4de055081b19a41f0"
 
 // 内部修订 DEB 保留原 Image/DTB，只纳入已验过的 MT79xx 蓝牙模块。
 const kernelDebDigest = "3d4bac396b7c863bb8dbd4e0cb154de4a4bb67ff577850b691420853e005e93a"
@@ -88,9 +90,9 @@ func VerifyKernelPolicy(payload, signature []byte, key ed25519.PublicKey) (Kerne
 		}
 		total += file.Size
 	}
-	if total > 160<<20 || p.Files["modules/8852be.ko"].SHA256 != apfix6Digest ||
+	if total > 160<<20 || p.Files["modules/8852be.ko"].SHA256 != rtl8852beDigest ||
 		p.Files["kernel.deb"].SHA256 != kernelDebDigest || p.Files["modules/btusb.ko"].SHA256 != btusbMT79xxDigest {
-		return p, errors.New("内核、apfix6 或蓝牙模块不是本次冻结产物")
+		return p, errors.New("内核、apfix7 或蓝牙模块不是本次冻结产物")
 	}
 	return p, nil
 }

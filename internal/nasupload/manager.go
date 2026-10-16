@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +23,7 @@ import (
 
 // Config 将任务日志和压缩成品固定到系统盘。
 type Config struct {
+	Logger    *slog.Logger
 	Root      string
 	Cache     *recordingcache.Store
 	Transport Transport
@@ -76,6 +78,9 @@ type Manager struct {
 
 // New 必须先于缓存定时清理恢复固定，避免重启时待上传输入被 TTL 删除。
 func New(cfg Config) (*Manager, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	if cfg.Cache == nil || cfg.Transport == nil || cfg.Root == "" {
 		return nil, errors.New("上传依赖不完整")
 	}
@@ -610,6 +615,9 @@ func (m *Manager) stage(parent context.Context, p preparation) {
 		files = append(files, recordingcache.File{Identity: identity + "|" + filepath.ToSlash(rel), Version: p.version, Path: in.Path})
 	}
 	lease, err := m.cfg.Cache.EnsureLocal(ctx, files, nil)
+	if err != nil {
+		m.cfg.Logger.Warn("录像上传准备失败", "task_id", p.id, "snapshot_id", p.version, "source_count", len(files), "error", err, "context_cause", context.Cause(ctx))
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.cancels, p.id)

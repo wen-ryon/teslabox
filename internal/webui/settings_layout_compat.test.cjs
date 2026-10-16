@@ -35,8 +35,8 @@ function environment({hash = "", saved = "", mobile = false} = {}) {
   const sections = new Map();
   for (const match of html.matchAll(/<section([^>]*class="[^"]*settings-section[^>]*aria-labelledby="([^"]+)"[^>]*)>/g)) {
     const title = match[2], id = match[1].match(/\bid="([^"]+)"/)?.[1];
-    if (!title.endsWith("settings-title") && !["security-title","update-title","power-title"].includes(title)) continue;
-    const section = add(content, "section", id || "settings-panel-5", "settings-section"); sections.set(id || "settings-panel-5", section);
+    if (!title.endsWith("settings-title") && !["security-title","update-title","power-title","shared-network-title"].includes(title)) continue;
+    const section = add(content, "section", id || (title === "export-settings-title" ? "settings-panel-5" : title.replace("-title","-section")), "settings-section"); sections.set(id || (title === "export-settings-title" ? "settings-panel-5" : title.replace("-title","-section")), section);
     const heading = add(section,"h2",title); heading.textContent = title;
   }
   for (const id of ["fan-mode-automatic", "fan-mode-manual"]) add(sections.get("settings-panel-6"),"button",id);
@@ -55,7 +55,7 @@ function environment({hash = "", saved = "", mobile = false} = {}) {
   const location = {pathname:"/settings",hash};
   const document = {getElementById:id => [root,...root.querySelectorAll("*")].find(node => node.id === id) || null, createElement:tag => new Node(tag), createElementNS:(_,tag) => new Node(tag), querySelectorAll:selector => root.querySelectorAll(selector), addEventListener(name,callback) {this[name] = callback;}};
   const calls=[];
-  const context = vm.createContext({document,showPage: page => calls.push(page),window:{location,setInterval(){},matchMedia:() => ({matches:mobile,addEventListener(){}}),history:{pushState(_,unused,url){const [pathname,hash=""] = url.split("#");location.pathname=pathname;location.hash=hash ? "#"+hash : "";}}},localStorage:{getItem:key => store.get(key),setItem:(key,value) => store.set(key,value)}});
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,document,showPage: page => calls.push(page),window:{location,setInterval(){},matchMedia:() => ({matches:mobile,addEventListener(){}}),history:{pushState(_,unused,url){const [pathname,hash=""] = url.split("#");location.pathname=pathname;location.hash=hash ? "#"+hash : "";}}},localStorage:{getItem:key => store.get(key),setItem:(key,value) => store.set(key,value)}});
   vm.runInContext(source,context);
   return {document,context,layout:context.TeslaBoxSettingsLayout,sections,store,tabs,content,retain,calls};
 }
@@ -114,7 +114,7 @@ test("app 初始化、设置跳转与认证后加载使用实际模块钩子", (
   const body = name => app.match(new RegExp("^function "+name+"\\([^\\n]*\\{.*?^}","ms"))[0];
   const calls = [];const nodes = new Map();
   const lookup = id => {if (!nodes.has(id)) nodes.set(id,{hidden:false});return nodes.get(id);};
-  const context = vm.createContext({playbackProbeActive:false,globalThis:{TeslaBoxSettingsLayout:{initialize:() => calls.push("init"),enterPage:() => calls.push("enter"),selectSection:id => calls.push(id)},TeslaBoxCarPlaySettings:{load:() => calls.push("load")}},$ : lookup,loginView:lookup("login-view"),appView:lookup("app-view"),state:{authEnabled:true},document:{querySelectorAll:() => []},window:{history:{pushState(){}},scrollTo(){}},closeNavigation(){},closeAppearanceMenu(){},loadSettings:() => calls.push("settings"),loadMediaAssets(){},loadLogs(){},scheduleLogsRefresh(){}});
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,playbackProbeActive:false,globalThis:{TeslaBoxSettingsLayout:{initialize:() => calls.push("init"),enterPage:() => calls.push("enter"),selectSection:id => calls.push(id)},TeslaBoxCarPlaySettings:{load:() => calls.push("load")}},$ : lookup,loginView:lookup("login-view"),appView:lookup("app-view"),state:{authEnabled:true},document:{querySelectorAll:() => []},window:{history:{pushState(){}},scrollTo(){}},closeNavigation(){},closeAppearanceMenu(){},loadSettings:() => calls.push("settings"),loadMediaAssets(){},loadLogs(){},scheduleLogsRefresh(){}});
   for (const name of ["initializeSettingsTabs","activateSettingsTab","showApp","showPage"]) vm.runInContext(body(name),context);
   context.initializeSettingsTabs();context.activateSettingsTab("settings-panel-5");context.showApp();context.showPage("settings",false);
   assert.deepEqual(calls,["init","settings-panel-5","load","enter","settings"]);

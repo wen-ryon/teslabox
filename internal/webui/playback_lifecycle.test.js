@@ -12,7 +12,7 @@ function extract(name) {
 }
 function fixture() {
   const messages=[], events=[];
-  const context=vm.createContext({loadToken:1,performance,window:{setTimeout,clearTimeout,setInterval,clearInterval},
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,loadToken:1,performance,window:{setTimeout,clearTimeout,setInterval,clearInterval},
     showPlayerMessage:message=>messages.push(message),reportPlaybackDiagnostic:(...args)=>events.push(args)});
   for(const name of ["playVideoSafely","waitForMetadata"]) vm.runInContext(extract(name),context);
   const listeners=new Map();
@@ -60,7 +60,7 @@ test("metadata success remains compatible",async()=>{
 function snapshotFixture(request) {
   const moment={id:"minute",recorded_at:"2026-09-30T08:00:00Z",timeline_start_seconds:0,duration_seconds:60};
   const session={id:"archive",snapshot_id:"old",moments:[moment]};
-  const context=vm.createContext({request,encodeURIComponent,
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,request,encodeURIComponent,
     selectMomentAtPosition:()=>({moment,localTime:12}),
     timelineMomentDuration:m=>m.duration_seconds,timelineMomentStart:m=>m.timeline_start_seconds});
   vm.runInContext(extract("refreshPlaybackSessionSnapshot"),context);
@@ -76,7 +76,7 @@ function compositePositionFixture(prepare = async()=>true) {
   const element=play=>({dataset:{},currentTime:4.798,getAttribute:()=>"/video",play});
   const main=element(()=>Promise.resolve()),aux=element(()=>pendingPlay);
   const noop=()=>{};
-  const context=vm.createContext({loadToken:0,timelinePositionRequestID:0,timelinePositionPending:false,
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,loadToken:0,timelinePositionRequestID:0,timelinePositionPending:false,
     requestedPosition:0,activeSession:{duration_seconds:60,moments:[moment]},activeVideo:front,
     activeMomentIndex:0,activeDisplay:"composite6",activeStreamTimelineStart:null,
     sessionVideo:main,compositeTracks:new Map(),pendingCompositeTracks:new Map(),
@@ -161,7 +161,7 @@ test("late snapshot response cannot take over a newer selection",async()=>{
 test("player recovery retries once even when the refreshed load fails",async()=>{
   let attempts=0,refreshes=0;
   const session={id:"archive",snapshot_id:"old"};
-  const context=vm.createContext({activeSession:session,loadToken:0,
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,activeSession:session,loadToken:0,
     loadSessionPositionAttempt:async()=>{context.loadToken++;attempts++;return false;},
     refreshPlaybackSessionSnapshot:async()=>{refreshes++;return {session:{...session,snapshot_id:"new"},position:12,momentIndex:0};},
     reportPlaybackDiagnostic(){},$:()=>({}),formatDuration:()=>"",

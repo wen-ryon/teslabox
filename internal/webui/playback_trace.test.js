@@ -11,7 +11,7 @@ function fixture() {
   const root={performance:{now:()=>clock},crypto:{getRandomValues:a=>{a.fill(++counter);return a;}},
     setInterval:fn=>intervals.push(fn),setTimeout:fn=>{const id=++counter;timeouts.set(id,fn);return id;},clearTimeout:id=>timeouts.delete(id),
     fetch:async(url,options)=>{requests.push(JSON.parse(options.body));return {ok:true};}};
-  vm.runInNewContext(source,{window:root,AbortController});
+  vm.runInNewContext(source,{TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,window:root,AbortController});
   const listeners=new Map(),frames=new Map();let frameID=0;
   const video={currentTime:0,readyState:0,networkState:0,paused:true,seeking:false,buffered:{length:0},
     addEventListener:(n,f)=>{listeners.set(n,f);},removeEventListener:(n,f)=>{if(listeners.get(n)===f)listeners.delete(n);},

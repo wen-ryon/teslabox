@@ -5,35 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <title>TeslaBox 管理中心</title>
+  <script src="/i18n.js?v=20261016-network-diag-1"></script>
   <script src="/page-display.js?v=20261013-1"></script>
   <link rel="icon" href="/teslabox-logo.svg?v=20260811-2" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css?v=20261013-page-display-1">
-  <link rel="stylesheet" href="/settings-layout.css?v=20261011-runtime-1">
+  <link rel="stylesheet" href="/settings-layout.css?v=20261016-roles-1">
   <link rel="stylesheet" href="/nas-upload.css?v=20261011-runtime-1">
-  <script src="/nas-upload.js?v=20261011-runtime-1" defer></script>
-  <script src="/settings-layout.js?v=20261013-page-display-1" defer></script>
-  <script src="/runtime-components.js?v=20261011-components-1" defer></script>
+  <script src="/nas-upload.js?v=20261016-roles-1" defer></script>
+  <script src="/settings-layout.js?v=20261016-roles-1" defer></script>
+  <script src="/runtime-components.js?v=20261016-roles-1" defer></script>
   <script src="/playback-probe-plan.js?v=20260929-2" defer></script>
   <script src="/playback-hls.js?v=20260930-1" defer></script>
   <script src="/playback-trace.js?v=20260930-6" defer></script>
-  <script src="/app.js?v=20261013-page-display-1" defer></script>
-  <script src="/carplay-pairing.js?v=20261011-runtime-1" defer></script>
-  <script src="/carplay-settings.js?v=20261011-runtime-1" defer></script>
-  <script src="/playback-probe-matrix.js?v=20260930-1" defer></script>
+  <script src="/shared-network.js?v=20261016-network-diag-1" defer></script>
+  <script src="/ethernet.js?v=20261016-network-diag-1" defer></script>
+  <script src="/language-settings.js?v=20261016-roles-1" defer></script>
+  <script src="/internet-status.js?v=20261016-1" defer></script>
+  <script src="/app.js?v=20261016-network-diag-1" defer></script>
+  <script src="/carplay-pairing.js?v=20261016-roles-1" defer></script>
+  <script src="/carplay-settings.js?v=20261016-roles-1" defer></script>
+  <script src="/wireless-region.js?v=20261016-roles-1" defer></script>
+    <script src="/playback-probe-matrix.js?v=20260930-1" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-shell" hidden>
     <section class="login-card" aria-labelledby="login-title">
       <div class="login-brand">
         <img src="/teslabox-logo.svg?v=20260811-2" alt="" width="52" height="52">
-        <div><strong>TeslaBox</strong><small>车载存储中心</small></div>
+        <div><strong>TeslaBox</strong><small data-i18n="车载存储中心">车载存储中心</small></div>
       </div>
-      <h1 id="login-title">连接你的行车记录</h1>
-      <p class="muted">管理页面仅在本地网络中工作。请输入设备管理密码继续。</p>
+      <h1 id="login-title" data-i18n="连接你的行车记录">连接你的行车记录</h1>
+      <p class="muted" data-i18n="管理页面仅在本地网络中工作。请输入设备管理密码继续。">管理页面仅在本地网络中工作。请输入设备管理密码继续。</p>
       <form id="login-form" class="login-form">
-        <label for="password">管理密码</label>
+        <label for="password" data-i18n="管理密码">管理密码</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-        <button type="submit" class="primary">登录</button>
+        <button type="submit" class="primary" data-i18n="登录">登录</button>
         <p id="login-error" class="form-error" role="alert"></p>
       </form>
     </section>
@@ -42,12 +48,15 @@
   <main id="app-view" hidden>
     <header class="topbar">
       <div class="brand">
-        <button id="nav-toggle" class="brand-mark" type="button" aria-label="打开主导航" aria-expanded="false"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></button>
-        <a class="brand-copy" href="/" data-page-link="dashboard"><strong>TeslaBox</strong><small>车载存储中心</small></a>
+        <button id="nav-toggle" class="brand-mark" type="button" aria-label="打开主导航" aria-expanded="false" data-i18n-aria-label="打开主导航"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></button>
+        <a class="brand-copy" href="/" data-page-link="dashboard"><strong>TeslaBox</strong><small data-i18n="车载存储中心">车载存储中心</small></a>
       </div>
       <div class="top-actions">
-        <span id="live-indicator" class="live-indicator"><i></i><span>正在连接</span></span>
-        <span id="internet-indicator" class="internet-indicator"><i></i><span>检测互联网</span></span>
+        <span id="live-indicator" class="live-indicator"><i></i><span data-i18n="正在连接">正在连接</span></span>
+        <div class="internet-status">
+          <button id="internet-indicator" class="internet-indicator" type="button" aria-expanded="false" aria-controls="internet-egress" aria-label="互联网状态" data-i18n-aria-label="互联网状态"><i aria-hidden="true"></i><span data-i18n="检测互联网">检测互联网</span></button>
+          <div id="internet-egress" class="internet-egress" role="region" aria-label="互联网出口" data-i18n-aria-label="互联网出口" hidden></div>
+        </div>
       </div>
     </header>
     <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-relevant="additions"></div>
@@ -58,12 +67,12 @@
     <aside id="nav-drawer" class="nav-drawer" aria-label="主导航" hidden>
       <div class="drawer-head"><span class="brand-mark static"><img src="/teslabox-logo.svg?v=20260811-2" alt="" width="36" height="36"></span><div><strong>TeslaBox</strong><small>设备管理</small></div><button id="nav-close" class="icon-button" type="button" aria-label="关闭导航">×</button></div>
       <nav class="drawer-nav">
-        <button type="button" data-page-link="dashboard" class="active"><span>概览</span><small>设备状态与录像</small></button>
-        <button type="button" data-page-link="backup"><span>录像备份</span><small>上传任务、NAS 与网盘配置</small></button>
-        <button type="button" data-page-link="exports"><span>导出管理</span><small>任务与历史成品</small></button>
-        <button type="button" data-page-link="media"><span>媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
-        <button type="button" data-page-link="logs"><span>日志中心</span><small>USB、视频与系统诊断</small></button>
-        <button type="button" data-page-link="settings"><span>设置中心</span><small>WiFi、热点与电源</small></button>
+        <button type="button" data-page-link="dashboard" class="active"><span data-i18n="概览">概览</span><small>设备状态与录像</small></button>
+        <button type="button" data-page-link="backup"><span data-i18n="录像备份">录像备份</span><small>上传任务、NAS 与网盘配置</small></button>
+        <button type="button" data-page-link="exports"><span data-i18n="导出管理">导出管理</span><small>导出任务、成品与保留策略</small></button>
+        <button type="button" data-page-link="media"><span data-i18n="媒体中心">媒体中心</span><small>音效、皮肤、灯光秀与音乐</small></button>
+        <button type="button" data-page-link="logs"><span data-i18n="日志中心">日志中心</span><small>USB、视频与系统诊断</small></button>
+        <button type="button" data-page-link="settings"><span data-i18n="设置中心">设置中心</span><small>网络、存储与设备设置</small></button>
       </nav>
       <p class="drawer-foot">TeslaBox 本地管理中心</p>
     </aside>
@@ -84,13 +93,13 @@
         <article class="status-card">
           <span>设备温度</span>
           <strong id="temperature-value">—</strong>
-          <p id="temperature-detail" class="muted">读取中</p>
+          <p id="temperature-detail" class="muted" data-i18n="读取中">读取中</p>
         </article>
         <article class="status-card">
           <span>CPU 占用</span>
           <strong id="cpu-value">—</strong>
           <div class="progress" aria-hidden="true"><i id="cpu-progress"></i></div>
-          <p id="cpu-detail" class="muted">读取中</p>
+          <p id="cpu-detail" class="muted" data-i18n="读取中">读取中</p>
         </article>
         <article class="status-card status-card-wide">
           <div class="status-card-head"><span>USB 连接</span><span id="usb-badge" class="badge">检查中</span></div>
@@ -101,13 +110,13 @@
           <span>内存占用</span>
           <strong id="memory-value">—</strong>
           <div class="progress" aria-hidden="true"><i id="memory-progress"></i></div>
-          <p id="memory-detail" class="muted">读取中</p>
+          <p id="memory-detail" class="muted" data-i18n="读取中">读取中</p>
         </article>
         <article class="status-card">
           <span>系统盘占用</span>
           <strong id="system-disk-value">—</strong>
           <div class="progress" aria-hidden="true"><i id="system-disk-progress"></i></div>
-          <p id="system-disk-detail" class="muted">读取中</p>
+          <p id="system-disk-detail" class="muted" data-i18n="读取中">读取中</p>
         </article>
         <article class="status-card">
           <span>车机虚拟盘可用</span>
@@ -137,7 +146,7 @@
           <label>录像类型
             <select id="clip-type" name="clip_type">
               <option value="">全部（已保存/哨兵）</option>
-              <option value="saved">已保存</option><option value="sentry">哨兵事件</option>
+              <option value="saved" data-i18n="已保存">已保存</option><option value="sentry">哨兵事件</option>
             </select>
           </label>
           <label>日期<input id="date" name="date" type="date"></label>
@@ -158,7 +167,7 @@
 
     <div id="media-page" class="page media-page app-page" hidden>
       <section class="settings-hero media-hero">
-        <div><p class="eyebrow">TESLA MEDIA</p><h1>媒体中心</h1><p class="hero-copy">展示 TeslaBox 管理的文件，以及电脑或车机直接写入的可识别媒体。上传会先安全暂存；点击应用时才写入虚拟盘。</p></div>
+        <div><p class="eyebrow">TESLA MEDIA</p><h1 data-i18n="媒体中心">媒体中心</h1><p class="hero-copy">展示 TeslaBox 管理的文件，以及电脑或车机直接写入的可识别媒体。上传会先安全暂存；点击应用时才写入虚拟盘。</p></div>
         <button id="media-refresh" class="secondary" type="button">刷新媒体</button>
       </section>
       <div id="media-notice" class="notice" role="status" aria-live="polite"></div>
@@ -169,21 +178,21 @@
           <div class="media-card-head"><div><p class="eyebrow">BOOMBOX</p><h2>锁车音效</h2><p>写入 exFAT 分区根目录的 <code>Boombox/</code>。支持 MP3、WAV，最多保留 5 个。</p></div><span id="media-boombox-count" class="badge">0 个</span></div>
           <label class="media-upload-control">选择音效<input id="media-boombox-files" type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" multiple></label>
           <button id="media-boombox-upload" class="secondary compact" type="button">暂存音效</button>
-          <div id="media-boombox-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+          <div id="media-boombox-list" class="media-asset-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
 
         <article class="settings-card media-card">
           <div class="media-card-head"><div><p class="eyebrow">PAINT SHOP</p><h2>喷漆车间皮肤</h2><p>写入 <code>Wraps/</code>。上传时校验 PNG、正方形尺寸、1MB 和名称安全。</p></div><span id="media-wrap-count" class="badge">0 / 10</span></div>
           <label class="media-upload-control">选择 PNG 皮肤<input id="media-wrap-files" type="file" accept="image/png,.png" multiple></label>
           <button id="media-wrap-upload" class="secondary compact" type="button">暂存皮肤</button>
-          <div id="media-wrap-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+          <div id="media-wrap-list" class="media-asset-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
 
         <article class="settings-card media-card">
           <div class="media-card-head"><div><p class="eyebrow">LIGHT SHOW</p><h2>自定义灯光秀</h2><p>写入 <code>LightShow/</code>。序列和音频必须同名，例如 <code>show.fseq</code> 与 <code>show.wav</code>。</p></div><span id="media-lightshow-count" class="badge">0 个</span></div>
           <div class="media-lightshow-inputs"><label class="media-upload-control">FSEQ 序列<input id="media-lightshow-sequence" type="file" accept=".fseq"></label><label class="media-upload-control">MP3 或 WAV 音频<input id="media-lightshow-audio" type="file" accept="audio/mpeg,audio/wav,.mp3,.wav"></label></div>
           <button id="media-lightshow-upload" class="secondary compact" type="button">暂存灯光秀</button>
-          <div id="media-lightshow-list" class="media-asset-list"><p class="empty-state">正在读取…</p></div>
+          <div id="media-lightshow-list" class="media-asset-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
 
         <article id="media-music-card" class="settings-card media-card">
@@ -192,8 +201,8 @@
           <button id="media-music-upload" class="secondary compact" type="button">暂存音乐</button>
           <div class="media-music-browser">
             <div class="media-music-toolbar"><div id="media-music-breadcrumb" class="media-music-breadcrumb" aria-label="当前音乐目录"></div><button id="media-music-back" class="ghost compact" type="button">返回上级</button></div>
-            <div id="media-music-list" class="media-asset-list media-music-list"><p class="empty-state">正在读取…</p></div>
-            <div id="media-music-pagination" class="media-music-pagination"><span id="media-music-page-summary" class="muted">正在读取…</span><div><button id="media-music-prev" class="ghost compact" type="button">上一页</button><button id="media-music-next" class="ghost compact" type="button">下一页</button></div></div>
+            <div id="media-music-list" class="media-asset-list media-music-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
+            <div id="media-music-pagination" class="media-music-pagination"><span id="media-music-page-summary" class="muted" data-i18n="正在读取…">正在读取…</span><div><button id="media-music-prev" class="ghost compact" type="button">上一页</button><button id="media-music-next" class="ghost compact" type="button">下一页</button></div></div>
           </div>
         </article>
       </section>
@@ -205,16 +214,16 @@
     </div>
 
     <div id="backup-page" class="page workspace-page app-page" hidden>
-      <section class="settings-hero"><div><p class="eyebrow">RECORDING BACKUP</p><h1>录像备份</h1><p class="hero-copy">管理录像上传、默认目标与事件自动备份。</p></div></section>
+      <section class="settings-hero"><div><p class="eyebrow">RECORDING BACKUP</p><h1 data-i18n="录像备份">录像备份</h1><p class="hero-copy">管理录像上传、默认目标与事件自动备份。</p></div></section>
       <nav class="workspace-tabs" role="tablist" aria-label="录像备份分类">
         <button id="backup-history-tab" type="button" role="tab" aria-controls="backup-history-panel">任务与记录</button>
-        <button id="backup-targets-tab" type="button" role="tab" aria-controls="backup-targets-panel">上传目标<span class="settings-draft-dot" aria-label="有未保存的修改" hidden></span></button>
-        <button id="backup-rules-tab" type="button" role="tab" aria-controls="backup-rules-panel">上传规则<span class="settings-draft-dot" aria-label="有未保存的修改" hidden></span></button>
+        <button id="backup-targets-tab" type="button" role="tab" aria-controls="backup-targets-panel">上传目标<span class="settings-draft-dot" aria-label="有未保存的修改" hidden data-i18n-aria-label="有未保存的修改"></span></button>
+        <button id="backup-rules-tab" type="button" role="tab" aria-controls="backup-rules-panel">上传规则<span class="settings-draft-dot" aria-label="有未保存的修改" hidden data-i18n-aria-label="有未保存的修改"></span></button>
       </nav>
       <div id="backup-content"></div>
     </div>
     <div id="exports-page" class="page workspace-page app-page" hidden>
-      <section class="settings-hero"><div><p class="eyebrow">EXPORT MANAGER</p><h1>导出管理</h1><p class="hero-copy">查看导出任务、下载成品和调整保留方式。</p></div><span id="export-status-slot"></span></section>
+      <section class="settings-hero"><div><p class="eyebrow">EXPORT MANAGER</p><h1 data-i18n="导出管理">导出管理</h1><p class="hero-copy">查看导出任务、下载成品和调整保留方式。</p></div><span id="export-status-slot"></span></section>
       <div id="exports-notice" class="notice" role="status" aria-live="polite"></div>
       <p id="export-draft-notice" class="draft-notice" role="status" hidden>保留设置有未保存的修改；切换页面会保留草稿。</p>
       <article class="settings-card export-live-task"><h3>最近导出任务</h3><p>显示当前浏览器最近创建的任务。请选择录像后发起导出，已完成成品见下方历史。</p><div id="export-live-task"></div></article>
@@ -222,34 +231,72 @@
     </div>
     <div id="settings-page" class="page settings-page app-page" hidden>
       <section class="settings-hero">
-        <div><p class="eyebrow">SETTINGS</p><h1>设置中心</h1><p class="hero-copy">管理 WiFi 无线局域网、TeslaBox 热点和设备电源。网络变更可能使当前页面断开。</p></div>
-        <button id="settings-refresh" class="secondary" type="button">刷新设置</button>
+        <div><p class="eyebrow">SETTINGS</p><h1 data-i18n="设置中心">设置中心</h1><p class="hero-copy" data-i18n="管理网络、存储与设备设置。录像备份和导出管理已独立到主菜单。">管理网络、存储与设备设置。录像备份和导出管理已独立到主菜单。</p></div>
+        <div class="hero-actions"><button id="settings-refresh" class="secondary" type="button" data-i18n="刷新设置">刷新设置</button></div>
       </section>
       <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
       <div class="settings-layout">
         <nav id="settings-tabs" class="settings-tabs" aria-label="设置分类"></nav>
         <div id="settings-content" class="settings-content">
-          <div class="settings-detail-bar"><button id="settings-back" class="secondary compact" type="button">‹ 返回设置</button><h2 id="settings-detail-title">网络连接</h2></div>
-          <p id="settings-draft-notice" class="draft-notice" role="status" hidden>有未保存的修改，请在对应设置中保存。</p>
+          <div class="settings-detail-bar"><button id="settings-back" class="secondary compact" type="button" data-i18n="‹ 返回设置">‹ 返回设置</button><h2 id="settings-detail-title" data-i18n="网络连接">网络连接</h2></div>
+          <p id="settings-draft-notice" class="draft-notice" role="status" hidden>有未保存的修改；切换分类会保留草稿，请在对应板块单独保存。</p>
+        </div>
+      </div>
+
+      <section class="settings-section" aria-labelledby="ethernet-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">ETHERNET</p><h2 id="ethernet-settings-title" data-i18n="有线网络">有线网络</h2></div><button id="ethernet-refresh" class="secondary" type="button" data-i18n="刷新有线状态">刷新有线状态</button></div>
+        <p class="muted" data-i18n="管理板载与 USB 有线网卡。链路连接不等于已取得 IP，也不保证互联网可用。企业认证、VLAN、网桥和绑定请使用系统工具维护。">管理板载与 USB 有线网卡。链路连接不等于已取得 IP，也不保证互联网可用。企业认证、VLAN、网桥和绑定请使用系统工具维护。</p>
+        <div id="ethernet-notice" class="notice" role="status" aria-live="polite"></div>
+        <article id="ethernet-trial" class="settings-card" hidden>
+          <h3 data-i18n="有线设置试用中">有线设置试用中</h3><p id="ethernet-trial-detail"></p>
+          <p class="muted" data-i18n="请验证新地址能访问本页再确认；若断线，请从新 IP、WiFi 或 AP 重新访问。未确认将自动回退；网页关闭不会取消回退。请勿在试用期间重启或断电。">请验证新地址能访问本页再确认；若断线，请从新 IP、WiFi 或 AP 重新访问。未确认将自动回退；网页关闭不会取消回退。请勿在试用期间重启或断电。</p>
+          <div class="button-row"><button id="ethernet-confirm" type="button" data-i18n="保留这次设置">保留这次设置</button><button id="ethernet-rollback" class="secondary" type="button" data-i18n="立即回退">立即回退</button></div>
+        </article>
+        <div id="ethernet-devices"><p class="empty-state" data-i18n="正在读取有线网络…">正在读取有线网络…</p></div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="shared-network-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">CELLULAR &amp; TETHERING</p><h2 id="shared-network-title" data-i18n="移动与共享网络">移动与共享网络</h2></div><button id="shared-network-refresh" class="secondary" type="button" data-i18n="刷新">刷新</button></div>
+        <p class="muted" data-i18n="显示 USB 网络、蜂窝 modem 和蓝牙网络共享；已连接不代表互联网可用。">显示 USB 网络、蜂窝 modem 和蓝牙网络共享；已连接不代表互联网可用。</p>
+        <div id="shared-network-notice" class="notice" role="status" aria-live="polite"></div>
+        <div id="shared-network-devices"></div>
+        <article id="shared-usb-trial" class="settings-card" hidden>
+          <h3 data-i18n="网络设置试用中">网络设置试用中</h3><p id="shared-usb-trial-detail"></p>
+          <p class="muted" data-i18n="请验证新地址能访问本页再确认；若断线，请从新 IP、WiFi 或 AP 重新访问。未确认将自动回退；网页关闭不会取消回退。请勿在试用期间重启或断电。">请验证新地址能访问本页再确认；若断线，请从新 IP、WiFi 或 AP 重新访问。未确认将自动回退；网页关闭不会取消回退。请勿在试用期间重启或断电。</p>
+          <div class="button-row"><button id="shared-usb-confirm" type="button" data-i18n="保留这次设置">保留这次设置</button><button id="shared-usb-rollback" class="secondary" type="button" data-i18n="立即回退">立即回退</button></div>
+        </article>
+        <div id="shared-usb-devices"></div>
+      </section>
 
       <section id="settings-panel-1" class="settings-section" aria-labelledby="wifi-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">WIRELESS LAN</p><h2 id="wifi-settings-title">WiFi 无线局域网</h2></div></div>
-        <div class="hardware-overview" aria-label="WiFi 硬件信息">
-          <div><span>连接状态</span><strong id="wifi-status">读取中</strong></div>
-          <div><span>网络接口</span><strong id="wifi-interface">—</strong></div>
-          <div><span>MAC 地址</span><strong id="wifi-mac-address">—</strong></div>
-          <div><span>IP 地址</span><strong id="wifi-ip-address">—</strong></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">WIRELESS LAN</p><h2 id="wifi-settings-title" data-i18n="WiFi 无线局域网">WiFi 无线局域网</h2></div></div>
+        <div class="hardware-overview network-overview" aria-label="WiFi 硬件信息">
+          <div><span data-i18n="连接状态">连接状态</span><strong id="wifi-status" data-i18n="读取中">读取中</strong></div>
+          <div><span data-i18n="网络接口">网络接口</span><strong id="wifi-interface">—</strong></div>
+          <div><span data-i18n="MAC 地址">MAC 地址</span><strong id="wifi-mac-address">—</strong></div>
+          <div><span data-i18n="IP 地址">IP 地址</span><strong id="wifi-ip-address">—</strong></div>
+          <div><span data-i18n="连接速率">连接速率</span><strong id="wifi-link-speed">—</strong></div>
+          <div><span data-i18n="频率">频率</span><strong id="wifi-frequency">—</strong></div>
+          <div><span data-i18n="信号质量">信号质量</span><strong id="wifi-signal">—</strong></div>
+          <div><span data-i18n="网关">网关</span><strong id="wifi-gateway">—</strong></div>
+          <div><span>DNS</span><strong id="wifi-dns">—</strong></div>
+          <div><span>MTU</span><strong id="wifi-mtu">—</strong></div>
         </div>
+        <p class="muted network-rate-note" data-i18n="连接速率是系统报告的链路速率，不代表实际网速；系统未提供的指标不作估算。">连接速率是系统报告的链路速率，不代表实际网速；系统未提供的指标不作估算。</p>
         <div id="wifi-warning" class="settings-warning" hidden></div>
         <article class="settings-card collapsible-network-card">
-          <div class="settings-card-head"><div><h3>已保存的网络</h3><p>密码由 NetworkManager 保存，页面不会读取或显示密码。</p></div><button id="saved-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="false" aria-controls="saved-network-panel">展开</button></div>
-          <div id="saved-network-panel" hidden><div id="saved-network-list" class="network-list"><p class="empty-state">正在读取…</p></div></div>
+          <div class="settings-card-head"><div><h3 data-i18n="我的网络">我的网络</h3><p data-i18n="已保存且当前可见的网络；当前连接始终置顶。">已保存且当前可见的网络；当前连接始终置顶。</p></div></div>
+          <div id="known-network-list" class="network-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
         <article class="settings-card collapsible-network-card">
-          <div class="settings-card-head"><div><h3>当前可用 WiFi</h3><p>列表来自最近一次扫描；同名网络只展示信号最强的接入点。</p></div><div class="network-card-actions"><button id="wifi-scan" class="secondary compact" type="button">扫描网络</button><button id="available-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="false" aria-controls="available-network-panel">展开</button></div></div>
-          <div id="available-network-panel" class="network-table-wrap" hidden>
-            <table class="network-table"><thead><tr><th>SSID</th><th>SIGNAL</th><th>BAND</th><th>SECURITY</th><th></th></tr></thead><tbody id="available-network-list"><tr><td colspan="5" class="empty-state">正在读取…</td></tr></tbody></table>
+          <div class="settings-card-head"><div><h3 data-i18n="其他可用网络">其他可用网络</h3><p>仅展示尚未保存的 WiFi；列表来自最近一次扫描。</p></div><div class="network-card-actions"><button id="wifi-scan" class="secondary compact" type="button" data-i18n="扫描网络">扫描网络</button><button id="available-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="true" aria-controls="available-network-panel" data-i18n="收起">收起</button></div></div>
+          <div id="available-network-panel" class="network-table-wrap">
+            <table class="network-table"><thead><tr><th>SSID</th><th>SIGNAL</th><th>BAND</th><th>SECURITY</th><th></th></tr></thead><tbody id="available-network-list"><tr><td colspan="5" class="empty-state" data-i18n="正在读取…">正在读取…</td></tr></tbody></table>
           </div>
+        </article>
+        <article class="settings-card collapsible-network-card">
+          <div class="settings-card-head"><div><h3 data-i18n="其他已保存网络">其他已保存网络</h3><p>当前不在附近的已保存网络。密码由 NetworkManager 保存，页面不会读取或显示。</p></div><button id="saved-network-toggle" class="secondary compact collapsible-toggle" type="button" aria-expanded="false" aria-controls="saved-network-panel" data-i18n="展开">展开</button></div>
+          <div id="saved-network-panel" hidden><div id="saved-network-list" class="network-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div></div>
         </article>
       </section>
 
@@ -300,38 +347,42 @@
         </div>
       </section>
       <section id="settings-panel-2" class="settings-section" aria-labelledby="ap-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">ACCESS POINT</p><h2 id="ap-settings-title">AP 热点</h2></div></div>
-        <div class="hardware-overview" aria-label="AP 热点硬件信息">
-          <div><span>开启状态</span><strong id="ap-status">读取中</strong></div>
-          <div><span>网络接口</span><strong id="ap-interface">—</strong></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">ACCESS POINT</p><h2 id="ap-settings-title" data-i18n="AP 热点">AP 热点</h2></div></div>
+        <div class="hardware-overview network-overview" aria-label="AP 热点硬件信息">
+          <div><span data-i18n="开启状态">开启状态</span><strong id="ap-status" data-i18n="读取中">读取中</strong></div>
+          <div><span data-i18n="网络接口">网络接口</span><strong id="ap-interface">—</strong></div>
           <div><span>接口角色</span><strong id="ap-interface-role">—</strong></div>
-          <div><span>MAC 地址</span><strong id="ap-mac-address">—</strong></div>
-          <div><span>热点地址</span><strong id="ap-address">—</strong></div>
-          <div><span>互联网共享</span><strong id="ap-sharing">—</strong></div>
+          <div><span data-i18n="MAC 地址">MAC 地址</span><strong id="ap-mac-address">—</strong></div>
+          <div><span data-i18n="热点地址">热点地址</span><strong id="ap-address">—</strong></div>
+          <div><span data-i18n="互联网共享">互联网共享</span><strong id="ap-sharing">—</strong></div>
           <div><span>当前频段</span><strong id="ap-active-band">—</strong></div>
           <div><span>当前信道</span><strong id="ap-active-channel">—</strong></div>
+          <div><span>已保存认证</span><strong id="ap-configured-security">—</strong></div>
+          <div><span>运行认证（接口报告）</span><strong id="ap-active-security">—</strong></div>
         </div>
         <div id="ap-capability-notice" class="settings-warning" role="status" hidden></div>
-        <div class="power-actions"><button id="ap-repair-interface" class="secondary compact" type="button" hidden>修复 AP 接口</button></div>
+        <div class="power-actions"><button id="ap-repair-interface" class="secondary compact" type="button" hidden data-i18n="修复 AP 接口">修复 AP 接口</button></div>
         <form id="ap-form" class="settings-card settings-form">
           <div class="form-grid">
-            <label>热点名称（SSID）<input id="ap-ssid" maxlength="32" required></label>
-            <label>设置新密码<input id="ap-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="留空表示不修改"></label>
+            <label data-i18n="热点名称（SSID）">热点名称（SSID）<input id="ap-ssid" maxlength="32" required></label>
+            <label data-i18n="设置新密码">设置新密码<input id="ap-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="留空表示不修改" data-i18n-placeholder="留空表示不修改"></label>
+            <label>安全认证方式<select id="ap-security" aria-describedby="ap-security-detail"><option value="" data-i18n="保留当前认证配置">保留当前认证配置</option></select></label>
             <label>首选频段<select id="ap-band"><option value="a">5 GHz</option><option value="bg">2.4 GHz</option></select></label>
             <label>首选信道<select id="ap-channel"></select></label>
           </div>
           <p id="ap-channel-detail" class="muted">首选配置用于热点独立运行；受网卡并发能力约束时，当前工作信道可能跟随上游 WiFi。</p>
-          <div class="toggle-row"><label><input id="ap-enabled" type="checkbox"> 启用热点</label><label><input id="ap-autoconnect" type="checkbox"> 开机自动启动</label></div>
-          <div class="form-actions"><p class="muted">应用后手机可能需要使用新的名称或密码重新连接。</p><button class="primary" type="submit">保存并应用</button></div>
+          <p id="ap-security-detail" class="muted">推荐 WPA2-Personal（AES）以兼容车机；WPA3 需要网卡、驱动和系统共同支持，启动失败不会自动降级。更改认证后，终端可能需要忘记网络再连接。</p>
+          <div class="toggle-row"><label><input id="ap-enabled" type="checkbox" data-i18n="启用热点"> 启用热点</label><label><input id="ap-autoconnect" type="checkbox" data-i18n="开机自动启动"> 开机自动启动</label></div>
+          <div class="form-actions"><p class="muted">应用后手机可能需要使用新的名称或密码重新连接。</p><button class="primary" type="submit" data-i18n="保存并应用">保存并应用</button></div>
         </form>
       </section>
 
       <section id="storage-settings-section" class="settings-section" aria-labelledby="storage-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-settings-title">外接存储</h2></div><span id="storage-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-settings-title">外接存储</h2></div><span id="storage-status" class="badge" data-i18n="读取中">读取中</span></div>
         <div class="settings-warning">初始化会擦除目标整盘。系统会列出具有稳定序列号、未被系统使用的 USB 存储设备和 NVMe 数据盘；TF 系统盘、已挂载盘、swap 盘和容量不足的盘不会列出。</div>
         <article class="settings-card">
           <div class="settings-card-head"><div><h3>存储设备</h3><p>已完成初始化的设备会同时登记在 TF 系统盘和数据盘内；插拔后由状态机自动解绑或恢复车机存储。</p></div><button id="storage-refresh" class="secondary compact" type="button">扫描设备</button></div>
-          <div id="storage-device-list" class="storage-device-list"><p class="empty-state">正在读取…</p></div>
+          <div id="storage-device-list" class="storage-device-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
         <article class="settings-card power-card">
           <div><h3>存储健康与兼容性</h3><p id="storage-benchmark-detail">性能体检会在首次初始化的空数据盘上模拟六路分钟文件写入。</p><p id="storage-fragmentation-detail">碎片诊断按需读取外层 XFS extent；日常打开设置页不会扫描整块镜像。</p></div>
@@ -340,7 +391,7 @@
       </section>
 
       <section id="settings-panel-4" class="settings-section" aria-labelledby="maintenance-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-settings-title">媒体写入恢复方式</h2></div><span id="maintenance-status" class="badge" data-i18n="读取中">读取中</span></div>
         <article class="settings-card power-card">
           <div><h3>媒体自动断开与温重启</h3><p>启用后，录像删除会在一次维护中完成批量删除和空间回收，再自动温重启恢复 Gadget。上传文件本身只会暂存，不会触发重启。</p><p id="snapshot-reserve-detail" class="muted">正在读取快照预留空间…</p></div>
           <div class="power-actions"><button id="snapshot-reserve-repair" class="primary" type="button">修复快照预留空间</button><button id="snapshot-reserve-cancel" class="secondary" type="button" hidden>安全放弃修复</button><button id="storage-reclaim" class="secondary" type="button">回收历史旧空间</button><button id="maintenance-auto-recovery" class="maintenance-toggle" type="button" aria-pressed="false"><i aria-hidden="true"></i><span><strong id="maintenance-toggle-title">媒体自动恢复已禁用</strong><small id="maintenance-toggle-detail">点击后启用</small></span></button></div>
@@ -349,7 +400,7 @@
       </section>
 
       <section class="settings-section" aria-labelledby="export-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">EXPORTS</p><h2 id="export-settings-title">导出文件</h2></div><span id="export-retention-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">EXPORTS</p><h2 id="export-settings-title">导出文件</h2></div><span id="export-retention-status" class="badge" data-i18n="读取中">读取中</span></div>
         <article class="settings-card export-settings-card">
             <div class="settings-card-head"><div><h3>下载后的保留方式</h3><p>录像准备、导出和成品均使用系统盘；可再次下载的历史文件会占用空间，保留数量超出时会自动清理最旧文件。</p></div></div>
           <div class="export-retention-controls">
@@ -360,16 +411,16 @@
             <p class="muted">重复导出会复用已准备的原始录像；正在使用的文件不会清理。空间紧张时闲置缓存可能提前释放，历史成品按上面的保留方式管理。</p>
           <div class="form-actions"><p id="export-settings-detail" class="muted">正在读取导出策略…</p><button id="export-settings-save" class="primary" type="button">保存导出设置</button></div>
             <div class="export-history-head"><div><h3>历史导出</h3><p>只显示仍可再次下载的成品；升级前的历史文件仍保留原存储位置。</p></div><button id="export-history-refresh" class="secondary compact" type="button">刷新历史</button></div>
-          <div id="export-history-list" class="export-history-list"><p class="empty-state">正在读取…</p></div>
+          <div id="export-history-list" class="export-history-list"><p class="empty-state" data-i18n="正在读取…">正在读取…</p></div>
         </article>
       </section>
 
       <section id="settings-panel-6" class="settings-section" aria-labelledby="fan-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">THERMAL &amp; FAN</p><h2 id="fan-settings-title">散热与风扇</h2></div><span id="fan-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">THERMAL &amp; FAN</p><h2 id="fan-settings-title" data-i18n="散热与风扇">散热与风扇</h2></div><span id="fan-status" class="badge" data-i18n="读取中">读取中</span></div>
         <article class="settings-card fan-settings-card">
           <div class="fan-live-grid"><div><span>CPU 温度</span><strong id="fan-temperature">—</strong></div><div><span>当前场景</span><strong id="fan-scene">—</strong></div><div><span>温度请求</span><strong id="fan-temperature-request">—</strong></div><div><span>最终 PWM</span><strong id="fan-output">—</strong></div></div>
           <label class="fan-range"><span><strong>最大转速限制</strong><small>建议将最大转速控制在 0.45W 功耗以内</small></span><input id="fan-maximum" type="range" min="0" max="100" step="5" value="50"><output id="fan-maximum-output">50%</output></label>
-          <div class="fan-mode-head"><div><h3>温度转速调节</h3><p>自动使用 TeslaBox 推荐曲线；手动允许设置四个温度档位。温度与场景取较高请求后，仍需乘以上方最大转速限制。</p></div><div class="segmented-control"><button id="fan-mode-automatic" type="button">自动</button><button id="fan-mode-manual" type="button">手动</button></div></div>
+          <div class="fan-mode-head"><div><h3>温度转速调节</h3><p>自动使用 TeslaBox 推荐曲线；手动允许设置四个温度档位。温度与场景取较高请求后，仍需乘以上方最大转速限制。</p></div><div class="segmented-control"><button id="fan-mode-automatic" type="button" data-i18n="自动">自动</button><button id="fan-mode-manual" type="button" data-i18n="手动">手动</button></div></div>
           <div id="fan-manual-levels" class="fan-levels" hidden></div>
           <div class="fan-scenes"><h3>场景转速</h3><div id="fan-scene-controls" class="fan-scene-grid"></div></div>
           <div class="form-actions"><p id="fan-detail" class="muted">正在读取风扇控制状态…</p><button id="fan-save" class="primary" type="button">保存风扇设置</button></div>
@@ -377,7 +428,7 @@
       </section>
 
       <section id="settings-panel-7" class="settings-section security-section" aria-labelledby="security-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">SECURITY</p><h2 id="security-title">安全与账户</h2></div><span id="password-status" class="badge">密码已设置</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">SECURITY</p><h2 id="security-title" data-i18n="安全与账户">安全与账户</h2></div><span id="password-status" class="badge">密码已设置</span></div>
         <article class="settings-card account-card">
           <div><h3>管理页面密码</h3><p>修改后会立即注销其他浏览器中的旧登录会话。请使用至少 8 个字符且容易记住的独立密码。</p></div>
           <div class="power-actions"><button id="password-change-open" class="secondary" type="button">修改密码</button></div>
@@ -385,7 +436,7 @@
       </section>
 
       <section id="settings-panel-8" class="settings-section update-section" aria-labelledby="update-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">SIGNED UPDATE</p><h2 id="update-title">系统更新</h2></div><span id="update-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">SIGNED UPDATE</p><h2 id="update-title" data-i18n="系统更新">系统更新</h2></div><span id="update-status" class="badge" data-i18n="读取中">读取中</span></div>
         <div id="runtime-components" hidden role="status"><strong>运行时组件</strong><p class="muted">已有组件会复用；首次安装或版本变化时自动获取。未就绪时录像和管理页仍可用。</p><ul id="runtime-components-list"></ul></div>
         <article class="settings-card update-card">
           <div class="update-summary">
@@ -409,8 +460,32 @@
 		<div class="settings-warning">更新包必须通过设备内置 Ed25519 公钥校验。正式新版可携带经过二次校验的 FFmpeg/MPP/RGA 媒体运行时；指定版本不会回退内核、驱动或 systemd，也不会主动降级媒体运行时。在线更新默认自动安全断开 USB Gadget，并在新程序健康检查通过后整机重启恢复；无需手动拔掉 OTG。</div>
       </section>
 
+      <section id="region-settings-section" class="settings-section" aria-labelledby="region-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">REGION</p><h2 id="region-settings-title" data-i18n="地区">地区</h2></div></div>
+        <form id="wireless-region-form" class="settings-card settings-form">
+          <p class="muted" data-i18n="仅设置无线使用地区，影响 WiFi 信道和发射功率规则，不改变界面语言或系统时区。国内版未配置时默认 CN；已有配置保留。变更可能断开 WiFi、热点及 CarPlay，建议通过网线操作。">仅设置无线使用地区，影响 WiFi 信道和发射功率规则，不改变界面语言或系统时区。国内版未配置时默认 CN；已有配置保留。变更可能断开 WiFi、热点及 CarPlay，建议通过网线操作。</p>
+          <div class="form-grid">
+            <label data-i18n="国家/地区代码">国家/地区代码<input id="wireless-region-country" maxlength="2" pattern="[A-Za-z]{2}|00" autocomplete="off" placeholder="CN" required aria-describedby="wireless-region-detail" list="wireless-region-options"></label>
+            <datalist id="wireless-region-options"><option value="CN" data-i18n="中国大陆">中国大陆</option><option value="HK" data-i18n="中国香港">中国香港</option><option value="MO" data-i18n="中国澳门">中国澳门</option><option value="TW" data-i18n="中国台湾">中国台湾</option><option value="US" data-i18n="美国">美国</option><option value="GB" data-i18n="英国">英国</option><option value="DE" data-i18n="德国">德国</option><option value="JP" data-i18n="日本">日本</option><option value="SG" data-i18n="新加坡">新加坡</option><option value="00" data-i18n="世界域（受限）">世界域（受限）</option></datalist>
+            <div><span data-i18n="已保存地区">已保存地区</span><strong id="wireless-region-configured">—</strong></div>
+            <div><span data-i18n="实际全局监管域">实际全局监管域</span><strong id="wireless-region-effective">—</strong></div>
+          </div>
+          <p id="wireless-region-phys" class="muted"></p>
+          <p id="wireless-region-detail" class="muted" role="status" data-i18n="正在核对实际监管域，不以已保存配置代替生效状态。">正在核对实际监管域，不以已保存配置代替生效状态。</p>
+          <div class="form-actions"><p class="muted" data-i18n="国家码不会解除网卡硬件、固件、DFS 或功率限制；不根据语言、时区或公网 IP 自动更改。">国家码不会解除网卡硬件、固件、DFS 或功率限制；不根据语言、时区或公网 IP 自动更改。</p><button id="wireless-region-save" class="secondary" type="submit" data-i18n="保存并应用地区">保存并应用地区</button></div>
+        </form>
+      </section>
+      <section id="language-settings-section" class="settings-section" aria-labelledby="language-settings-title">
+        <div class="settings-section-heading"><div><p class="eyebrow">LANGUAGE</p><h2 id="language-settings-title" data-i18n="语言">语言</h2></div></div>
+        <form id="language-settings-form" class="settings-card settings-form">
+          <label data-i18n="界面语言">界面语言<select id="interface-language"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
+          <p class="muted" data-i18n="语言设置保存到板子，所有客户端共用。保存后刷新当前页面，其他客户端下次刷新时生效；原始日志、文件名和 WiFi 名称不翻译，不改变无线地区或系统时区。">语言设置保存到板子，所有客户端共用。保存后刷新当前页面，其他客户端下次刷新时生效；原始日志、文件名和 WiFi 名称不翻译，不改变无线地区或系统时区。</p>
+          <p id="language-settings-detail" class="muted" role="status"></p>
+          <div class="form-actions"><button id="language-settings-save" class="secondary" type="submit" data-i18n="保存语言并刷新">保存语言并刷新</button></div>
+        </form>
+      </section>
       <section id="appearance-settings-section" class="settings-section" aria-labelledby="appearance-settings-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">APPEARANCE</p><h2 id="appearance-settings-title">页面设置</h2></div></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">APPEARANCE</p><h2 id="appearance-settings-title" data-i18n="页面设置">页面设置</h2></div></div>
         <article class="settings-card appearance-settings">
           <p class="muted">主题、显示大小、字体与兼容模式修改后立即生效，仅保存在当前浏览器。</p>
           <div class="display-scale-control">
@@ -436,34 +511,33 @@
       <section id="settings-panel-9" class="settings-section power-section" aria-labelledby="power-title">
         <div class="settings-section-heading"><div><p class="eyebrow">SYSTEM</p><h2 id="power-title">系统与电源</h2></div></div>
         <article class="settings-card power-card">
-          <div><h3>设备电源</h3><p>重启或关机会停止 TeslaBox 服务并断开车机 USB。关机后需要重新断电上电才能启动。</p></div>
+          <div><h3 data-i18n="设备电源">设备电源</h3><p>重启或关机会停止 TeslaBox 服务并断开车机 USB。关机后需要重新断电上电才能启动。</p></div>
           <div class="power-actions"><button id="reboot-button" class="secondary" type="button">重启设备</button><button id="shutdown-button" class="danger-button" type="button">关闭设备</button></div>
         </article>
       </section>
-        </div>
-      </div>
     </div>
 
     <div id="logs-page" class="page logs-page app-page" hidden>
       <section class="settings-hero logs-hero">
-        <div><p class="eyebrow">DIAGNOSTICS</p><h1>日志中心</h1><p class="hero-copy">查看 USB Gadget 生命周期、视频合成、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
+        <div><p class="eyebrow">DIAGNOSTICS</p><h1 data-i18n="日志中心">日志中心</h1><p class="hero-copy">查看 USB Gadget 生命周期、视频合成、TeslaBox 服务和网络恢复日志。页面只读取预设来源，并自动隐藏常见密码与令牌字段。</p></div>
         <div class="logs-hero-actions">
-          <label>下载内容<select id="logs-download-source"><option value="">完整诊断报告</option><option value="usb">USB 枚举</option><option value="media">视频与转码</option><option value="network">网络与热点</option><option value="application">TeslaBox 服务</option><option value="carplay">CarPlay 服务</option></select></label>
-          <button id="logs-download-report" class="primary" type="button">下载日志</button>
+          <label>下载内容<select id="logs-download-source"><option value="">完整诊断报告</option><option value="usb">USB 枚举</option><option value="media">视频与转码</option><option value="network">网络与热点</option><option value="application">TeslaBox 服务</option><option value="carplay">CarPlay 服务</option></select></label><button id="logs-download-report" class="primary" type="button">下载日志</button>
           <button id="logs-refresh" class="secondary" type="button">刷新日志</button>
         </div>
       </section>
       <div id="logs-notice" class="notice" role="status" aria-live="polite"></div>
 
+
+
       <section class="settings-section" aria-labelledby="usb-diagnostics-title">
-        <div class="settings-section-heading"><div><p class="eyebrow">USB GADGET</p><h2 id="usb-diagnostics-title">USB 识别状态</h2></div><span id="logs-usb-status" class="badge">读取中</span></div>
+        <div class="settings-section-heading"><div><p class="eyebrow">USB GADGET</p><h2 id="usb-diagnostics-title">USB 识别状态</h2></div><span id="logs-usb-status" class="badge" data-i18n="读取中">读取中</span></div>
         <div class="hardware-overview logs-overview" aria-label="USB Gadget 诊断摘要">
           <div><span>枚举状态</span><strong id="logs-usb-state">—</strong></div>
           <div><span>当前速率</span><strong id="logs-usb-speed">—</strong></div>
           <div><span>UDC 控制器</span><strong id="logs-udc">—</strong></div>
           <div><span>后端存储</span><strong id="logs-backing">—</strong></div>
-          <div><span>原厂 ADB Gadget</span><strong id="logs-radxa-adbd">读取中</strong></div>
-          <div><span>原厂 USB 网络</span><strong id="logs-radxa-usbnet">读取中</strong></div>
+          <div><span>原厂 ADB Gadget</span><strong id="logs-radxa-adbd" data-i18n="读取中">读取中</strong></div>
+          <div><span>原厂 USB 网络</span><strong id="logs-radxa-usbnet" data-i18n="读取中">读取中</strong></div>
         </div>
         <div id="logs-usb-warning" class="settings-warning" hidden></div>
         <div class="logs-actions usb-gadget-actions">
@@ -486,13 +560,12 @@
           <button type="button" data-log-source="usb" class="active">USB 枚举</button>
           <button type="button" data-log-source="media">视频与转码</button>
           <button type="button" data-log-source="application">TeslaBox 服务</button>
-          <button type="button" data-log-source="network">网络与热点</button>
-          <button type="button" data-log-source="carplay">CarPlay 服务</button>
+          <button type="button" data-log-source="network">网络与热点</button><button type="button" data-log-source="carplay">CarPlay 服务</button>
         </div>
         <aside id="logs-summary" class="logs-summary" hidden><strong>中文诊断摘要</strong><ul id="logs-summary-list"></ul><p>摘要用于快速定位常见问题；下面仍保留未经翻译的系统原文和错误码。</p></aside>
         <article class="settings-card logs-card">
           <div class="logs-meta" id="logs-meta">尚未读取日志</div>
-          <pre id="logs-output" class="logs-output" tabindex="0">正在读取…</pre>
+          <pre id="logs-output" class="logs-output" tabindex="0" data-i18n="正在读取…">正在读取…</pre>
         </article>
         <div class="settings-warning">复现问题后请尽快下载完整诊断报告；报告会同时收集当前与上一次启动的关键日志，适合直接发给维护者。内容可能包含设备名称、SSID、IP 地址和硬件标识，发送前仍请快速检查。</div>
       </section>
@@ -512,7 +585,7 @@
   </main>
 
   <section id="wifi-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="wifi-modal-title" hidden>
-    <div class="action-modal-backdrop" data-close-wifi></div><form id="wifi-connect-form" class="action-modal-card"><p class="eyebrow">CONNECT</p><h2 id="wifi-modal-title">连接 WiFi</h2><p id="wifi-modal-detail" class="muted"></p><label id="wifi-password-label">WiFi 密码<input id="wifi-password" type="password" minlength="8" maxlength="63" autocomplete="new-password"></label><label class="inline-check"><input id="wifi-autoconnect" type="checkbox" checked><span>设备启动或网络恢复后自动连接</span></label><div class="modal-actions"><button class="secondary" type="button" data-close-wifi>取消</button><button class="primary" type="submit">连接</button></div></form>
+    <div class="action-modal-backdrop" data-close-wifi></div><form id="wifi-connect-form" class="action-modal-card"><p class="eyebrow">CONNECT</p><h2 id="wifi-modal-title">连接 WiFi</h2><p id="wifi-modal-detail" class="muted"></p><label id="wifi-password-label">WiFi 密码<input id="wifi-password" type="password" minlength="8" maxlength="63" autocomplete="new-password"></label><label class="inline-check"><input id="wifi-autoconnect" type="checkbox" checked><span>设备启动或网络恢复后自动连接</span></label><div class="modal-actions"><button class="secondary" type="button" data-close-wifi data-i18n="取消">取消</button><button class="primary" type="submit" data-i18n="连接">连接</button></div></form>
   </section>
 
   <section id="wifi-ipv4-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="wifi-ipv4-modal-title" hidden>
@@ -520,20 +593,20 @@
     <form id="wifi-ipv4-form" class="action-modal-card wifi-ipv4-form">
       <p class="eyebrow">IPV4 SETTINGS</p><h2 id="wifi-ipv4-modal-title">WiFi IPv4 设置</h2>
       <p id="wifi-ipv4-modal-detail" class="muted"></p>
-      <label class="wifi-ipv4-mode-field">地址获取方式<select id="wifi-ipv4-mode"><option value="dhcp">DHCP（自动获取）</option><option value="static">静态 IPv4</option></select></label>
+      <label class="wifi-ipv4-mode-field">地址获取方式<select id="wifi-ipv4-mode"><option value="dhcp">DHCP（自动获取）</option><option value="static" data-i18n="静态 IPv4">静态 IPv4</option></select></label>
       <div id="wifi-ipv4-static-fields" class="form-grid wifi-ipv4-static-fields" hidden>
-        <label>IP 地址<input id="wifi-ipv4-address" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.20"></label>
+        <label data-i18n="IP 地址">IP 地址<input id="wifi-ipv4-address" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.20"></label>
         <label>子网掩码<input id="wifi-ipv4-mask" inputmode="decimal" autocomplete="off" placeholder="例如 255.255.255.0"></label>
-        <label>网关<input id="wifi-ipv4-gateway" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.1"></label>
+        <label data-i18n="网关">网关<input id="wifi-ipv4-gateway" inputmode="decimal" autocomplete="off" placeholder="例如 192.168.1.1"></label>
         <label>DNS 服务器<input id="wifi-ipv4-dns" autocomplete="off" placeholder="多个地址用逗号分隔"></label>
       </div>
       <p class="muted wifi-ipv4-help">配置按当前已保存的 WiFi 网络单独记忆。修改当前连接的地址会让本页面短暂断开，请通过新 IP 或 TeslaBox 热点重新访问。</p>
-      <div class="modal-actions"><button class="secondary" type="button" data-close-wifi-ipv4>取消</button><button class="primary" type="submit">保存 IPv4 设置</button></div>
+      <div class="modal-actions"><button class="secondary" type="button" data-close-wifi-ipv4 data-i18n="取消">取消</button><button class="primary" type="submit">保存 IPv4 设置</button></div>
     </form>
   </section>
 
   <section id="confirm-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
-    <div class="action-modal-backdrop" data-close-confirm></div><div class="action-modal-card"><p class="eyebrow">CONFIRM</p><h2 id="confirm-title">确认操作</h2><p id="confirm-message" class="muted"></p><div class="modal-actions"><button class="secondary" type="button" data-close-confirm>取消</button><button id="confirm-submit" class="danger-button" type="button">确认</button></div></div>
+    <div class="action-modal-backdrop" data-close-confirm></div><div class="action-modal-card"><p class="eyebrow">CONFIRM</p><h2 id="confirm-title">确认操作</h2><p id="confirm-message" class="muted"></p><div class="modal-actions"><button class="secondary" type="button" data-close-confirm data-i18n="取消">取消</button><button id="confirm-submit" class="danger-button" type="button" data-i18n="确认">确认</button></div></div>
   </section>
 
   <section id="password-modal" class="action-modal" role="dialog" aria-modal="true" aria-labelledby="password-modal-title" hidden>
@@ -545,7 +618,7 @@
       <label>新密码<input id="new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
       <label>确认新密码<input id="confirm-new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
       <p id="password-change-error" class="form-error" role="alert"></p>
-      <div class="modal-actions"><button id="password-change-close" class="secondary" type="button" data-close-password>取消</button><button id="password-change-submit" class="primary" type="submit">保存新密码</button></div>
+      <div class="modal-actions"><button id="password-change-close" class="secondary" type="button" data-close-password data-i18n="取消">取消</button><button id="password-change-submit" class="primary" type="submit">保存新密码</button></div>
     </form>
   </section>
 
@@ -564,7 +637,7 @@
       <label>输入设备序列号确认<input id="storage-confirm-serial" autocomplete="off" required></label>
       <label class="inline-check"><input id="storage-confirm-otg-disconnected" type="checkbox" required><span>我确认已经物理拔掉连接车机或电脑的 OTG 线</span></label>
       <label class="inline-check"><input id="storage-confirm-erase" type="checkbox" required><span>我确认目标设备中的全部数据可以被擦除</span></label>
-      <div class="modal-actions"><button class="secondary" type="button" data-close-storage>取消</button><button id="storage-init-submit" class="danger-button" type="submit">擦除并初始化</button></div>
+      <div class="modal-actions"><button class="secondary" type="button" data-close-storage data-i18n="取消">取消</button><button id="storage-init-submit" class="danger-button" type="submit">擦除并初始化</button></div>
     </form>
   </section>
 
@@ -624,7 +697,7 @@
               <div id="playback-left-blinker" class="telemetry-blinker" data-active="false" title="左转向灯"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.7 10.4 11 6.5c.7-.7 1.9-.2 1.9.8v2h4.6c1 0 1.8.8 1.8 1.8v1.8c0 1-.8 1.8-1.8 1.8h-4.6v2c0 1-1.2 1.5-1.9.8l-4.3-3.9a2.2 2.2 0 0 1 0-3.2Z"></path></svg></div>
               <div class="telemetry-speed">
                 <span class="telemetry-speed-reading"><strong id="playback-speed">—</strong><small>km/h</small></span>
-                <span id="playback-autopilot" class="telemetry-assistance" data-mode="off" title="辅助驾驶状态"><strong id="playback-autopilot-label">手动</strong></span>
+                <span id="playback-autopilot" class="telemetry-assistance" data-mode="off" title="辅助驾驶状态"><strong id="playback-autopilot-label" data-i18n="手动">手动</strong></span>
               </div>
               <div id="playback-right-blinker" class="telemetry-blinker" data-active="false" title="右转向灯"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m17.3 10.4-4.3-3.9c-.7-.7-1.9-.2-1.9.8v2H6.5c-1 0-1.8.8-1.8 1.8v1.8c0 1 .8 1.8 1.8 1.8h4.6v2c0 1 1.2 1.5 1.9.8l4.3-3.9a2.2 2.2 0 0 0 0-3.2Z"></path></svg></div>
               <div id="playback-brake" class="telemetry-item telemetry-brake" data-active="false" title="刹车松开">
@@ -696,9 +769,9 @@
         <fieldset class="export-camera-fieldset"><legend>导出视角</legend><div id="export-source-cameras" class="export-source-cameras" aria-label="选择原始录像视角"></div></fieldset>
         <p id="export-source-summary" class="muted export-source-summary"></p>
       </div>
-      <div id="export-task-status" class="export-task-status" hidden><strong id="export-state">正在排队</strong><progress id="export-progress" max="100" value="0"></progress><span id="export-detail" class="muted"></span></div>
+      <div id="export-task-status" class="export-task-status" hidden><strong id="export-state" data-i18n="正在排队">正在排队</strong><progress id="export-progress" max="100" value="0"></progress><span id="export-detail" class="muted"></span></div>
       <p id="export-error" class="form-error" role="alert"></p>
-      <div class="modal-actions"><button class="secondary" type="button" data-close-export>关闭</button><button id="export-cancel" class="secondary" type="button" hidden>取消任务</button><button id="export-source-direct" class="secondary" type="button" hidden>分别下载原文件</button><a id="export-download" class="primary" href="#" download hidden>下载视频</a><button id="export-submit" class="primary" type="submit">开始导出</button></div>
+      <div class="modal-actions"><button class="secondary" type="button" data-close-export data-i18n="关闭">关闭</button><button id="export-cancel" class="secondary" type="button" hidden data-i18n="取消任务">取消任务</button><button id="export-source-direct" class="secondary" type="button" hidden>分别下载原文件</button><a id="export-download" class="primary" href="#" download hidden>下载视频</a><button id="export-submit" class="primary" type="submit">开始导出</button></div>
     </form>
   </section>
 </body>

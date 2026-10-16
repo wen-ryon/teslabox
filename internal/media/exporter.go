@@ -74,6 +74,7 @@ type ExportRequest struct {
 	Mode            ExportMode        `json:"mode,omitempty"`
 	SessionID       string            `json:"session_id"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
+	SourceRevision  string            `json:"source_revision,omitempty"`
 	RangeStartAt    *time.Time        `json:"range_start_at,omitempty"`
 	RangeEndAt      *time.Time        `json:"range_end_at,omitempty"`
 	MomentIDs       []string          `json:"moment_ids,omitempty"`

@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaBox native wireless role preparation
+DefaultDependencies=no
+After=local-fs.target systemd-udev-trigger.service
+Before=NetworkManager.service network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/udevadm settle --timeout=15
+ExecStart=/usr/local/bin/teslabox network-roles-prepare
+TimeoutStartSec=45
+
+[Install]
+WantedBy=NetworkManager.service

@@ -6,4 +6,6 @@ toolchain go1.26.3
 
 require github.com/godbus/dbus/v5 v5.2.2
 
-require golang.org/x/sys v0.27.0
+require golang.org/x/sys v0.49.0
+
+require golang.org/x/net v0.61.0

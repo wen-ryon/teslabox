@@ -268,6 +268,7 @@ func TestWiFiStatusReportsActiveSSIDInsteadOfProfileName(t *testing.T) {
 		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no": "*:ExampleWiFi-5G:AA\\:BB\\:CC\\:DD\\:EE\\:01:80:161:WPA2\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.responses["nmcli --escape no -g GENERAL.STATE,GENERAL.CON-UUID device show wlan0"] = "100 (connected)\n" + upstreamUUID + "\n"
 
 	status, err := manager.WiFiStatus(context.Background())
 	if err != nil {
@@ -871,6 +872,7 @@ func TestWiFiStatusReportsRealAPSTAConcurrency(t *testing.T) {
 		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                                              "*:Home:AA\\:BB\\:CC\\:DD\\:EE\\:01:70:161:WPA2\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.responses["nmcli --escape no -g GENERAL.STATE,GENERAL.CON-UUID device show wlan0"] = "100 (connected)\n22222222-2222-2222-2222-222222222222\n"
 	status, err := manager.WiFiStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -898,6 +900,11 @@ func TestDisconnectWiFiOnlyDisconnectsCurrentClient(t *testing.T) {
 				"nmcli -t --escape yes -f DEVICE,TYPE,STATE device status": "ap0:wifi:connected\nwlan0:wifi:connected\n",
 			}}
 			manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if test.wantAction {
+				runner.responses["nmcli --escape no -g GENERAL.STATE,GENERAL.CON-UUID device show wlan0"] = "100 (connected)\n" + upstreamUUID + "\n"
+			} else {
+				runner.responses["nmcli --escape no -g GENERAL.STATE,GENERAL.CON-UUID device show wlan0"] = "30 (disconnected)\n--\n"
+			}
 			if err := manager.DisconnectWiFi(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -953,6 +960,7 @@ func TestConnectUsesBSSIDOnlyForCurrentActivation(t *testing.T) {
 			"Interface ap0\n\tssid TeslaBox-5G\n\ttype AP\n\tchannel 161\n",
 		},
 	}
+	runner.responses["/usr/sbin/iw dev wlan0 info"] = "Interface wlan0\n\ttype managed\n\tchannel 161\n"
 	request := ConnectRequest{UUID: upstreamUUID}
 	if err := manager.Connect(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -1380,6 +1388,7 @@ func TestReconcileAutoConnectFollowsActiveUpstreamChannel(t *testing.T) {
 		"nmcli -t --escape yes -f IN-USE,SSID,BSSID,SIGNAL,CHAN,SECURITY device wifi list ifname wlan0 --rescan no":                                                                                                              "*:Home:AA\\:BB\\:CC\\:DD\\:EE\\:09:78:161:WPA2\n",
 	}}
 	manager := New(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.responses["nmcli --escape no -g GENERAL.STATE,GENERAL.CON-UUID device show wlan0"] = "100 (connected)\n22222222-2222-2222-2222-222222222222\n"
 	manager.sameWirelessPHY = func(_, _ string) (bool, bool) { return true, true }
 	manager.wirelessPHYInfo = func(context.Context, string) (string, error) {
 		return "valid interface combinations:\n\t * #{ managed } <= 1, #{ AP } <= 1, total <= 2, #channels <= 1\n\t* 5745 MHz [149] (20.0 dBm)\n\t* 5805 MHz [161] (20.0 dBm)\n", nil
@@ -1409,7 +1418,7 @@ func TestReconcileAutoConnectFollowsActiveUpstreamChannel(t *testing.T) {
 	}
 }
 
-func TestReconcileAutoConnectIfNeededSkipsFullInventoryForHealthyLink(t *testing.T) {
+func TestReconcileAutoConnectIfNeededProtectsRolesWithoutReactivatingHealthyLink(t *testing.T) {
 	runner := &fakeRunner{responses: map[string]string{
 		"nmcli -g GENERAL.STATE device show wlan0": "100 (connected)\n",
 	}}
@@ -1423,8 +1432,13 @@ func TestReconcileAutoConnectIfNeededSkipsFullInventoryForHealthyLink(t *testing
 	if recovered || ssid != "" {
 		t.Fatalf("healthy link recovery = (%t, %q), want no recovery", recovered, ssid)
 	}
-	if len(runner.calls) != 1 || runner.calls[0] != "nmcli -g GENERAL.STATE device show wlan0" {
-		t.Fatalf("healthy link calls = %v, want only lightweight state query", runner.calls)
+	if !containsCall(runner.calls, "nmcli -g GENERAL.STATE device show wlan0") {
+		t.Fatalf("健康连接没有检查实际状态：%v", runner.calls)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "wifi list") || strings.Contains(call, "wifi rescan") || strings.Contains(call, "connection up") {
+			t.Fatalf("健康STA不应被后备检查扫描或重新激活：%s", call)
+		}
 	}
 }
 

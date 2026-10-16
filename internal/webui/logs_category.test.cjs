@@ -9,7 +9,7 @@ const html = fs.readFileSync(path.join(__dirname,"assets","index.html"),"utf8");
 function model(category, response) {
   const button = {textContent:"下载日志",disabled:false};
   const calls = [], downloads = [], notices = [], revoked = [];
-  const context = vm.createContext({
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,
     $:id => id === "logs-download-source" ? {value:category} : button,
     encodeURIComponent,Date,URLSearchParams,
     // 本轮播放编号只用于完整报告，分类下载仍保持独立。

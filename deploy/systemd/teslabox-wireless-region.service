@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaBox wireless regulatory region
+After=local-fs.target systemd-modules-load.service
+Before=NetworkManager.service teslabox-ap.service
+ConditionPathExists=/etc/teslabox/wireless-country
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/teslabox-wireless-region.sh
+TimeoutStartSec=10
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,7 @@ package deviceadmin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -173,14 +174,37 @@ func (m *Manager) activateSavedWiFi(ctx context.Context, uuid, interfaceName str
 				return nil
 			}
 			if networkManagerActivationInProgress(state) {
-				waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				waitCtx, cancel := context.WithTimeout(ctx, recoveryTimeout)
 				defer cancel()
-				return m.waitWiFiActivation(waitCtx, interfaceName)
+				return m.waitWiFiUUIDActivation(waitCtx, interfaceName, uuid)
 			}
 		}
 	}
 	_, err = m.run(ctx, "nmcli", args...)
+	if isNMCLIWaitTimeout(err) {
+		current, queryErr := m.run(ctx, "nmcli", "-g", "GENERAL.CON-UUID", "device", "show", interfaceName)
+		if queryErr == nil && strings.TrimSpace(string(current)) == uuid {
+			// CLI 的短等待结束不代表 NM 的认证/DHCP 已结束；等待原激活，不能重复 up。
+			waitCtx, cancel := context.WithTimeout(ctx, recoveryTimeout)
+			defer cancel()
+			return m.waitWiFiUUIDActivation(waitCtx, interfaceName, uuid)
+		}
+	}
 	return err
+}
+
+func (m *Manager) waitWiFiUUIDActivation(ctx context.Context, interfaceName, uuid string) error {
+	if err := m.waitWiFiActivation(ctx, interfaceName); err != nil {
+		return err
+	}
+	current, err := m.run(ctx, "nmcli", "-g", "GENERAL.CON-UUID", "device", "show", interfaceName)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(current)) != uuid {
+		return errors.New("无线激活期间连接已变化，目标网络未确认连接")
+	}
+	return nil
 }
 
 func (m *Manager) waitWiFiActivation(ctx context.Context, interfaceName string) error {

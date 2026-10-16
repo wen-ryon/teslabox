@@ -57,9 +57,11 @@ func (e *Exporter) prepareQueuedJob(parent context.Context, job exportJob) {
 	if err == nil {
 		err = copyCtx.Err()
 	}
+	copyCause := context.Cause(copyCtx)
 	cancelCopy()
 	err = exportContextError(ctx, err)
 	if err != nil {
+		e.logger.Warn("录像导出准备失败", "task_id", job.id, "snapshot_id", job.source.SnapshotVersion, "error", err, "context_cause", copyCause)
 		if lease != nil {
 			lease.Release()
 		}

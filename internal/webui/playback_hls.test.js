@@ -12,7 +12,7 @@ const reply = () => ({ok:true, json:async () => ({session_url:base, url:base+"/i
 function setup(agent, fetch) {
   const intervals = new Map();
   let next = 0;
-  const context = vm.createContext({navigator:{userAgent:agent}, location:{href:"http://box/"},
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,navigator:{userAgent:agent}, location:{href:"http://box/"},
     URL, AbortController, fetch, setInterval:fn => {intervals.set(++next, fn); return next;},
     clearInterval:id => intervals.delete(id)});
   vm.runInContext(script, context);

@@ -9,7 +9,7 @@ test('分类下载忽略旧播放编号，完整报告保留播放编号',async(
   for(const category of ['', 'usb','media','network','application','carplay']){
     const button={textContent:'下载日志',disabled:false};
     const calls=[];
-    const context={URL,URLSearchParams,Blob,playbackProbeLastID:'a'.repeat(32),
+    const context={TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,URL,URLSearchParams,Blob,playbackProbeLastID:'a'.repeat(32),
       $:id=>id==='logs-download-source'?{value:category}:button,
       requestResponse:async path=>{calls.push(path);return {ok:true,headers:{get:()=>''},blob:async()=>new Blob(['log'])};},
       document:{createElement:()=>({click(){},remove(){}}),body:{append(){}}},window:{setTimeout:fn=>fn()},showToast(){}};

@@ -47,15 +47,16 @@ type Quality struct {
 
 // Request 固定一次手动选择，画质可覆盖目标的默认设置。
 type Request struct {
-	TargetID    string   `json:"target_id"`
-	SessionID   string   `json:"session_id"`
-	SnapshotID  string   `json:"snapshot_id"`
-	MomentIDs   []string `json:"moment_ids"`
-	Cameras     []string `json:"cameras"`
-	Quality     *Quality `json:"quality,omitempty"`
-	AutoEventID string   `json:"auto_event_id,omitempty"`
-	AutoKey     string   `json:"auto_key,omitempty"`
-	Role        string   `json:"role,omitempty"`
+	TargetID       string   `json:"target_id"`
+	SessionID      string   `json:"session_id"`
+	SnapshotID     string   `json:"snapshot_id"`
+	SourceRevision string   `json:"source_revision,omitempty"`
+	MomentIDs      []string `json:"moment_ids"`
+	Cameras        []string `json:"cameras"`
+	Quality        *Quality `json:"quality,omitempty"`
+	AutoEventID    string   `json:"auto_event_id,omitempty"`
+	AutoKey        string   `json:"auto_key,omitempty"`
+	Role           string   `json:"role,omitempty"`
 }
 
 // Input 只允许 API 在受保护快照中解析文件路径。

@@ -8,19 +8,19 @@ const html = fs.readFileSync(path.join(__dirname, 'assets/index.html'), 'utf8');
 
 test('恢复原版完整录像入口，不请求窗口列表或拍摄时间导出',()=>{
   assert.ok(source.includes('new URLSearchParams({clip_type: "recent", limit: "1000"})'));
-  assert.ok(source.includes('open.textContent = "打开完整录像"'));
+  assert.ok(source.includes('open.textContent = t("打开完整录像")'));
   for(const removed of ['windowed=true','createRecentNavigation','range_start_at','recentPlaybackWindows'])assert.ok(!source.includes(removed),removed);
   assert.ok(!html.includes('recent-player-navigation'));
 });
 
 test('完整录像的导出范围采用原会话真实总时长',()=>{
-  const context=vm.createContext({activeSession:{start_at:'2026-01-01T00:00:00Z',duration_seconds:86400}});
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,activeSession:{start_at:'2026-01-01T00:00:00Z',duration_seconds:86400}});
   vm.runInContext(source.slice(source.indexOf('function exportTimeBounds('),source.indexOf('function initializeExportRange(')),context);
   assert.equal(context.exportTimeBounds().duration,86400);
 });
 
 test('近期和归档视频流都绑定详情快照',()=>{
-  const context=vm.createContext({activeSession:{snapshot_id:'one'}});
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,activeSession:{snapshot_id:'one'}});
   vm.runInContext(source.slice(source.indexOf('function sessionMediaURL('),source.indexOf('async function openSessionPlayer(')),context);
   assert.equal(context.sessionMediaURL('/content'),'/content?snapshot_id=one');
   context.activeSession={};assert.equal(context.sessionMediaURL('/content'),'/content');
@@ -28,7 +28,7 @@ test('近期和归档视频流都绑定详情快照',()=>{
 
 test('快速打开不同录像时旧请求不能覆盖新请求',async()=>{
   const requests=[];const notices=[];
-  const context=vm.createContext({sessionOpenSequence:0,sessionOpening:false,sessionOpenController:null,AbortController,activeSession:null,playerModal:{hidden:true},request:()=>new Promise((resolve,reject)=>requests.push({resolve,reject})),setNotice:message=>notices.push(message)});
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,sessionOpenSequence:0,sessionOpening:false,sessionOpenController:null,AbortController,activeSession:null,playerModal:{hidden:true},request:()=>new Promise((resolve,reject)=>requests.push({resolve,reject})),setNotice:message=>notices.push(message)});
   vm.runInContext(source.slice(source.indexOf('async function openSessionPlayer('),source.indexOf('function renderCameraSwitcher(')),context);
   const first=context.openSessionPlayer({id:'old'},'front',0,'single');
   const second=context.openSessionPlayer({id:'new'},'front',0,'single');
@@ -39,7 +39,7 @@ test('快速打开不同录像时旧请求不能覆盖新请求',async()=>{
 
 test('播放遇到旧快照时自动刷新并按事件目录重试',async()=>{
   const requests=[];const notices=[];
-  const context=vm.createContext({
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,
     sessionOpenSequence:0,sessionOpening:false,sessionOpenController:null,AbortController,
     activeSession:null,playerModal:{hidden:true},recentSessions:[],archivedSessions:[],
     request:(path)=>new Promise((resolve,reject)=>requests.push({path,resolve,reject})),
@@ -59,7 +59,7 @@ test('播放遇到旧快照时自动刷新并按事件目录重试',async()=>{
 
 test('播放遇到旧快照且目录已删除时自动移除旧卡片',async()=>{
   const notices=[];
-  const context=vm.createContext({
+  const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,
     sessionOpenSequence:0,sessionOpening:false,sessionOpenController:null,AbortController,
     activeSession:null,playerModal:{hidden:true},recentSessions:[],archivedSessions:[],
     request:async()=>{const error=new Error('录像已更新');error.status=409;throw error},

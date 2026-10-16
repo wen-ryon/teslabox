@@ -34,9 +34,11 @@ import (
 	"github.com/wen-ryon/teslabox/internal/mediaassets"
 	"github.com/wen-ryon/teslabox/internal/mediabundle"
 	"github.com/wen-ryon/teslabox/internal/nasupload"
+	"github.com/wen-ryon/teslabox/internal/networkroles"
 	"github.com/wen-ryon/teslabox/internal/onboarding"
 	"github.com/wen-ryon/teslabox/internal/platform"
 	"github.com/wen-ryon/teslabox/internal/recordingcache"
+	"github.com/wen-ryon/teslabox/internal/regulatory"
 	"github.com/wen-ryon/teslabox/internal/runtimecomponents"
 	"github.com/wen-ryon/teslabox/internal/service"
 	mediasnapshot "github.com/wen-ryon/teslabox/internal/snapshot"
@@ -46,6 +48,7 @@ import (
 	"github.com/wen-ryon/teslabox/internal/storagepolicy"
 	"github.com/wen-ryon/teslabox/internal/system"
 	"github.com/wen-ryon/teslabox/internal/teslacam"
+	"github.com/wen-ryon/teslabox/internal/uipreferences"
 	"github.com/wen-ryon/teslabox/internal/updater"
 	buildversion "github.com/wen-ryon/teslabox/internal/version"
 	"github.com/wen-ryon/teslabox/internal/webauth"
@@ -57,11 +60,28 @@ import (
 const teslaboxFSCKExFATPath = "/opt/teslabox/media/bin/teslabox-fsck.exfat"
 
 func main() {
+	if len(os.Args) == 2 {
+		for _, action := range []string{"prepare", "env"} {
+			if os.Args[1] == "network-roles-"+action {
+				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+				err := networkroles.RunDefault(ctx, action, os.Stdout)
+				cancel()
+				if err != nil {
+					slog.Error("无线角色准备失败", "error", err)
+					os.Exit(1)
+				}
+				return
+			}
+		}
+	}
 	if filepath.Base(os.Args[0]) == "teslaboxctl" {
 		os.Exit(automation.RunCLI(context.Background(), automation.DefaultSocketPath, os.Args[1:], os.Stdout, os.Stderr))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "automation" {
 		os.Exit(automation.RunCLI(context.Background(), automation.DefaultSocketPath, os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) == 2 && os.Args[1] == "wireless-region-init" {
+		os.Exit(initializeWirelessRegion())
 	}
 	processStartedAt := time.Now()
 	reloadCh, stopReloadSignals := subscribeReloadSignals()
@@ -128,6 +148,27 @@ func main() {
 	}
 
 	runner := system.NewOSRunner()
+	wirelessRegion := regulatory.New(runner, regulatory.DefaultPaths())
+	regionCtx, regionCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := wirelessRegion.Initialize(regionCtx); err != nil {
+		logger.Warn("保留既有无线地区配置，初始化未完成", "reason_code", "regulatory_config_invalid", "error", err)
+	} else if err := wirelessRegion.Apply(regionCtx); err != nil {
+		logger.Warn("无线地区已保存但尚未确认生效", "reason_code", "regulatory_apply_failed", "error", err)
+	}
+	regionCancel()
+	regionMigrationCtx, regionMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, regionMigrationErr := hostmigration.EnsureRegulatoryComponents(regionMigrationCtx,
+		hostmigration.RegulatoryComponentPaths{Script: "/usr/local/libexec/teslabox-wireless-region.sh", Unit: "/etc/systemd/system/teslabox-wireless-region.service"}, runner)
+	regionMigrationCancel()
+	if regionMigrationErr != nil {
+		logger.Warn("保留自定义无线组件或无法安装监管域启动服务", "error", regionMigrationErr)
+	}
+	rolesCtx, rolesCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, rolesErr := hostmigration.EnsureNativeRoleComponents(rolesCtx, hostmigration.DefaultNativeRolePaths(), runner)
+	rolesCancel()
+	if rolesErr != nil {
+		logger.Warn("无线角色启动保护未就绪，当前连接保持不变", "reason_code", "native_roles_components_pending", "error", rolesErr)
+	}
 	if shortcutErr := automation.EnsureCLIShortcut(automation.DefaultCLIPath, automation.DefaultTargetPath); shortcutErr != nil {
 		logger.Warn("无法安装 teslaboxctl 命令，兼容入口仍可使用", "error", shortcutErr)
 	}
@@ -326,6 +367,7 @@ func main() {
 		carPlaySettingsPath = "/var/lib/teslabox-system/carplay-settings.json"
 	}
 	deviceAdmin := deviceadmin.New(runner, logger, deviceadmin.NetworkConfig{
+		Regulatory:           wirelessRegion,
 		CarPlaySettingsPath:  carPlaySettingsPath,
 		WiFiInterface:        cfg.WiFiInterface,
 		APInterface:          cfg.APInterface,
@@ -391,7 +433,8 @@ func main() {
 		rclonePath = "/opt/teslabox/backup/bin/rclone"
 	}
 	nasUploads, err := nasupload.New(nasupload.Config{
-		Root: uploadRoot, Cache: recordingCache,
+		Logger: logger,
+		Root:   uploadRoot, Cache: recordingCache,
 		Transport: &nasupload.Rclone{Executable: rclonePath, WorkDir: uploadRoot},
 		Processor: media.NewNASProcessor(runner, mediaInspector, cfg.FFmpegPath),
 	})
@@ -472,6 +515,7 @@ func main() {
 		manager,
 		logger,
 		api.WithDeviceAdmin(deviceAdmin),
+		api.WithEthernetAdmin(deviceadmin.NewEthernetManager(runner)),
 		api.WithStorageAdmin(storageAdmin),
 		api.WithGadgetAdmin(manager),
 		api.WithMediaInspector(mediaInspector),
@@ -491,8 +535,9 @@ func main() {
 		apiHandler = runtimeManager.Gate(apiHandler)
 	}
 	var webOptions []webui.HandlerOption
+	webOptions = append(webOptions, webui.WithLanguageSettings(uipreferences.New(uipreferences.DefaultPath)))
 	if cfg.CarPlayBrowserToken != "" {
-		webOptions = append(webOptions, webui.WithCarPlay(webui.NewCarPlayProxy(cfg.CarPlayBrowserToken)))
+		webOptions = append(webOptions, webui.WithCarPlay(webui.NewCarPlayProxy(cfg.CarPlayBrowserToken, logger)))
 		if cfg.HTTPSDomain != "" {
 			webOptions = append(webOptions, webui.WithCarPlayHome(cfg.HTTPSDomain))
 		}

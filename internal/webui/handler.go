@@ -44,6 +44,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 		option(&settings)
 	}
 	if settings.carplay != nil {
+		mux.Handle("POST /api/v1/diagnostics/carplay-connection", requireAuth(carPlayConnectionDiagnostics(logger), authenticator))
 		mux.HandleFunc("GET /carplay-return", func(w http.ResponseWriter, r *http.Request) {
 			target := "/carplay"
 			host := r.Host
@@ -57,7 +58,7 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 			http.Redirect(w, r, target, http.StatusSeeOther)
 		})
 		mux.HandleFunc("GET connman.vn.cloud.tesla.cn/online/status.html", carPlayConnectivityHandler(logger))
-		mux.HandleFunc("GET /carplay", serveEmbedded(assetFS, "carplay.html", "text/html; charset=utf-8", "no-store"))
+		mux.HandleFunc("GET /carplay", serveLanguagePage(assetFS, "carplay.html", settings.language))
 		mux.HandleFunc("GET /carplay/app.js", serveEmbedded(assetFS, "carplay.js", "text/javascript; charset=utf-8", "no-cache"))
 		mux.HandleFunc("GET /carplay/app.css", serveEmbedded(assetFS, "carplay.css", "text/css; charset=utf-8", "no-cache"))
 		for _, name := range []string{"canvas-player", "canvas-renderer", "canvas-session", "canvas-worker", "touch", "host-ui", "connection", "display"} {
@@ -65,8 +66,8 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 		}
 		mux.Handle("GET /carplay/", requireAuth(settings.carplay, authenticator))
 	}
-	managementPage := serveEmbedded(assetFS, "index.html", "text/html; charset=utf-8", "no-store")
-	carplayPage := serveEmbedded(assetFS, "carplay.html", "text/html; charset=utf-8", "no-store")
+	managementPage := serveLanguagePage(assetFS, "index.html", settings.language)
+	carplayPage := serveLanguagePage(assetFS, "carplay.html", settings.language)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if name, _, err := net.SplitHostPort(host); err == nil {
@@ -81,7 +82,15 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 	})
 	mux.HandleFunc("GET /app.css", serveEmbedded(assetFS, "app.css", "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /runtime-components.js", serveEmbedded(assetFS, "runtime-components.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /internet-status.js", serveEmbedded(assetFS, "internet-status.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /app.js", serveEmbedded(assetFS, "app.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /wireless-region.js", serveEmbedded(assetFS, "wireless-region.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /i18n.js", serveI18nScript(true))
+	// 兼容仍缓存旧 HTML 的客户端，但不再维护第二份词库。
+	mux.HandleFunc("GET /i18n-extra.js", serveI18nScript(false))
+	mux.HandleFunc("GET /language-settings.js", serveEmbedded(assetFS, "language-settings.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /shared-network.js", serveEmbedded(assetFS, "shared-network.js", "text/javascript; charset=utf-8", "no-cache"))
+	mux.HandleFunc("GET /ethernet.js", serveEmbedded(assetFS, "ethernet.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /page-display.js", serveEmbedded(assetFS, "page-display.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /settings-layout.js", serveEmbedded(assetFS, "settings-layout.js", "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("GET /carplay-settings.js", serveEmbedded(assetFS, "carplay-settings.js", "text/javascript; charset=utf-8", "no-cache"))
@@ -176,6 +185,9 @@ func NewHandler(apiHandler http.Handler, authenticator Authenticator, logger *sl
 		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 	})
 	protectedAPI := requireAuth(apiHandler, authenticator)
+	if settings.language != nil {
+		registerLanguageRoutes(mux, settings.language, authenticator)
+	}
 	mux.Handle("GET /api/v1/system", requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, systemCollector.Collect(r.Context()))
 	}), authenticator))

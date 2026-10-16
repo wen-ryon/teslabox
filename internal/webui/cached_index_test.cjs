@@ -5,7 +5,7 @@ const vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'assets/app.js'),'utf8');
 test('历史预览不允许进入播放或批量删除',async()=>{
  const notices=[];
- const context=vm.createContext({setNotice:msg=>notices.push(msg)});
+ const context=vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,setNotice:msg=>notices.push(msg)});
  vm.runInContext(source.slice(source.indexOf('async function openSessionPlayer('),source.indexOf('function renderCameraSwitcher(')),context);
  await context.openSessionPlayer({cached:true});assert.equal(notices.length,1);
  vm.runInContext(source.slice(source.indexOf('function isSelectableRecordingSession('),source.indexOf('function selectableRecordingSessions(')),context);

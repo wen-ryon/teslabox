@@ -10,7 +10,7 @@ test('动态编码配置不替换画布或销毁播放器，确认使用正确�
   let replacements = 0;
   const canvas = {hidden: true, style: {}, replaceWith() {replacements++;}};
   const elements = {'#screen': {hidden: true, removeAttribute() {}}, '#notice': {}, '#login': {}, '#canvas': canvas, '#compatibility': {}};
-  const context = vm.createContext({
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,
     document: {querySelector: selector => elements[selector], body: {classList: {add: name => classes.add(name), remove: name => classes.delete(name)}}, createElement: () => ({})},
     window: {}, VideoDecoder() {}, isSecureContext: true, performance: {now: () => 10000}, setTimeout() {},
     TeslaBoxHostUI: {create: () => ({})},

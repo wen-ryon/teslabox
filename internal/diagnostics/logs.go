@@ -44,6 +44,7 @@ var (
 		"snapshot", "radxa-adbd", "radxa-usbnet",
 	}
 	mediaKeywords = []string{
+		"录像上传准备失败", "录像导出准备失败", "录像暂存", "录像源在准备期间发生变化",
 		"ffmpeg", "实时合成", "合成录像", "转码", "视频流", "播放诊断", "客户端播放",
 		"视频导出", "导出任务", "rkmpp", "mpp", "rga", "vpu", "decoder", "encoder", "h264", "h265", "hevc", "avc", "avfilter", "filtergraph",
 	}
@@ -179,6 +180,9 @@ func (m *Manager) bundle(ctx context.Context, probeID string) (Bundle, error) {
 	writePlaybackProbeJournalSection(ctx, m.runner, &report, probeID)
 
 	commands := []diagnosticCommand{
+		{title: "无线地区持久配置", name: "cat", args: []string{"/etc/teslabox/wireless-country"}},
+		{title: "无线监管域（全局及各 PHY）", name: "iw", args: []string{"reg", "get"}},
+		{title: "无线监管域启动服务", name: "systemctl", args: []string{"show", "teslabox-wireless-region.service", "--property=ActiveState,SubState,Result"}},
 		{title: "内核与系统", name: "uname", args: []string{"-a"}},
 		{title: "启动标识", name: "cat", args: []string{"/proc/sys/kernel/random/boot_id"}},
 		{title: "可用启动日志", name: "journalctl", args: []string{"--no-pager", "--quiet", "--list-boots"}},

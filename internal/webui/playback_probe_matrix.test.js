@@ -9,7 +9,7 @@ const path = require("node:path");
 const script = fs.readFileSync(path.join(__dirname, "assets", "playback-probe-matrix.js"), "utf8");
 
 function matrixWithRequest(request) {
-  const context = vm.createContext({request, encodeURIComponent, URLSearchParams});
+  const context = vm.createContext({TeslaBoxI18n:require('./i18n_test_helper.cjs')('zh-CN'),t:require('./i18n_test_helper.cjs')('zh-CN').t,request, encodeURIComponent, URLSearchParams});
   vm.runInContext(script, context);
   return context;
 }
