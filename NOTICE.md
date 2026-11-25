@@ -3,6 +3,7 @@
 TeslaBox 项目自有代码：Copyright (c) 2026 TecheN1。当前工作树按 [GNU GPL 3.0](LICENSE)（`GPL-3.0-only`）许可。项目此前为闭源，历史实际分发及授权情况仍需核实。
 
 - `experiment/carplay-demo` 的代码及说明提及参考 [xcertplay](https://github.com/shilapi/xcertplay) 和 [LIVI](https://github.com/f-io/LIVI)。历史 RC2 分支的 CarPlay 运行时加载固定 LIVI 提交的代码。Based on LIVI by Lasse Heitgres. 这项署名不代替逐文件版权审查；具体上游版本、复制或改动范围及其他适用声明仍须确认。
+- 实验模块中可见的上游参考包括 iAP2 的 `endpoint`、`link`、`session`、`csm`，`transport/usbmux`，以及 `i2c`、`mfi` 和 `tools/mfi_tool.py`；各文件内保留了更具体的参考注释。对照的 xcertplay 快照为 [`1298fb35`](https://github.com/shilapi/xcertplay/tree/1298fb35e29ee30e7bd849cb0e751b52aa22a13f)，其 GPL 3.0 全文与本仓库根许可证一致。这个对照不能确定开发时所用的确切提交或全部代码来源。
 - 历史 CarPlay 运行时使用的 LIVI 代码固定在 [`a956223`](https://github.com/f-io/LIVI/tree/a9562234429fc9d19d9f9804b6b288f9d435a922)，其上游参考项目和第三方组件说明见该版本的 [CREDITS.md](https://github.com/f-io/LIVI/blob/a9562234429fc9d19d9f9804b6b288f9d435a922/CREDITS.md)。该上游列表不表示 TeslaBox 使用了其中所有组件。
 - 历史 CarPlay 原生运行时的依赖清单引用 [carplayd 固定提交](https://github.com/lvalen91/carplayd/tree/4eb254499aa00f456aea91d00755cf150c7d18a4)中的 `carplay-iap2-core` 和 `carplay-metadata`；相应发行源码材料所附上游根许可证为 Unlicense。历史组件的完整依赖及对应源码状态见[开源审查记录](docs/OPEN_SOURCE_REVIEW.md)。
 - 历史 RC1 CarPlay 运行时使用 Node.js v22.23.1，其版权及第三方组件许可见 [Node.js 许可证](https://github.com/nodejs/node/blob/v22.23.1/LICENSE)。

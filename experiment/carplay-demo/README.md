@@ -5,6 +5,12 @@
 
 参考实现是 [shilapi/xcertplay](https://github.com/shilapi/xcertplay)（Android 车机上的 CarPlay 主机，Kotlin + JNI）。本实验使用 Go 实现协议栈，并把显示层设计为「协议栈 + Web 服务」。参考的上游版本和代码对应范围尚未完成审查，不能仅凭语言不同判断其版权或许可关系；参见[开源审查记录](../../docs/OPEN_SOURCE_REVIEW.md)。
 
+## 上游代码与许可
+
+本实验的 iAP2 端点、链路、会话及 USB 复用实现参考了 xcertplay，I2C 和 MFi 交互也参考了 xcertplay 与 [LIVI](https://github.com/f-io/LIVI)。感谢两个项目及其贡献者。Based on LIVI by Lasse Heitgres.
+
+审查时比较的 xcertplay 快照为 [`1298fb35`](https://github.com/shilapi/xcertplay/tree/1298fb35e29ee30e7bd849cb0e751b52aa22a13f)，该快照的 GPL 3.0 许可全文与本仓库根目录的 [LICENSE](../../LICENSE) 一致；它是用于审查的快照，不代表已确认开发时使用的确切版本。本实验具体参考位置见各源文件注释；LIVI 历史运行时的固定版本和其他第三方声明见 [NOTICE.md](../../NOTICE.md)。
+
 > 关于声音：本项目**不做音频**。手机连车机蓝牙播放声音，板子只负责视频与触摸回传。
 
 ## 为什么单独一个 module
