@@ -62,4 +62,5 @@ go.work.sum
 .vscode/
 .agents/
 .codex/
+.claude/
 .workbuddy/

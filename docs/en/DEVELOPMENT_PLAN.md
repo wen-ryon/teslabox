@@ -1,5 +1,7 @@
 # TeslaBox Development Plan
 
+> Historical planning document: this project is no longer maintained. The plans below are not commitments to deliver features.
+
 > This document records the development roadmap for TeslaBox.
 >
 > This project adopts an **iterative development** model. Each version should be runnable, testable, and releasable, rather than developing all features at once.

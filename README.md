@@ -1,52 +1,32 @@
-# 特斯拉盒子 TeslaBox
+# TeslaBox
 
-一个 all-in-one 的特斯拉边缘设备。
-采用 Go 语言开发，基于 Radxa ROCK 3A。
-支持特斯拉摄像头、OTA升级、AP路由器、无线CarPlay、NAS备份等功能。
+TeslaBox 是面向 Radxa ROCK 3A 的特斯拉辅助设备项目，使用 Go 开发。它通过 USB Gadget 向车机提供 TeslaCam 存储，并提供浏览器中的录像浏览、网络设置和签名更新等功能。
 
-本项目使用了 ChatGPT 的 Codex 基于 5.6 Sol 模型来辅助开发。
+**项目已停止维护。** 此仓库按现状提供，可能存在未修复问题；请自行评估设备、数据和网络安全风险。TeslaBox 与 Tesla、Apple 均无关联。
 
+## 当前范围
 
-An all-in-one Tesla Edge Device for Tesla vehicles.
-Built with Go, powered by Radxa ROCK 3A.
-Support TeslaCam, OTA, AP Router, Wireless CarPlay, NAS Backup and more.
+- 使用外接存储保存 TeslaCam 镜像，通过 ROCK 3A 的 USB OTG 向车机提供虚拟磁盘。
+- 通过快照浏览和播放录像；正在写入的片段不保证可以播放。
+- 提供网络、热点、系统设置和签名程序更新等管理功能。
+- [`experiment/carplay-demo`](experiment/carplay-demo/README.md) 是独立实验模块，成熟度和许可状态见下文，不应当作已完成的正式功能。
 
+## 使用与开发
 
-This project was developed with the assistance of ChatGPT Codex and the GPT-5.6 Sol model.
+目标环境为 ARM64 的 Radxa ROCK 3A 和 Radxa Debian 11。历史安装流程见[首次安装教程](docs/zh-CN/FIRST_INSTALL.md)；安装前请备份数据并自行核实外部下载地址及组件是否仍可用。不要在行车过程中操作设备。
 
----
-
-🌏 Language
-
-- 🇨🇳 [简体中文](docs/zh-CN/README.md)
-- 🇺🇸 [English](docs/en/README.md)
-
-## 第一次安装
-
-首次安装仅支持 **Radxa ROCK 3A + ARM64 + Radxa 官方 Debian 11**。安装时请使用网线联网、保持独立 Type-C 供电，并断开连接车机的 OTG 线。脚本不会自动格式化 U 盘，也不会默认安装 MT7922 测试内核。
-
-在板端执行：
+开发环境需要 Go 1.26.3。运行主模块测试：
 
 ```sh
-curl -fL https://gitee.com/TecheN1/teslabox-releases/raw/master/stable/install.sh -o teslabox-install.sh
-chmod +x teslabox-install.sh
-sudo ./teslabox-install.sh
+go test ./...
 ```
 
-脚本会自动安装 TeslaBox、systemd/udev、Rockchip FFmpeg + MPP/RGA 媒体工具链和签名在线升级组件。全新安装的管理页面初始密码为 `teslabox`，首次登录后必须修改。
+CarPlay 实验模块有独立的 `go.mod`，须在其目录单独测试。构建与部署参考[部署说明](docs/zh-CN/DEPLOYMENT.md)；其他文档从[中文文档索引](docs/zh-CN/README.md)进入。历史版本说明保留在 [release-notes](release-notes/)；它们描述的是发布当时的情况，不代表当前服务仍可用。
 
-安装末尾会先询问是否安装 MT7922 Wi-Fi 测试内核，确认成功后才会第二次询问是否安装 MT7922 蓝牙驱动；两项都默认跳过。蓝牙选项会安装已验证的 `5.10.160teslabox2`、对应 backports、`btusb/btrtl`、固件和 BlueZ，不包含个人蓝牙自动化服务。已有无线网卡能正常使用时请直接回车跳过。详细前提、安装内容、存储初始化和故障处理见 [第一次安装教程](docs/zh-CN/FIRST_INSTALL.md)。
+## 许可证与第三方组件
 
-## 当前开发状态
+本项目自有代码当前按 [GNU GPL 3.0](LICENSE) 许可（SPDX：`GPL-3.0-only`）。仓库历史中曾使用 MIT 许可文本；项目此前为闭源，历史实际分发及授权情况仍需核实。[界面第三方组件声明](internal/webui/assets/THIRD_PARTY_NOTICES.txt)继续适用。
 
-第一项核心功能是 TeslaUSB 模拟模式：ROCK 3A 通过 USB OTG 向 Tesla 暴露虚拟磁盘，外接 128GB U 盘保存磁盘镜像和一致性快照，TF 卡只运行 Debian。
+CarPlay 实验代码引用了 [xcertplay](https://github.com/shilapi/xcertplay) 和 [LIVI](https://github.com/f-io/LIVI) 的实现，两者上游标注 GPL 3.0 系列；具体代码来源、对应源码和必要署名**尚待核对**，根目录许可证的修改不表示第三方分发条件已全部满足。详见[开源审查记录](docs/OPEN_SOURCE_REVIEW.md)。
 
-当前已完成 Go 服务基础框架、数据盘显式初始化、稳定标识自动挂载、TeslaCam backing image、USB Mass Storage Gadget、掉盘保护、reflink 快照、只读挂载、媒体索引原子切换、异常断电遗留资源回收、空间不足降级、失败退避、边录边放验收工具，以及支持 HTTP Range 的播放和下载 API；板端已扫描并播放实际录像，下一步进行 Tesla 持续写入时的并行验收。
-
-- [V0.1 实现与运行说明](docs/zh-CN/V0.1_IMPLEMENTATION.md)
-- [TeslaUSB 模拟模式需求](docs/zh-CN/TESLAUSB_REQUIREMENTS.md)
-- [设置中心第一版需求与交接说明](docs/zh-CN/SETTINGS_CENTER_HANDOFF.md)
-- [Windows 构建与 ROCK 3A 部署说明](docs/zh-CN/DEPLOYMENT.md)
-- [远程播放、视频导出与云端访问开发流程](docs/zh-CN/REMOTE_PLAYBACK_EXPORT_PLAN.md)
-- [签名在线更新与 Gitee 发布说明](docs/zh-CN/ONLINE_UPDATE.md)
-- [第一次安装教程](docs/zh-CN/FIRST_INSTALL.md)
+媒体工具、驱动、固件和其他外部下载组件可能有独立许可证，分发时需保留对应版权、许可和适用的源码材料。汇总见 [NOTICE.md](NOTICE.md)。

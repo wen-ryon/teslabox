@@ -1,11 +1,13 @@
 # TeslaBox 构建与部署
 
+> 文中的 `192.0.2.10` 是保留的文档示例地址，执行命令前请替换为你自己的板子地址。
+
 本文说明如何在 Windows 开发机上构建 Linux ARM64 二进制，并通过 SSH 更新 ROCK 3A。官方服务默认监听 HTTP `80` 端口，因此访问地址不再需要写 `:8080`。
 
 ## 前提
 
 - Windows 已安装 Go 1.26.3 和 OpenSSH 客户端。
-- ROCK 3A 可通过局域网访问，示例地址为 `192.0.2.38`，登录用户为 `rock`。
+- ROCK 3A 可通过局域网访问，示例地址为 `192.0.2.10`，登录用户为 `rock`。
 - 板端已经安装 `teslabox.service`，服务以 `root` 运行，因此可绑定 `80` 端口。
 - 执行升级前确认外接数据盘和 USB OTG 当前状态，实车写入期间不要升级。
 
@@ -18,6 +20,8 @@ sudo ss -ltnp '( sport = :80 )'
 没有输出表示当前没有进程监听该端口。
 
 ## Windows 构建
+
+如使用 `scripts/build-rockchip-media-toolchain.ps1` 在远端构建媒体组件，必须先设置环境变量 `TESLABOX_BUILDER_HOST` 为自己的构建机地址；可用 `TESLABOX_BUILDER_USER` 指定 SSH 用户。未设置地址时脚本会在发起连接前退出。
 
 在 PowerShell 中进入仓库：
 
@@ -42,8 +46,8 @@ Get-FileHash -Algorithm SHA256 .\bin\teslabox-linux-arm64
 先从 Windows 上传新二进制。上传到 `/tmp` 不会覆盖正在运行的版本：
 
 ```powershell
-scp .\bin\teslabox-linux-arm64 rock@192.0.2.38:/tmp/teslabox.new
-ssh rock@192.0.2.38
+scp .\bin\teslabox-linux-arm64 rock@192.0.2.10:/tmp/teslabox.new
+ssh rock@192.0.2.10
 ```
 
 进入板端后，依次执行：
@@ -74,7 +78,7 @@ sudo ss -ltnp '( sport = :80 )'
 
 服务正常时，浏览器可直接打开：
 
-- 局域网：`http://192.0.2.38/`
+- 局域网：`http://192.0.2.10/`
 - mDNS：`http://teslabox.local/`
 - Tailscale：`http://100.86.240.43/`，地址以板端 `tailscale ip -4` 的实际输出为准
 
@@ -89,8 +93,8 @@ rm -f /tmp/teslabox.new
 首次安装时，再把仓库中的服务和配置示例分别上传到 `/tmp`。安装动作保持分步执行，便于确认每一步对系统的影响：
 
 ```powershell
-scp .\deploy\systemd\teslabox.service rock@192.0.2.38:/tmp/teslabox.service
-scp .\configs\teslabox.env.example rock@192.0.2.38:/tmp/teslabox.env.example
+scp .\deploy\systemd\teslabox.service rock@192.0.2.10:/tmp/teslabox.service
+scp .\configs\teslabox.env.example rock@192.0.2.10:/tmp/teslabox.env.example
 ```
 
 板端执行：

@@ -1,10 +1,9 @@
 # carplay-demo
 
-在 Linux 板子（Radxa Rock 3A / RK3568）上用 Go 从零实现 CarPlay 接收端的**协议栈**。
+在 Linux 板子（Radxa Rock 3A / RK3568）上用 Go 实现 CarPlay 接收端的**协议栈**。
 画面最终在**特斯拉车机浏览器**里显示——车机只能通过浏览器访问，没有 HDMI 直出，也不走 DRM/KMS 渲染。
 
-参考实现是 [shilapi/xcertplay](https://github.com/shilapi/xcertplay)（Android 车机上的 CarPlay 主机，Kotlin + JNI，实测可跑通）。
-本项目不是它的移植，而是按同样的协议语义用 Go 重新实现，并把显示层换成「协议栈 + Web 服务」。
+参考实现是 [shilapi/xcertplay](https://github.com/shilapi/xcertplay)（Android 车机上的 CarPlay 主机，Kotlin + JNI）。本实验使用 Go 实现协议栈，并把显示层设计为「协议栈 + Web 服务」。参考的上游版本和代码对应范围尚未完成审查，不能仅凭语言不同判断其版权或许可关系；参见[开源审查记录](../../docs/OPEN_SOURCE_REVIEW.md)。
 
 > 关于声音：本项目**不做音频**。手机连车机蓝牙播放声音，板子只负责视频与触摸回传。
 

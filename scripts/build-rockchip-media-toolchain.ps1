@@ -2,7 +2,10 @@ $ErrorActionPreference = 'Stop'
 
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $BuildContext = Join-Path $RepositoryRoot 'deploy\media-toolchain'
-$RemoteHost = if ($env:TESLABOX_BUILDER_HOST) { $env:TESLABOX_BUILDER_HOST } else { '192.0.2.58' }
+if ([string]::IsNullOrWhiteSpace($env:TESLABOX_BUILDER_HOST)) {
+    throw '请先设置 TESLABOX_BUILDER_HOST，指定媒体组件构建机地址。'
+}
+$RemoteHost = $env:TESLABOX_BUILDER_HOST
 $RemoteUser = if ($env:TESLABOX_BUILDER_USER) { $env:TESLABOX_BUILDER_USER } else { 'root' }
 $RemoteRoot = '/root/teslabox-media-build'
 $ImageName = 'localhost/teslabox-media-builder:debian11-arm64'
