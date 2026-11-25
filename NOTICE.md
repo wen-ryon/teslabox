@@ -1,6 +1,6 @@
 # 版权与第三方项目
 
-TeslaBox 项目自有代码：Copyright (c) 2026 TecheN1。当前工作树按 [GNU GPL 3.0](LICENSE)（`GPL-3.0-only`）许可。仓库历史中的 [MIT 许可文本](LICENSE-MIT-previous)保留供审查；项目此前为闭源，不能仅凭此文本推断存在对外授权。
+TeslaBox 项目自有代码：Copyright (c) 2026 TecheN1。当前工作树按 [GNU GPL 3.0](LICENSE)（`GPL-3.0-only`）许可。项目此前为闭源，历史实际分发及授权情况仍需核实。
 
 - `experiment/carplay-demo` 的代码及说明提及参考 [xcertplay](https://github.com/shilapi/xcertplay) 和 [LIVI](https://github.com/f-io/LIVI)。历史 RC2 分支的 CarPlay 运行时加载固定 LIVI 提交的代码。Based on LIVI by Lasse Heitgres. 这项署名不代替逐文件版权审查；具体上游版本、复制或改动范围及其他适用声明仍须确认。
 - 历史 CarPlay 运行时使用的 LIVI 代码固定在 [`a956223`](https://github.com/f-io/LIVI/tree/a9562234429fc9d19d9f9804b6b288f9d435a922)，其上游参考项目和第三方组件说明见该版本的 [CREDITS.md](https://github.com/f-io/LIVI/blob/a9562234429fc9d19d9f9804b6b288f9d435a922/CREDITS.md)。该上游列表不表示 TeslaBox 使用了其中所有组件。
